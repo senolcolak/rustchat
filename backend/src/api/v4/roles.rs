@@ -31,6 +31,9 @@ fn get_hardcoded_role(name: &str) -> Option<Role> {
                 "join_public_teams".to_string(),
                 "view_team".to_string(),
                 "edit_self".to_string(),
+                "use_slash_commands".to_string(),
+                "view_members".to_string(),
+                "create_team".to_string(),
             ],
             scheme_managed: true,
         }),
@@ -62,6 +65,8 @@ fn get_hardcoded_role(name: &str) -> Option<Role> {
                 "edit_post".to_string(),
                 "delete_post".to_string(),
                 "use_slash_commands".to_string(),
+                "view_members".to_string(),
+                "read_public_channel".to_string(),
             ],
             scheme_managed: true,
         }),
@@ -70,7 +75,18 @@ fn get_hardcoded_role(name: &str) -> Option<Role> {
             name: "system_admin".to_string(),
             display_name: "System Admin".to_string(),
             description: "Default System Admin Role".to_string(),
-            permissions: vec!["manage_system".to_string(), "assign_system_admin_role".to_string()],
+            permissions: vec![
+                "manage_system".to_string(),
+                "assign_system_admin_role".to_string(),
+                "manage_roles".to_string(),
+                "manage_team".to_string(),
+                "manage_public_channel_properties".to_string(),
+                "manage_private_channel_properties".to_string(),
+                "manage_public_channel_members".to_string(),
+                "manage_private_channel_members".to_string(),
+                "delete_public_channel".to_string(),
+                "delete_private_channel".to_string(),
+            ],
             scheme_managed: true,
         }),
         "team_admin" => Some(Role {
@@ -107,6 +123,7 @@ fn get_hardcoded_role(name: &str) -> Option<Role> {
                 "manage_channel".to_string(),
                 "manage_public_channel_members".to_string(),
                 "manage_private_channel_members".to_string(),
+                "view_members".to_string(),
             ],
             scheme_managed: true,
         }),
@@ -125,6 +142,8 @@ async fn get_roles(
         get_hardcoded_role("team_user").unwrap(),
         get_hardcoded_role("channel_user").unwrap(),
         get_hardcoded_role("system_admin").unwrap(),
+        get_hardcoded_role("team_admin").unwrap(),
+        get_hardcoded_role("channel_admin").unwrap(),
     ];
     Ok(Json(roles))
 }
@@ -136,9 +155,14 @@ async fn get_roles_by_names(
     Json(names): Json<Vec<String>>,
 ) -> ApiResult<Json<Vec<Role>>> {
     let mut roles = Vec::new();
-    for name in names {
-        if let Some(role) = get_hardcoded_role(&name) {
-            roles.push(role);
+    for full_name in names {
+        for name in full_name.split_whitespace() {
+            if let Some(role) = get_hardcoded_role(name) {
+                // Avoid duplicates if multiple input names contain the same role
+                if !roles.iter().any(|r: &Role| r.name == role.name) {
+                    roles.push(role);
+                }
+            }
         }
     }
     Ok(Json(roles))

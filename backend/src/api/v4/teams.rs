@@ -623,11 +623,11 @@ async fn get_team_member_me(
     Ok(Json(mm::TeamMember {
         team_id: encode_mm_id(member.team_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "team_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_team_role(&member.role),
         delete_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "team_admin",
     }))
 }
 
@@ -778,11 +778,11 @@ fn map_team_member(member: TeamMember) -> mm::TeamMember {
     mm::TeamMember {
         team_id: encode_mm_id(member.team_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "team_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_team_role(&member.role),
         delete_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "team_admin",
     }
 }
 

@@ -993,11 +993,11 @@ async fn my_team_members(
         .map(|m| mm::TeamMember {
             team_id: encode_mm_id(m.team_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "team_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_team_role(&m.role),
             delete_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "team_admin",
         })
         .collect();
 
@@ -1020,11 +1020,11 @@ async fn get_team_members_for_user(
         .map(|m| mm::TeamMember {
             team_id: encode_mm_id(m.team_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "team_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_team_role(&m.role),
             delete_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "team_admin",
         })
         .collect();
 
@@ -1143,7 +1143,7 @@ async fn my_team_channel_members(
         .map(|m| mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "channel_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -1151,7 +1151,7 @@ async fn my_team_channel_members(
             last_update_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
         })
         .collect();
 
@@ -2589,7 +2589,7 @@ async fn get_user_channel_members(
         .map(|m| mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "channel_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -2597,7 +2597,7 @@ async fn get_user_channel_members(
             last_update_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
         })
         .collect();
 

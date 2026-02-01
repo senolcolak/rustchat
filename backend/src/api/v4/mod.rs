@@ -85,6 +85,8 @@ pub fn router() -> Router<AppState> {
         .merge(terms_of_service::router())
         .merge(dialogs::router())
         .merge(uploads::router())
+        .merge(threads::router())
+        .merge(image::router())
         .route("/websocket", axum::routing::get(websocket::handle_websocket))
         .fallback(not_implemented)
         .layer(SetResponseHeaderLayer::overriding(

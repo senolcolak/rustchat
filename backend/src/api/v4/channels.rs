@@ -323,7 +323,7 @@ async fn get_channel_members(
         .map(|m| mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "channel_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -331,7 +331,7 @@ async fn get_channel_members(
             last_update_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "channel_admin",
         })
         .collect();
 
@@ -357,7 +357,7 @@ async fn get_channel_member_me(
     Ok(Json(mm::ChannelMember {
         channel_id: encode_mm_id(member.channel_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "channel_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
         last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
         msg_count: 0,
         mention_count: 0,
@@ -365,7 +365,7 @@ async fn get_channel_member_me(
         last_update_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
 }
 
@@ -955,7 +955,7 @@ async fn add_channel_member(
     Ok(Json(mm::ChannelMember {
         channel_id: encode_mm_id(member.channel_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "channel_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
         last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
         msg_count: 0,
         mention_count: 0,
@@ -963,7 +963,7 @@ async fn add_channel_member(
         last_update_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
 }
 
@@ -1064,7 +1064,7 @@ async fn get_channel_member_by_id(
     Ok(Json(mm::ChannelMember {
         channel_id: encode_mm_id(member.channel_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "channel_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
         last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
         msg_count: 0,
         mention_count: 0,
@@ -1072,7 +1072,7 @@ async fn get_channel_member_by_id(
         last_update_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
 }
 
@@ -1119,7 +1119,7 @@ async fn get_channel_members_by_ids(
         .map(|m| mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "channel_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -1127,7 +1127,7 @@ async fn get_channel_members_by_ids(
             last_update_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "channel_admin",
         })
         .collect();
 

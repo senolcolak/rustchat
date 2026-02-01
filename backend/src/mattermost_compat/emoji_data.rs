@@ -377,8 +377,6 @@ pub static SYSTEM_EMOJIS: LazyLock<HashMap<&'static str, &'static str>> = LazyLo
     m.insert("fire", "1f525");
     m.insert("tada", "1f389");
     m.insert("party_popper", "1f389");
-    m.insert("eyes", "1f440");
-    m.insert("thinking", "1f914");
     m.insert("rocket", "1f680");
     m.insert("star", "2b50");
     m.insert("star2", "1f31f");
@@ -411,21 +409,22 @@ pub static REVERSE_SYSTEM_EMOJIS: LazyLock<HashMap<String, &'static str>> = Lazy
                 m.insert(emoji_char.to_string(), name);
             }
         }
-        
-        // Also handle common literal mappings for critical emojis
-        m.insert("👍".to_string(), "thumbsup");
-        m.insert("👎".to_string(), "thumbsdown");
-        m.insert("😄".to_string(), "smile");
-        m.insert("😊".to_string(), "blush");
-        m.insert("❤️".to_string(), "heart");
-        m.insert("🔥".to_string(), "fire");
-        m.insert("✅".to_string(), "white_check_mark");
-        m.insert("❌".to_string(), "x");
-        m.insert("🚀".to_string(), "rocket");
-        m.insert("👀".to_string(), "eyes");
-        m.insert("🎉".to_string(), "tada");
-        m.insert("🤔".to_string(), "thinking");
     }
+    
+    // Also handle common literal mappings for critical emojis
+    m.insert("👍".to_string(), "thumbsup");
+    m.insert("👎".to_string(), "thumbsdown");
+    m.insert("😄".to_string(), "smile");
+    m.insert("😊".to_string(), "blush");
+    m.insert("❤️".to_string(), "heart");
+    m.insert("🔥".to_string(), "fire");
+    m.insert("✅".to_string(), "white_check_mark");
+    m.insert("❌".to_string(), "x");
+    m.insert("🚀".to_string(), "rocket");
+    m.insert("👀".to_string(), "eyes");
+    m.insert("🎉".to_string(), "tada");
+    m.insert("🤔".to_string(), "thinking");
+    
     m
 });
 

@@ -35,21 +35,21 @@ impl From<User> for mm::User {
     }
 }
 
-fn map_system_role(role: &str) -> String {
+pub(crate) fn map_system_role(role: &str) -> String {
     match role {
-        "system_admin" => "system_admin system_user".to_string(),
+        "admin" | "system_admin" => "system_admin system_user".to_string(),
         _ => "system_user".to_string(),
     }
 }
 
-fn map_team_role(role: &str) -> String {
+pub(crate) fn map_team_role(role: &str) -> String {
     match role {
         "admin" | "team_admin" => "team_admin team_user".to_string(),
         _ => "team_user".to_string(),
     }
 }
 
-fn map_channel_role(role: &str) -> String {
+pub(crate) fn map_channel_role(role: &str) -> String {
     match role {
         "admin" | "channel_admin" => "channel_admin channel_user".to_string(),
         _ => "channel_user".to_string(),
