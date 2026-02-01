@@ -89,7 +89,6 @@ pub fn router() -> Router<AppState> {
         .route("/users/{user_id}/channels/{channel_id}/typing", post(user_typing))
         .route("/users/me/patch", put(patch_me))
         .route("/users/{user_id}/image", get(get_user_image).post(upload_user_image))
-        .route("/roles/names", post(get_roles_by_names))
         .route("/users/notifications", get(get_notifications).put(update_notifications))
         .route("/users/me/sessions", get(get_sessions))
         .route("/users/logout", get(logout).post(logout))
@@ -1915,76 +1914,7 @@ async fn patch_me(
     Ok(Json(user.into()))
 }
 
-async fn get_roles_by_names(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<Vec<mm::Role>>> {
-    let names: Vec<String> = parse_body(&headers, &body, "Invalid roles body")?;
-    let permissions = fetch_role_permissions(&state, &names).await.unwrap_or_default();
 
-    let roles = names
-        .into_iter()
-        .map(|name| {
-            let mapped = permissions
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| vec!["create_post".to_string(), "read_channel".to_string()]);
-
-            mm::Role {
-                id: encode_mm_id(Uuid::new_v4()),
-                display_name: name.clone(),
-                description: "".to_string(),
-                permissions: mapped,
-                scheme_managed: false,
-                name,
-            }
-        })
-        .collect();
-
-    Ok(Json(roles))
-}
-
-async fn fetch_role_permissions(
-    state: &AppState,
-    roles: &[String],
-) -> Result<std::collections::HashMap<String, Vec<String>>, sqlx::Error> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT role, permission_id FROM role_permissions WHERE role = ANY($1)",
-    )
-    .bind(roles)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (role, permission_id) in rows {
-        map.entry(role)
-            .or_default()
-            .push(map_permission_id(&permission_id));
-    }
-
-    for permissions in map.values_mut() {
-        if !permissions.iter().any(|p| p == "read_channel") {
-            permissions.push("read_channel".to_string());
-        }
-        if !permissions.iter().any(|p| p == "read_post") {
-            permissions.push("read_post".to_string());
-        }
-    }
-
-    Ok(map)
-}
-
-fn map_permission_id(permission_id: &str) -> String {
-    match permission_id {
-        "post.create" => "create_post",
-        "post.edit_own" => "edit_post",
-        "post.delete_own" => "delete_post",
-        "channel.create" => "create_channel",
-        _ => permission_id,
-    }
-    .to_string()
-}
 
 #[derive(Deserialize)]
 struct UsersQuery {
