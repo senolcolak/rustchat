@@ -13,6 +13,7 @@ const testSuccess = ref(false);
 
 const config = ref<CallsPluginConfig>({
     enabled: false,
+    turn_server_enabled: true,
     turn_server_url: '',
     turn_server_username: '',
     turn_server_credential: '',
@@ -107,10 +108,20 @@ function removeStunServer(index: number) {
 
             <!-- TURN Server Settings -->
             <div>
-                <h4 class="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center">
-                    <Server class="w-4 h-4 mr-2 text-blue-500" />
-                    TURN Server Configuration
-                </h4>
+                <div class="flex items-center justify-between mb-3">
+                    <h4 class="text-sm font-semibold text-gray-900 dark:text-white flex items-center">
+                        <Server class="w-4 h-4 mr-2 text-blue-500" />
+                        TURN Server Configuration
+                    </h4>
+                    <label class="flex items-center space-x-2">
+                        <input
+                            type="checkbox"
+                            v-model="config.turn_server_enabled"
+                            class="w-4 h-4 text-indigo-600 rounded"
+                        />
+                        <span class="text-sm text-gray-700 dark:text-gray-300">Enable TURN Server</span>
+                    </label>
+                </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">

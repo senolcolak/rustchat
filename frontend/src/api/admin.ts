@@ -175,6 +175,7 @@ export interface MiroTalkConfig {
 // Calls Plugin Configuration
 export interface CallsPluginConfig {
     enabled: boolean;
+    turn_server_enabled: boolean;
     turn_server_url: string;
     turn_server_username: string;
     turn_server_credential: string;
