@@ -615,14 +615,12 @@ async fn update_calls_plugin_config(
         cred.clone()
     } else {
         // Fetch existing credential from database
-        let existing: Option<(serde_json::Value,)> = sqlx::query_as(
+        let existing: Option<(String,)> = sqlx::query_as(
             "SELECT plugins->'calls'->>'turn_server_credential' FROM server_config WHERE id = 'default'"
         )
         .fetch_optional(&state.db)
-        .await?
-        .and_then(|(json,)| json.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| state.config.calls.turn_server_credential.clone());
-        existing
+        .await?;
+        existing.map(|(s,)| s).unwrap_or_else(|| state.config.calls.turn_server_credential.clone())
     };
 
     // Build JSON object for calls config
