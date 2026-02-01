@@ -427,8 +427,16 @@ pub async fn execute_command_internal(
     // 2. Handle built-in commands
     match trigger {
         "call" => {
-            // Check if Calls Plugin is enabled
-            if !state.config.calls.enabled {
+            // Check if Calls Plugin is enabled (from database or env)
+            let calls_enabled = sqlx::query_scalar::<_, bool>(
+                "SELECT COALESCE(plugins->'calls'->>'enabled', $1)::boolean FROM server_config WHERE id = 'default'"
+            )
+            .bind(state.config.calls.enabled.to_string())
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(state.config.calls.enabled);
+            
+            if !calls_enabled {
                 return Ok(CommandResponse {
                     response_type: "ephemeral".to_string(),
                     text: "Calls are not enabled".to_string(),
