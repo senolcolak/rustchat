@@ -213,13 +213,14 @@ function removeStunServer(index: number) {
                 </h4>
                 <div class="space-y-2">
                     <div
-                        v-for="(server, index) in config.stun_servers"
+                        v-for="(_, index) in config.stun_servers"
                         :key="index"
                         class="flex items-center gap-2"
                     >
                         <input
                             type="text"
                             v-model="config.stun_servers[index]"
+                            :placeholder="'STUN Server ' + (index + 1)"
                             class="flex-1 px-3 py-2 border rounded-lg dark:bg-slate-900 dark:border-gray-600 dark:text-white"
                         />
                         <button
