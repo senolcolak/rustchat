@@ -178,8 +178,7 @@ export interface CallsPluginConfig {
     turn_server_url: string;
     turn_server_username: string;
     turn_server_credential: string;
-    udp_port_min: number;
-    udp_port_max: number;
+    udp_port: number;
     tcp_port: number;
     ice_host_override: string;
     stun_servers: string[];

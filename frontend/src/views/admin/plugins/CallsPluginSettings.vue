@@ -16,8 +16,7 @@ const config = ref<CallsPluginConfig>({
     turn_server_url: '',
     turn_server_username: '',
     turn_server_credential: '',
-    udp_port_min: 10000,
-    udp_port_max: 20000,
+    udp_port: 8443,
     tcp_port: 8443,
     ice_host_override: '',
     stun_servers: ['stun:stun.l.google.com:19302']
@@ -165,26 +164,14 @@ function removeStunServer(index: number) {
             <!-- Port Configuration -->
             <div>
                 <h4 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">Port Configuration</h4>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            UDP Port Range (Min)
+                            UDP Port
                         </label>
                         <input
                             type="number"
-                            v-model.number="config.udp_port_min"
-                            min="1"
-                            max="65535"
-                            class="w-full px-3 py-2 border rounded-lg dark:bg-slate-900 dark:border-gray-600 dark:text-white"
-                        />
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            UDP Port Range (Max)
-                        </label>
-                        <input
-                            type="number"
-                            v-model.number="config.udp_port_max"
+                            v-model.number="config.udp_port"
                             min="1"
                             max="65535"
                             class="w-full px-3 py-2 border rounded-lg dark:bg-slate-900 dark:border-gray-600 dark:text-white"
