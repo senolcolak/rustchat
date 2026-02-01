@@ -1,5 +1,6 @@
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, State, Query},
+    http::header,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -57,23 +58,27 @@ async fn upload_file(
         } else if name == "client_ids" {
              let txt = field.text().await.unwrap_or_default();
              client_ids.push(txt);
-        } else if name == "files" {
-            let filename = field.file_name().unwrap_or("unknown").to_string();
-            let content_type = field
-                .content_type()
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("Read error: {}", e)))?
-                .to_vec();
+        } else if name == "files" || name == "file" || name == "attachment" || name.is_empty() {
+            // Accept multiple field names: "files", "file", "attachment", or unnamed
+            // React Native network client may use different field names
+            if field.file_name().is_some() || field.content_type().is_some() {
+                let filename = field.file_name().unwrap_or("unknown").to_string();
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Read error: {}", e)))?
+                    .to_vec();
 
-            pending_files.push(PendingFile {
-                filename,
-                content_type,
-                data,
-            });
+                pending_files.push(PendingFile {
+                    filename,
+                    content_type,
+                    data,
+                });
+            }
         }
     }
 
@@ -156,6 +161,8 @@ async fn upload_file(
         file_infos.push(mm::FileInfo {
             id: encode_mm_id(file_id),
             user_id: encode_mm_id(auth.user_id),
+            post_id: "".to_string(),
+            channel_id: channel_id.map(encode_mm_id).unwrap_or_default(),
             create_at: Utc::now().timestamp_millis(),
             update_at: Utc::now().timestamp_millis(),
             delete_at: 0,
@@ -166,6 +173,7 @@ async fn upload_file(
             width: width.unwrap_or(0),
             height: height.unwrap_or(0),
             has_preview_image: has_thumbnail,
+            mini_preview: None,
         });
     }
 
@@ -188,14 +196,16 @@ async fn get_file(
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
-    // In a real MM server, this returns the raw bytes.
-    // For now, we redirect to S3 presigned URL or proxy it.
-    // Mobile client usually handles redirects.
+    let data = state.s3_client.download(&file.key).await?;
 
-    let url = state.s3_client.presigned_download_url(&file.key, 3600).await?;
-
-    // Redirect to S3
-    Ok(axum::response::Redirect::temporary(&url))
+    Ok((
+        [
+            (header::CONTENT_TYPE, file.mime_type.to_string()),
+            (header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", file.name)),
+            (header::CACHE_CONTROL, "max-age=2592000, private".to_string()),
+        ],
+        data,
+    ))
 }
 
 /// GET /files/{file_id}/info - Get file metadata
@@ -218,6 +228,8 @@ async fn get_file_info(
     Ok(Json(mm::FileInfo {
         id: encode_mm_id(file.id),
         user_id: encode_mm_id(file.uploader_id),
+        post_id: file.post_id.map(encode_mm_id).unwrap_or_default(),
+        channel_id: file.channel_id.map(encode_mm_id).unwrap_or_default(),
         create_at: file.created_at.timestamp_millis(),
         update_at: file.created_at.timestamp_millis(),
         delete_at: 0,
@@ -228,6 +240,7 @@ async fn get_file_info(
         width: file.width.unwrap_or(0),
         height: file.height.unwrap_or(0),
         has_preview_image: file.has_thumbnail,
+        mini_preview: None,
     }))
 }
 
@@ -246,8 +259,15 @@ async fn get_thumbnail(
 
     if file.has_thumbnail {
         if let Some(key) = file.thumbnail_key {
-            let url = state.s3_client.presigned_download_url(&key, 3600).await?;
-            return Ok(axum::response::Redirect::temporary(&url));
+            let data = state.s3_client.download(&key).await?;
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, "image/webp".to_string()),
+                    (header::CONTENT_DISPOSITION, format!("inline; filename=\"thumb_{}\"", file.name)),
+                    (header::CACHE_CONTROL, "max-age=2592000, private".to_string()),
+                ],
+                data,
+            ).into_response());
         }
     }
 
@@ -272,14 +292,21 @@ async fn get_preview(
     if file.mime_type.starts_with("image/") {
         if file.has_thumbnail {
             if let Some(key) = file.thumbnail_key.as_ref() {
-                let url = state.s3_client.presigned_download_url(key, 3600).await?;
-                return Ok(axum::response::Redirect::temporary(&url));
+                let data = state.s3_client.download(key).await?;
+                return Ok((
+                    [
+                        (header::CONTENT_TYPE, "image/webp".to_string()),
+                        (header::CONTENT_DISPOSITION, format!("inline; filename=\"preview_{}\"", file.name)),
+                        (header::CACHE_CONTROL, "max-age=2592000, private".to_string()),
+                    ],
+                    data,
+                ).into_response());
             }
         }
     }
 
     let url = state.s3_client.presigned_download_url(&file.key, 3600).await?;
-    Ok(axum::response::Redirect::temporary(&url))
+    Ok(axum::response::Redirect::temporary(&url).into_response())
 }
 
 async fn get_link(

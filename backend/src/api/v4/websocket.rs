@@ -335,8 +335,12 @@ fn map_envelope_to_mm(env: &WsEnvelope, seq: i64) -> Option<mm::WebSocketMessage
                 let mm_reaction = mm::Reaction {
                     user_id: encode_mm_id(reaction.user_id),
                     post_id: encode_mm_id(reaction.post_id),
-                    emoji_name: reaction.emoji_name,
+                    emoji_name: crate::mattermost_compat::emoji_data::get_short_name_for_emoji(&reaction.emoji_name),
                     create_at: reaction.created_at.timestamp_millis(),
+                    update_at: reaction.created_at.timestamp_millis(),
+                    delete_at: 0,
+                    channel_id: env.channel_id.map(encode_mm_id).unwrap_or_default(),
+                    remote_id: "".to_string(),
                 };
                 let reaction_json = serde_json::to_string(&mm_reaction).unwrap_or_default();
                 Some(mm::WebSocketMessage {
@@ -356,8 +360,12 @@ fn map_envelope_to_mm(env: &WsEnvelope, seq: i64) -> Option<mm::WebSocketMessage
                 let mm_reaction = mm::Reaction {
                     user_id: encode_mm_id(reaction.user_id),
                     post_id: encode_mm_id(reaction.post_id),
-                    emoji_name: reaction.emoji_name,
+                    emoji_name: crate::mattermost_compat::emoji_data::get_short_name_for_emoji(&reaction.emoji_name),
                     create_at: reaction.created_at.timestamp_millis(),
+                    update_at: reaction.created_at.timestamp_millis(),
+                    delete_at: 0,
+                    channel_id: env.channel_id.map(encode_mm_id).unwrap_or_default(),
+                    remote_id: "".to_string(),
                 };
                 let reaction_json = serde_json::to_string(&mm_reaction).unwrap_or_default();
                 Some(mm::WebSocketMessage {
@@ -389,8 +397,53 @@ fn map_envelope_to_mm(env: &WsEnvelope, seq: i64) -> Option<mm::WebSocketMessage
                  None
              }
         }
+        "channel_viewed" => {
+            let channel_id = extract_mm_id(env.data.get("channel_id"));
+            Some(mm::WebSocketMessage {
+                seq: Some(seq),
+                event: "channel_viewed".to_string(),
+                data: json!({ "channel_id": channel_id }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "member_added" => {
+            let user_id = extract_mm_id(env.data.get("user_id"));
+            let channel_id = extract_mm_id(env.data.get("channel_id"));
+            let team_id = extract_mm_id(env.data.get("team_id"));
+            Some(mm::WebSocketMessage {
+                seq: Some(seq),
+                event: "user_added".to_string(),
+                data: json!({
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "team_id": team_id,
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "member_removed" => {
+            let user_id = extract_mm_id(env.data.get("user_id"));
+            let remover_id = extract_mm_id(env.data.get("remover_id"));
+            Some(mm::WebSocketMessage {
+                seq: Some(seq),
+                event: "user_removed".to_string(),
+                data: json!({
+                    "user_id": user_id,
+                    "remover_id": remover_id,
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
         _ => None,
     }
+}
+
+fn extract_mm_id(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(|v| v.as_str())
+        .and_then(parse_mm_or_uuid)
+        .map(encode_mm_id)
+        .unwrap_or_default()
 }
 
 async fn handle_upstream_message(

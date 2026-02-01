@@ -1,10 +1,10 @@
 use super::{id::encode_mm_id, models as mm};
 use crate::models::{
     channel::{Channel, ChannelMember, ChannelType},
+    file::FileInfo,
     post::{Post, PostResponse},
     team::{Team, TeamMember},
     user::User,
-    file::FileInfo,
 };
 use serde_json::json;
 
@@ -22,7 +22,7 @@ impl From<User> for mm::User {
             email: user.email,
             email_verified: true,
             auth_service: "".to_string(),
-            roles: map_role(&user.role),
+            roles: map_system_role(&user.role),
             locale: "en".to_string(),
             notify_props: json!({ "email": "true", "push": "mention" }),
             props: json!({}),
@@ -35,10 +35,24 @@ impl From<User> for mm::User {
     }
 }
 
-fn map_role(role: &str) -> String {
+pub(crate) fn map_system_role(role: &str) -> String {
     match role {
-        "system_admin" => "system_admin system_user".to_string(),
+        "admin" | "system_admin" => "system_admin system_user".to_string(),
         _ => "system_user".to_string(),
+    }
+}
+
+pub(crate) fn map_team_role(role: &str) -> String {
+    match role {
+        "admin" | "team_admin" => "team_admin team_user".to_string(),
+        _ => "team_user".to_string(),
+    }
+}
+
+pub(crate) fn map_channel_role(role: &str) -> String {
+    match role {
+        "admin" | "channel_admin" => "channel_admin channel_user".to_string(),
+        _ => "channel_user".to_string(),
     }
 }
 
@@ -148,7 +162,7 @@ impl From<TeamMember> for mm::TeamMember {
         mm::TeamMember {
             team_id: encode_mm_id(m.team_id),
             user_id: encode_mm_id(m.user_id),
-            roles: map_role(&m.role),
+            roles: map_team_role(&m.role),
             delete_at: 0,
             scheme_guest: false,
             scheme_user: true,
@@ -162,7 +176,7 @@ impl From<ChannelMember> for mm::ChannelMember {
         mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: map_role(&m.role),
+            roles: map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -180,6 +194,8 @@ impl From<FileInfo> for mm::FileInfo {
         mm::FileInfo {
             id: encode_mm_id(f.id),
             user_id: encode_mm_id(f.uploader_id),
+            post_id: f.post_id.map(encode_mm_id).unwrap_or_default(),
+            channel_id: f.channel_id.map(encode_mm_id).unwrap_or_default(),
             create_at: f.created_at.timestamp_millis(),
             update_at: f.created_at.timestamp_millis(),
             delete_at: 0,
@@ -190,6 +206,7 @@ impl From<FileInfo> for mm::FileInfo {
             width: f.width.unwrap_or(0),
             height: f.height.unwrap_or(0),
             has_preview_image: f.has_thumbnail,
+            mini_preview: None,
         }
     }
 }
@@ -223,7 +240,6 @@ mod tests {
             last_login_at: None,
             created_at: now,
             updated_at: now,
-            password_updated_at: now,
         };
 
         let mm_u: mm::User = u.into();

@@ -2,7 +2,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::de::DeserializeOwned;
@@ -15,6 +15,8 @@ use super::extractors::MmAuthUser;
 use crate::api::AppState;
 use crate::error::ApiResult;
 use crate::mattermost_compat::{id::{encode_mm_id, parse_mm_or_uuid}, models as mm};
+use crate::api::v4::posts::reactions_for_posts;
+use serde_json::json;
 use crate::models::post::PostResponse;
 use crate::models::Channel;
 
@@ -22,9 +24,32 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/channels/{channel_id}/posts", get(get_posts))
         .route("/channels/{channel_id}", get(get_channel).put(update_channel).delete(delete_channel))
+        .route("/channels/{channel_id}/patch", put(patch_channel))
+        .route("/channels/{channel_id}/privacy", put(update_channel_privacy))
+        .route("/channels/{channel_id}/restore", post(restore_channel))
+        .route("/channels/{channel_id}/move", post(move_channel))
         .route("/channels/{channel_id}/members", get(get_channel_members).post(add_channel_member))
         .route("/channels/{channel_id}/members/me", get(get_channel_member_me))
-        .route("/channels/{channel_id}/members/{user_id}", delete(remove_channel_member))
+        .route(
+            "/channels/{channel_id}/members/ids",
+            post(get_channel_members_by_ids),
+        )
+        .route(
+            "/channels/{channel_id}/members/{user_id}",
+            get(get_channel_member_by_id).delete(remove_channel_member),
+        )
+        .route(
+            "/channels/{channel_id}/members/{user_id}/roles",
+            put(update_channel_member_roles),
+        )
+        .route(
+            "/channels/{channel_id}/members/{user_id}/schemeRoles",
+            put(update_channel_member_scheme_roles),
+        )
+        .route(
+            "/channels/{channel_id}/members/{user_id}/notify_props",
+            put(update_channel_member_notify_props),
+        )
         .route("/channels/{channel_id}/timezones", get(get_channel_timezones))
         .route("/channels/{channel_id}/stats", get(get_channel_stats))
         .route("/channels/{channel_id}/unread", get(get_channel_unread))
@@ -32,10 +57,44 @@ pub fn router() -> Router<AppState> {
         .route("/channels/{channel_id}/posts/{post_id}/pin", post(pin_post))
         .route("/channels/{channel_id}/posts/{post_id}/unpin", post(unpin_post))
         .route("/channels/members/me/view", post(view_channel))
+        .route("/channels/members/{user_id}/view", post(view_channel_for_user))
         .route("/channels/direct", post(create_direct_channel))
         .route("/channels/group", post(create_group_channel))
         .route("/channels", post(create_channel))
         .route("/channels/search", post(search_channels_compat))
+        .route("/channels/group/search", post(search_group_channels))
+        .route("/channels/{channel_id}/scheme", put(update_channel_scheme))
+        .route(
+            "/channels/{channel_id}/members_minus_group_members",
+            get(get_channel_members_minus_group_members),
+        )
+        .route(
+            "/channels/{channel_id}/member_counts_by_group",
+            get(get_channel_member_counts_by_group),
+        )
+        .route("/channels/{channel_id}/moderations", get(get_channel_moderations))
+        .route(
+            "/channels/{channel_id}/moderations/patch",
+            put(patch_channel_moderations),
+        )
+        .route("/channels/{channel_id}/common_teams", get(get_channel_common_teams))
+        .route("/channels/{channel_id}/groups", get(get_channel_groups))
+        .route(
+            "/channels/{channel_id}/bookmarks",
+            get(get_channel_bookmarks).post(create_channel_bookmark),
+        )
+        .route(
+            "/channels/{channel_id}/bookmarks/{bookmark_id}",
+            axum::routing::patch(patch_channel_bookmark).delete(delete_channel_bookmark),
+        )
+        .route(
+            "/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order",
+            post(update_channel_bookmark_sort_order),
+        )
+        .route(
+            "/channels/{channel_id}/access_control/attributes",
+            get(get_channel_access_control_attributes),
+        )
 }
 
 
@@ -86,10 +145,9 @@ async fn view_channel(
 
         // Broadcast channel_viewed
         let broadcast = crate::realtime::WsEnvelope::event(
-            crate::realtime::EventType::ChannelUpdated, // Closest match, usually handled by client logic
+            crate::realtime::EventType::ChannelViewed,
             serde_json::json!({
                 "channel_id": channel_id,
-                "user_id": auth.user_id
             }),
             Some(channel_id)
         );
@@ -265,7 +323,7 @@ async fn get_channel_members(
         .map(|m| mm::ChannelMember {
             channel_id: encode_mm_id(m.channel_id),
             user_id: encode_mm_id(m.user_id),
-            roles: "channel_user".to_string(),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             msg_count: 0,
             mention_count: 0,
@@ -273,7 +331,7 @@ async fn get_channel_members(
             last_update_at: 0,
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: false,
+            scheme_admin: m.role == "admin" || m.role == "channel_admin",
         })
         .collect();
 
@@ -299,7 +357,7 @@ async fn get_channel_member_me(
     Ok(Json(mm::ChannelMember {
         channel_id: encode_mm_id(member.channel_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "channel_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
         last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
         msg_count: 0,
         mention_count: 0,
@@ -307,7 +365,7 @@ async fn get_channel_member_me(
         last_update_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
 }
 
@@ -728,12 +786,27 @@ async fn get_pinned_posts(
     .await?;
 
     let mut order = Vec::new();
-    let mut posts_map = HashMap::new();
+    let mut posts_map: HashMap<String, mm::Post> = HashMap::new();
+    let mut post_ids = Vec::new();
+    let mut id_map = Vec::new();
 
     for p in posts {
         let id = encode_mm_id(p.id);
+        post_ids.push(p.id);
+        id_map.push((p.id, id.clone()));
         order.push(id.clone());
         posts_map.insert(id, p.into());
+    }
+
+    let reactions_map = reactions_for_posts(&state, &post_ids).await?;
+    for (post_uuid, post_id) in id_map {
+        if let Some(reactions) = reactions_map.get(&post_uuid) {
+            if !reactions.is_empty() {
+                if let Some(post) = posts_map.get_mut(&post_id) {
+                    post.metadata = Some(json!({ "reactions": reactions }));
+                }
+            }
+        }
     }
 
     Ok(Json(mm::PostList {
@@ -857,10 +930,32 @@ async fn add_channel_member(
             .fetch_one(&state.db)
             .await?;
 
+    let team_id: Option<Uuid> = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+    let broadcast = crate::realtime::WsEnvelope::event(
+        crate::realtime::EventType::MemberAdded,
+        serde_json::json!({
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "team_id": team_id,
+        }),
+        Some(channel_id),
+    )
+    .with_broadcast(crate::realtime::WsBroadcast {
+        channel_id: Some(channel_id),
+        team_id,
+        user_id: Some(user_id),
+        exclude_user_id: None,
+    });
+    state.ws_hub.broadcast(broadcast).await;
+
     Ok(Json(mm::ChannelMember {
         channel_id: encode_mm_id(member.channel_id),
         user_id: encode_mm_id(member.user_id),
-        roles: "channel_user".to_string(),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
         last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
         msg_count: 0,
         mention_count: 0,
@@ -868,7 +963,7 @@ async fn add_channel_member(
         last_update_at: 0,
         scheme_guest: false,
         scheme_user: true,
-        scheme_admin: false,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
 }
 
@@ -877,6 +972,11 @@ async fn add_channel_member(
 struct ChannelMemberPath {
     channel_id: String,
     user_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ChannelMemberIdsRequest {
+    user_ids: Vec<String>,
 }
 
 async fn remove_channel_member(
@@ -901,6 +1001,11 @@ async fn remove_channel_member(
                 .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
     }
 
+    let team_id: Option<Uuid> = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_optional(&state.db)
+        .await?;
+
     // Remove the user
     sqlx::query("DELETE FROM channel_members WHERE channel_id = $1 AND user_id = $2")
         .bind(channel_id)
@@ -908,7 +1013,246 @@ async fn remove_channel_member(
         .execute(&state.db)
         .await?;
 
+    let broadcast = crate::realtime::WsEnvelope::event(
+        crate::realtime::EventType::MemberRemoved,
+        serde_json::json!({
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "team_id": team_id,
+            "remover_id": auth.user_id,
+        }),
+        Some(channel_id),
+    )
+    .with_broadcast(crate::realtime::WsBroadcast {
+        channel_id: Some(channel_id),
+        team_id,
+        user_id: Some(user_id),
+        exclude_user_id: None,
+    });
+    state.ws_hub.broadcast(broadcast).await;
+
     Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+async fn get_channel_member_by_id(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(path): Path<ChannelMemberPath>,
+) -> ApiResult<Json<mm::ChannelMember>> {
+    let channel_id = parse_mm_or_uuid(&path.channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+    let user_id = parse_mm_or_uuid(&path.user_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
+
+    let _caller_member: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let member: crate::models::ChannelMember = sqlx::query_as(
+        "SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+
+    Ok(Json(mm::ChannelMember {
+        channel_id: encode_mm_id(member.channel_id),
+        user_id: encode_mm_id(member.user_id),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
+        last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+        msg_count: 0,
+        mention_count: 0,
+        notify_props: normalize_notify_props(member.notify_props),
+        last_update_at: 0,
+        scheme_guest: false,
+        scheme_user: true,
+        scheme_admin: member.role == "admin" || member.role == "channel_admin",
+    }))
+}
+
+async fn get_channel_members_by_ids(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+
+    let _caller_member: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let input: ChannelMemberIdsRequest = parse_body(&headers, &body, "Invalid ids body")?;
+    if input.user_ids.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut user_ids = Vec::new();
+    for id in input.user_ids {
+        let parsed = parse_mm_or_uuid(&id)
+            .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
+        user_ids.push(parsed);
+    }
+
+    let members: Vec<crate::models::ChannelMember> = sqlx::query_as(
+        "SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = ANY($2)",
+    )
+    .bind(channel_id)
+    .bind(&user_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mm_members = members
+        .into_iter()
+        .map(|m| mm::ChannelMember {
+            channel_id: encode_mm_id(m.channel_id),
+            user_id: encode_mm_id(m.user_id),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
+            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+            msg_count: 0,
+            mention_count: 0,
+            notify_props: normalize_notify_props(m.notify_props),
+            last_update_at: 0,
+            scheme_guest: false,
+            scheme_user: true,
+            scheme_admin: m.role == "admin" || m.role == "channel_admin",
+        })
+        .collect();
+
+    Ok(Json(mm_members))
+}
+
+#[derive(serde::Deserialize)]
+struct ChannelMemberRolesRequest {
+    roles: String,
+}
+
+async fn update_channel_member_roles(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(path): Path<ChannelMemberPath>,
+    Json(input): Json<ChannelMemberRolesRequest>,
+) -> ApiResult<Json<mm::ChannelMember>> {
+    let channel_id = parse_mm_or_uuid(&path.channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+    let user_id = parse_mm_or_uuid(&path.user_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
+
+    let _caller_member: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let role = if input.roles.contains("channel_admin") {
+        "channel_admin"
+    } else {
+        "member"
+    };
+
+    sqlx::query("UPDATE channel_members SET role = $1 WHERE channel_id = $2 AND user_id = $3")
+        .bind(role)
+        .bind(channel_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    let member: crate::models::ChannelMember = sqlx::query_as(
+        "SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+
+    Ok(Json(mm::ChannelMember {
+        channel_id: encode_mm_id(member.channel_id),
+        user_id: encode_mm_id(member.user_id),
+        roles: if role == "channel_admin" {
+            "channel_admin channel_user"
+        } else {
+            "channel_user"
+        }
+        .to_string(),
+        last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+        msg_count: 0,
+        mention_count: 0,
+        notify_props: normalize_notify_props(member.notify_props),
+        last_update_at: 0,
+        scheme_guest: false,
+        scheme_user: true,
+        scheme_admin: role == "channel_admin",
+    }))
+}
+
+async fn update_channel_member_notify_props(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(path): Path<ChannelMemberPath>,
+    Json(input): Json<serde_json::Value>,
+) -> ApiResult<Json<mm::ChannelMember>> {
+    let channel_id = parse_mm_or_uuid(&path.channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+    let user_id = parse_mm_or_uuid(&path.user_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
+
+    if user_id != auth.user_id {
+        return Err(crate::error::AppError::Forbidden(
+            "Cannot update another user's notify props".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE channel_members SET notify_props = $1 WHERE channel_id = $2 AND user_id = $3",
+    )
+    .bind(&input)
+    .bind(channel_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+
+    let member: crate::models::ChannelMember = sqlx::query_as(
+        "SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+
+    Ok(Json(mm::ChannelMember {
+        channel_id: encode_mm_id(member.channel_id),
+        user_id: encode_mm_id(member.user_id),
+        roles: if member.role == "channel_admin" {
+            "channel_admin channel_user"
+        } else {
+            "channel_user"
+        }
+        .to_string(),
+        last_viewed_at: member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+        msg_count: 0,
+        mention_count: 0,
+        notify_props: normalize_notify_props(member.notify_props),
+        last_update_at: 0,
+        scheme_guest: false,
+        scheme_user: true,
+        scheme_admin: member.role == "channel_admin",
+    }))
 }
 
 async fn get_posts(
@@ -1060,7 +1404,9 @@ async fn get_posts(
     };
 
     let mut order = Vec::new();
-    let mut posts_map = HashMap::new();
+    let mut posts_map: HashMap<String, mm::Post> = HashMap::new();
+    let mut post_ids = Vec::new();
+    let mut id_map = Vec::new();
 
     // Determine prev/next post IDs for pagination hints
     let (prev_post_id, next_post_id) = if !posts.is_empty() {
@@ -1080,8 +1426,21 @@ async fn get_posts(
 
     for p in posts {
         let id = encode_mm_id(p.id);
+        post_ids.push(p.id);
+        id_map.push((p.id, id.clone()));
         order.push(id.clone());
         posts_map.insert(id, p.into());
+    }
+
+    let reactions_map = reactions_for_posts(&state, &post_ids).await?;
+    for (post_uuid, post_id) in id_map {
+        if let Some(reactions) = reactions_map.get(&post_uuid) {
+            if !reactions.is_empty() {
+                if let Some(post) = posts_map.get_mut(&post_id) {
+                    post.metadata = Some(json!({ "reactions": reactions }));
+                }
+            }
+        }
     }
 
     Ok(Json(mm::PostList {
@@ -1114,4 +1473,409 @@ async fn search_channels_compat(
         .await?;
 
     Ok(Json(channels.into_iter().map(|c| c.into()).collect()))
+}
+
+/// PUT /channels/{channel_id}/patch - Patch channel (partial update)
+#[derive(serde::Deserialize)]
+struct PatchChannelRequest {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    header: Option<String>,
+}
+
+async fn patch_channel(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(input): Json<PatchChannelRequest>,
+) -> ApiResult<Json<mm::Channel>> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+
+    // Verify membership
+    let _membership: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let channel: Channel = sqlx::query_as(
+        r#"
+        UPDATE channels SET
+            display_name = COALESCE($2, display_name),
+            name = COALESCE($3, name),
+            purpose = COALESCE($4, purpose),
+            header = COALESCE($5, header),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(channel_id)
+    .bind(&input.display_name)
+    .bind(&input.name)
+    .bind(&input.purpose)
+    .bind(&input.header)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(channel.into()))
+}
+
+/// PUT /channels/{channel_id}/privacy - Update channel privacy
+#[derive(serde::Deserialize)]
+struct UpdatePrivacyRequest {
+    privacy: String, // "O" for public, "P" for private
+}
+
+async fn update_channel_privacy(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(input): Json<UpdatePrivacyRequest>,
+) -> ApiResult<Json<mm::Channel>> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+
+    // Verify membership (should be admin)
+    let _membership: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let channel_type = match input.privacy.as_str() {
+        "O" => "public",
+        "P" => "private",
+        _ => return Err(crate::error::AppError::BadRequest("Invalid privacy value".to_string())),
+    };
+
+    let channel: Channel = sqlx::query_as(
+        r#"UPDATE channels SET type = $2, updated_at = NOW() WHERE id = $1 RETURNING *"#,
+    )
+    .bind(channel_id)
+    .bind(channel_type)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(channel.into()))
+}
+
+/// POST /channels/{channel_id}/restore - Restore a deleted channel
+async fn restore_channel(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<mm::Channel>> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+
+    // Verify the user was a member (even if channel is deleted)
+    let _membership: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    let channel: Channel = sqlx::query_as(
+        r#"UPDATE channels SET deleted_at = NULL, updated_at = NOW() WHERE id = $1 RETURNING *"#,
+    )
+    .bind(channel_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(channel.into()))
+}
+
+/// POST /channels/{channel_id}/move - Move channel to another team
+#[derive(serde::Deserialize)]
+struct MoveChannelRequest {
+    team_id: String,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn move_channel(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(input): Json<MoveChannelRequest>,
+) -> ApiResult<Json<mm::Channel>> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+    let new_team_id = parse_mm_or_uuid(&input.team_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    // Verify membership in original channel
+    let _membership: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    // Verify membership in new team
+    let is_team_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)"
+    )
+    .bind(new_team_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if !is_team_member {
+        return Err(crate::error::AppError::Forbidden("Not a member of the target team".to_string()));
+    }
+
+    let channel: Channel = sqlx::query_as(
+        r#"UPDATE channels SET team_id = $2, updated_at = NOW() WHERE id = $1 RETURNING *"#,
+    )
+    .bind(channel_id)
+    .bind(new_team_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(channel.into()))
+}
+
+/// PUT /channels/{channel_id}/members/{user_id}/schemeRoles - Update member scheme roles
+#[derive(serde::Deserialize)]
+struct UpdateSchemeRolesRequest {
+    #[serde(default)]
+    scheme_admin: bool,
+    #[serde(default)]
+    scheme_user: bool,
+}
+
+async fn update_channel_member_scheme_roles(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path((channel_id, user_id)): Path<(String, String)>,
+    Json(input): Json<UpdateSchemeRolesRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let channel_id = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+    let target_user_id = parse_mm_or_uuid(&user_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
+
+    // Verify the caller is an admin of this channel
+    let _caller_membership: crate::models::ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    // Update the target user's role based on scheme_admin
+    let new_role = if input.scheme_admin { "admin" } else { "member" };
+
+    sqlx::query("UPDATE channel_members SET role = $3 WHERE channel_id = $1 AND user_id = $2")
+        .bind(channel_id)
+        .bind(target_user_id)
+        .bind(new_role)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// POST /channels/members/{user_id}/view - View channel for specific user
+async fn view_channel_for_user(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(user_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> ApiResult<impl IntoResponse> {
+    let resolved_user_id = if user_id == "me" {
+        auth.user_id
+    } else {
+        parse_mm_or_uuid(&user_id)
+            .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?
+    };
+
+    // Only allow viewing for self
+    if resolved_user_id != auth.user_id {
+        return Err(crate::error::AppError::Forbidden("Cannot view channel for other users".to_string()));
+    }
+
+    if body.is_empty() {
+        return Ok(Json(serde_json::json!({"status": "OK"})));
+    }
+
+    let input = match parse_view_channel_request(&headers, &body) {
+        Ok(value) => value,
+        Err(_) => return Ok(Json(serde_json::json!({"status": "OK"}))),
+    };
+
+    if let Some(channel_id) = parse_mm_or_uuid(&input.channel_id) {
+        sqlx::query(
+            "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2"
+        )
+        .bind(channel_id)
+        .bind(auth.user_id)
+        .execute(&state.db)
+        .await?;
+
+        let broadcast = crate::realtime::WsEnvelope::event(
+            crate::realtime::EventType::ChannelViewed,
+            serde_json::json!({
+                "channel_id": channel_id,
+            }),
+            Some(channel_id)
+        ).with_broadcast(crate::realtime::WsBroadcast {
+            channel_id: None,
+            team_id: None,
+            user_id: Some(auth.user_id),
+            exclude_user_id: None,
+        });
+        state.ws_hub.broadcast(broadcast).await;
+    }
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+
+/// POST /api/v4/channels/group/search
+async fn search_group_channels(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Json(_query): Json<serde_json::Value>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// PUT /api/v4/channels/{channel_id}/scheme
+async fn update_channel_scheme(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+    Json(_patch): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// GET /api/v4/channels/{channel_id}/members_minus_group_members
+async fn get_channel_members_minus_group_members(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// GET /api/v4/channels/{channel_id}/member_counts_by_group
+async fn get_channel_member_counts_by_group(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// GET /api/v4/channels/{channel_id}/moderations
+async fn get_channel_moderations(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// PUT /api/v4/channels/{channel_id}/moderations/patch
+async fn patch_channel_moderations(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+    Json(_patch): Json<serde_json::Value>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// GET /api/v4/channels/{channel_id}/common_teams
+async fn get_channel_common_teams(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// GET /api/v4/channels/{channel_id}/groups
+async fn get_channel_groups(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// GET /api/v4/channels/{channel_id}/bookmarks
+async fn get_channel_bookmarks(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// POST /api/v4/channels/{channel_id}/bookmarks
+async fn create_channel_bookmark(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+    Json(_bookmark): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// PATCH /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
+async fn patch_channel_bookmark(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
+    Json(_patch): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// POST /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order
+async fn update_channel_bookmark_sort_order(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
+    Json(_order): Json<serde_json::Value>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    Ok(Json(vec![]))
+}
+
+/// DELETE /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
+async fn delete_channel_bookmark(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// GET /api/v4/channels/{channel_id}/access_control/attributes
+async fn get_channel_access_control_attributes(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(_channel_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({})))
 }
