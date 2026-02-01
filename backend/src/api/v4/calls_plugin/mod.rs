@@ -24,7 +24,7 @@ mod state;
 mod turn;
 
 use state::{CallState, CallStateManager, Participant};
-use turn::TurnCredentialGenerator;
+use turn::{TurnCredentialGenerator, TurnServerConfig};
 
 /// Build the calls plugin router
 pub fn router() -> Router<AppState> {
@@ -117,14 +117,6 @@ async fn get_config(
     State(state): State<AppState>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<ConfigResponse>> {
-    // Generate TURN credentials using REST API style
-    let turn_generator = TurnCredentialGenerator::new(
-        state.config.calls.turn_secret.clone(),
-        state.config.calls.turn_ttl_minutes,
-    );
-    
-    let credentials = turn_generator.generate_credentials(&auth.user_id.to_string());
-    
     // Build ice servers list
     let mut ice_servers = vec![];
     
@@ -137,13 +129,27 @@ async fn get_config(
         });
     }
     
-    // Add TURN servers with credentials
-    for turn_url in &state.config.calls.turn_servers {
-        ice_servers.push(IceServer {
-            urls: vec![turn_url.clone()],
-            username: Some(credentials.username.clone()),
-            credential: Some(credentials.credential.clone()),
-        });
+    // Add TURN server if enabled
+    if state.config.calls.turn_server_enabled {
+        // Configure TURN server with static credentials
+        let turn_config = TurnServerConfig {
+            enabled: true,
+            url: state.config.calls.turn_server_url.clone(),
+            username: state.config.calls.turn_server_username.clone(),
+            credential: state.config.calls.turn_server_credential.clone(),
+        };
+        
+        let turn_generator = TurnCredentialGenerator::with_static_credentials(turn_config);
+        let credentials = turn_generator.generate_credentials(&auth.user_id.to_string());
+        
+        // Add TURN server with credentials
+        if let Some(turn_url) = turn_generator.get_turn_url() {
+            ice_servers.push(IceServer {
+                urls: vec![turn_url],
+                username: Some(credentials.username.clone()),
+                credential: Some(credentials.credential.clone()),
+            });
+        }
     }
     
     Ok(Json(ConfigResponse { ice_servers }))

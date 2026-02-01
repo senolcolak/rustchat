@@ -92,21 +92,29 @@ pub struct CallsConfig {
     #[serde(default)]
     pub ice_host_override: Option<String>,
 
-    /// TURN server shared secret for credential generation
-    #[serde(default)]
-    pub turn_secret: String,
+    /// TURN server enabled (from TURN_SERVER_ENABLED env var)
+    #[serde(default = "default_turn_server_enabled")]
+    pub turn_server_enabled: bool,
 
-    /// TURN credentials TTL in minutes
+    /// TURN server URL (from TURN_SERVER_URL env var)
+    #[serde(default = "default_turn_server_url")]
+    pub turn_server_url: String,
+
+    /// TURN server username (from TURN_SERVER_USERNAME env var)
+    #[serde(default)]
+    pub turn_server_username: String,
+
+    /// TURN server credential (from TURN_SERVER_CREDENTIAL env var)
+    #[serde(default)]
+    pub turn_server_credential: String,
+
+    /// TURN credentials TTL in minutes (for REST API style generation)
     #[serde(default = "default_turn_ttl")]
     pub turn_ttl_minutes: u64,
 
     /// STUN server URLs
     #[serde(default = "default_stun_servers")]
     pub stun_servers: Vec<String>,
-
-    /// TURN server URLs
-    #[serde(default = "default_turn_servers")]
-    pub turn_servers: Vec<String>,
 }
 
 impl Default for CallsConfig {
@@ -116,10 +124,12 @@ impl Default for CallsConfig {
             udp_port: default_calls_udp_port(),
             tcp_port: default_calls_tcp_port(),
             ice_host_override: None,
-            turn_secret: String::new(),
+            turn_server_enabled: default_turn_server_enabled(),
+            turn_server_url: default_turn_server_url(),
+            turn_server_username: String::new(),
+            turn_server_credential: String::new(),
             turn_ttl_minutes: default_turn_ttl(),
             stun_servers: default_stun_servers(),
-            turn_servers: default_turn_servers(),
         }
     }
 }
@@ -136,16 +146,20 @@ fn default_calls_tcp_port() -> u16 {
     8443
 }
 
+fn default_turn_server_enabled() -> bool {
+    true // Enabled by default
+}
+
+fn default_turn_server_url() -> String {
+    "turn:turn.kubedo.io:3478".to_string()
+}
+
 fn default_turn_ttl() -> u64 {
     1440 // 24 hours
 }
 
 fn default_stun_servers() -> Vec<String> {
     vec!["stun:stun.l.google.com:19302".to_string()]
-}
-
-fn default_turn_servers() -> Vec<String> {
-    vec![] // Empty by default, must be configured
 }
 
 fn default_host() -> String {
@@ -179,14 +193,24 @@ fn default_s3_region() -> String {
 impl Config {
     /// Load configuration from environment variables
     pub fn load() -> anyhow::Result<Self> {
-        let config = config::Config::builder()
-            .add_source(
-                config::Environment::default()
-                    .prefix("RUSTCHAT")
-                    .try_parsing(true),
-            )
-            .build()?;
+        let mut builder = config::Config::builder();
 
+        // Load RUSTCHAT_ prefixed variables
+        builder = builder.add_source(
+            config::Environment::default()
+                .prefix("RUSTCHAT")
+                .try_parsing(true),
+        );
+
+        // Load TURN_SERVER_ prefixed variables (for backwards compatibility with Mattermost-style env vars)
+        builder = builder.add_source(
+            config::Environment::default()
+                .prefix("TURN_SERVER")
+                .try_parsing(true)
+                .separator("_"),
+        );
+
+        let config = builder.build()?;
         let settings: Config = config.try_deserialize()?;
         Ok(settings)
     }
