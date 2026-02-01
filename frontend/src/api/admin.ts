@@ -285,8 +285,8 @@ export const adminApi = {
     testMiroTalkConnection: () => api.post('/admin/integrations/mirotalk/test'),
 
     // Calls Plugin
-    getCallsPluginConfig: () => api.get<CallsPluginConfig>('/api/v1/admin/plugins/calls'),
-    updateCallsPluginConfig: (config: CallsPluginConfig) => api.put<CallsPluginConfig>('/api/v1/admin/plugins/calls', config),
+    getCallsPluginConfig: () => api.get<CallsPluginConfig>('/admin/plugins/calls'),
+    updateCallsPluginConfig: (config: CallsPluginConfig) => api.put<CallsPluginConfig>('/admin/plugins/calls', config),
 };
 
 export default adminApi;
