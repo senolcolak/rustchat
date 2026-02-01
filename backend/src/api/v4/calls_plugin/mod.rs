@@ -22,9 +22,11 @@ use crate::realtime::WsEnvelope;
 
 mod state;
 mod turn;
+mod sfu;
 
 use state::{CallState, CallStateManager, Participant};
 use turn::{TurnCredentialGenerator, TurnServerConfig};
+use sfu::signaling::{SignalingMessage, parse_websocket_message, serialize_websocket_message};
 
 /// Build the calls plugin router
 pub fn router() -> Router<AppState> {
