@@ -67,6 +67,85 @@ pub struct Config {
     /// Initial admin password
     #[serde(default)]
     pub admin_password: Option<String>,
+
+    /// Calls plugin configuration
+    #[serde(default)]
+    pub calls: CallsConfig,
+}
+
+/// Calls plugin configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallsConfig {
+    /// Enable Calls plugin
+    #[serde(default = "default_calls_enabled")]
+    pub enabled: bool,
+
+    /// RTC UDP port for WebRTC
+    #[serde(default = "default_calls_udp_port")]
+    pub udp_port: u16,
+
+    /// RTC TCP port for WebRTC (if needed for firewall traversal)
+    #[serde(default = "default_calls_tcp_port")]
+    pub tcp_port: u16,
+
+    /// ICE host override (public IP or hostname for NAT)
+    #[serde(default)]
+    pub ice_host_override: Option<String>,
+
+    /// TURN server shared secret for credential generation
+    #[serde(default)]
+    pub turn_secret: String,
+
+    /// TURN credentials TTL in minutes
+    #[serde(default = "default_turn_ttl")]
+    pub turn_ttl_minutes: u64,
+
+    /// STUN server URLs
+    #[serde(default = "default_stun_servers")]
+    pub stun_servers: Vec<String>,
+
+    /// TURN server URLs
+    #[serde(default = "default_turn_servers")]
+    pub turn_servers: Vec<String>,
+}
+
+impl Default for CallsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_calls_enabled(),
+            udp_port: default_calls_udp_port(),
+            tcp_port: default_calls_tcp_port(),
+            ice_host_override: None,
+            turn_secret: String::new(),
+            turn_ttl_minutes: default_turn_ttl(),
+            stun_servers: default_stun_servers(),
+            turn_servers: default_turn_servers(),
+        }
+    }
+}
+
+fn default_calls_enabled() -> bool {
+    false // Disabled by default
+}
+
+fn default_calls_udp_port() -> u16 {
+    8443
+}
+
+fn default_calls_tcp_port() -> u16 {
+    8443
+}
+
+fn default_turn_ttl() -> u64 {
+    1440 // 24 hours
+}
+
+fn default_stun_servers() -> Vec<String> {
+    vec!["stun:stun.l.google.com:19302".to_string()]
+}
+
+fn default_turn_servers() -> Vec<String> {
+    vec![] // Empty by default, must be configured
 }
 
 fn default_host() -> String {

@@ -1,0 +1,688 @@
+//! Mattermost Calls Plugin API
+//! 
+//! Implements the com.mattermost.calls plugin interface for Mattermost Mobile compatibility.
+//! Routes are mounted under /plugins/com.mattermost.calls/
+
+use axum::{
+    extract::{Path, State},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use uuid::Uuid;
+use chrono::Utc;
+
+use crate::api::AppState;
+use crate::api::v4::extractors::MmAuthUser;
+use crate::error::{ApiResult, AppError};
+use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
+use crate::realtime::WsEnvelope;
+
+mod state;
+mod turn;
+
+use state::{CallState, CallStateManager, Participant};
+use turn::TurnCredentialGenerator;
+
+/// Build the calls plugin router
+pub fn router() -> Router<AppState> {
+    Router::new()
+        // Plugin info endpoints
+        .route("/plugins/com.mattermost.calls/version", get(get_version))
+        .route("/plugins/com.mattermost.calls/config", get(get_config))
+        // Call management endpoints
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/start", post(start_call))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/join", post(join_call))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/leave", post(leave_call))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}", get(get_call_state))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/react", post(send_reaction))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/screen-share", post(toggle_screen_share))
+        // Mute/unmute endpoints
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/mute", post(mute_user))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/unmute", post(unmute_user))
+        // Raise/lower hand endpoints
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/raise-hand", post(raise_hand))
+        .route("/plugins/com.mattermost.calls/calls/{channel_id}/lower-hand", post(lower_hand))
+}
+
+// ============ Response Models ============
+
+#[derive(Debug, Serialize)]
+struct VersionResponse {
+    version: String,
+    rtcd: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigResponse {
+    ice_servers: Vec<IceServer>,
+}
+
+#[derive(Debug, Serialize)]
+struct IceServer {
+    urls: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StartCallResponse {
+    id: String,
+    channel_id: String,
+    start_at: i64,
+    owner_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CallStateResponse {
+    id: String,
+    channel_id: String,
+    start_at: i64,
+    owner_id: String,
+    participants: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_sharing_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusResponse {
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReactionRequest {
+    emoji: String,
+}
+
+// ============ Handlers ============
+
+/// GET /plugins/com.mattermost.calls/version
+/// Returns plugin version info
+async fn get_version(State(state): State<AppState>) -> ApiResult<Json<VersionResponse>> {
+    Ok(Json(VersionResponse {
+        version: "0.28.0".to_string(),
+        rtcd: false, // We're using integrated mode
+    }))
+}
+
+/// GET /plugins/com.mattermost.calls/config
+/// Returns ICE server configuration with TURN credentials
+async fn get_config(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+) -> ApiResult<Json<ConfigResponse>> {
+    // Generate TURN credentials using REST API style
+    let turn_generator = TurnCredentialGenerator::new(
+        state.config.calls.turn_secret.clone(),
+        state.config.calls.turn_ttl_minutes,
+    );
+    
+    let credentials = turn_generator.generate_credentials(&auth.user_id.to_string());
+    
+    // Build ice servers list
+    let mut ice_servers = vec![];
+    
+    // Add STUN servers if configured
+    for stun_url in &state.config.calls.stun_servers {
+        ice_servers.push(IceServer {
+            urls: vec![stun_url.clone()],
+            username: None,
+            credential: None,
+        });
+    }
+    
+    // Add TURN servers with credentials
+    for turn_url in &state.config.calls.turn_servers {
+        ice_servers.push(IceServer {
+            urls: vec![turn_url.clone()],
+            username: Some(credentials.username.clone()),
+            credential: Some(credentials.credential.clone()),
+        });
+    }
+    
+    Ok(Json(ConfigResponse { ice_servers }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/start
+/// Starts a new call in a channel
+async fn start_call(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StartCallResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Check channel permissions
+    check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+    
+    // Get or initialize call state manager
+    let call_manager = get_call_manager(&state);
+    
+    // Check if call already exists
+    if let Some(call) = call_manager.get_call_by_channel(&channel_uuid).await {
+        return Ok(Json(StartCallResponse {
+            id: encode_mm_id(call.call_id),
+            channel_id: channel_id.clone(),
+            start_at: call.started_at,
+            owner_id: encode_mm_id(call.owner_id),
+        }));
+    }
+    
+    // Create new call
+    let call_id = Uuid::new_v4();
+    let now = Utc::now().timestamp_millis();
+    
+    let call = CallState {
+        call_id,
+        channel_id: channel_uuid,
+        owner_id: auth.user_id,
+        started_at: now,
+        participants: HashMap::new(),
+        screen_sharer: None,
+        thread_id: None,
+    };
+    
+    call_manager.add_call(call.clone()).await;
+    
+    // Add owner as first participant (muted by default)
+    let participant = Participant {
+        user_id: auth.user_id,
+        session_id: Uuid::new_v4(),
+        joined_at: now,
+        muted: true,
+        screen_sharing: false,
+        hand_raised: false,
+    };
+    
+    call_manager.add_participant(call_id, participant.clone()).await;
+    
+    // Broadcast call_start event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_call_start",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "call_id": encode_mm_id(call_id),
+            "start_at": now.to_string(),
+            "owner_id": encode_mm_id(auth.user_id),
+        }),
+        Some(auth.user_id), // Exclude sender
+    ).await;
+    
+    // Broadcast user_joined event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_joined",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "session_id": encode_mm_id(participant.session_id),
+            "muted": true,
+            "raised_hand": false,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StartCallResponse {
+        id: encode_mm_id(call_id),
+        channel_id: channel_id.clone(),
+        start_at: now,
+        owner_id: encode_mm_id(auth.user_id),
+    }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/join
+/// Join an existing call
+async fn join_call(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Check channel permissions
+    check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find active call in channel
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Check if user already in call
+    if call_manager.get_participant(call.call_id, auth.user_id).await.is_some() {
+        return Ok(Json(StatusResponse { status: "OK".to_string() }));
+    }
+    
+    // Add participant
+    let now = Utc::now().timestamp_millis();
+    let participant = Participant {
+        user_id: auth.user_id,
+        session_id: Uuid::new_v4(),
+        joined_at: now,
+        muted: true,
+        screen_sharing: false,
+        hand_raised: false,
+    };
+    
+    call_manager.add_participant(call.call_id, participant.clone()).await;
+    
+    // Broadcast user_joined event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_joined",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "session_id": encode_mm_id(participant.session_id),
+            "muted": true,
+            "raised_hand": false,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/leave
+/// Leave a call
+async fn leave_call(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Remove participant
+    call_manager.remove_participant(call.call_id, auth.user_id).await;
+    
+    // Broadcast user_left event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_left",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+        }),
+        None,
+    ).await;
+    
+    // If no participants left, end the call
+    let participants = call_manager.get_participants(call.call_id).await;
+    if participants.is_empty() {
+        call_manager.remove_call(call.call_id).await;
+        
+        // Broadcast call_end event
+        broadcast_call_event(
+            &state,
+            "custom_com.mattermost.calls_call_end",
+            &channel_uuid,
+            serde_json::json!({
+                "channel_id": channel_id,
+                "call_id": encode_mm_id(call.call_id),
+            }),
+            None,
+        ).await;
+    }
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// GET /plugins/com.mattermost.calls/calls/{channel_id}
+/// Get current call state
+async fn get_call_state(
+    State(state): State<AppState>,
+    _auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<CallStateResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    let participants: Vec<String> = call_manager
+        .get_participants(call.call_id)
+        .await
+        .iter()
+        .map(|p| encode_mm_id(p.user_id))
+        .collect();
+    
+    Ok(Json(CallStateResponse {
+        id: encode_mm_id(call.call_id),
+        channel_id: channel_id.clone(),
+        start_at: call.started_at,
+        owner_id: encode_mm_id(call.owner_id),
+        participants,
+        screen_sharing_id: call.screen_sharer.map(encode_mm_id),
+        thread_id: call.thread_id.map(encode_mm_id),
+    }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/react
+/// Send a reaction during call
+async fn send_reaction(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(payload): Json<ReactionRequest>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Broadcast reaction event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_reacted",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "emoji": payload.emoji,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/screen-share
+/// Toggle screen sharing
+async fn toggle_screen_share(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Check if user is in call
+    let participant = call_manager
+        .get_participant(call.call_id, auth.user_id)
+        .await
+        .ok_or_else(|| AppError::Forbidden("You are not in this call".to_string()))?;
+    
+    // Toggle screen sharing
+    let is_sharing = !participant.screen_sharing;
+    call_manager.set_screen_sharing(call.call_id, auth.user_id, is_sharing).await;
+    
+    // Update global screen sharer
+    if is_sharing {
+        call_manager.set_screen_sharer(call.call_id, Some(auth.user_id)).await;
+    } else if call.screen_sharer == Some(auth.user_id) {
+        call_manager.set_screen_sharer(call.call_id, None).await;
+    }
+    
+    // Broadcast event
+    let event_name = if is_sharing {
+        "custom_com.mattermost.calls_screen_on"
+    } else {
+        "custom_com.mattermost.calls_screen_off"
+    };
+    
+    broadcast_call_event(
+        &state,
+        event_name,
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/mute
+/// Mute self
+async fn mute_user(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Set muted
+    call_manager.set_muted(call.call_id, auth.user_id, true).await;
+    
+    // Broadcast user_muted event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_muted",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "muted": true,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/unmute
+/// Unmute self
+async fn unmute_user(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Set unmuted
+    call_manager.set_muted(call.call_id, auth.user_id, false).await;
+    
+    // Broadcast user_unmuted event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_unmuted",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "muted": false,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/raise-hand
+/// Raise hand
+async fn raise_hand(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Set hand raised
+    call_manager.set_hand_raised(call.call_id, auth.user_id, true).await;
+    
+    // Broadcast raise_hand event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_raise_hand",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "raised": true,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/lower-hand
+/// Lower hand
+async fn lower_hand(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = parse_mm_or_uuid(&channel_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Find call
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    
+    // Set hand lowered
+    call_manager.set_hand_raised(call.call_id, auth.user_id, false).await;
+    
+    // Broadcast lower_hand event
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_lower_hand",
+        &channel_uuid,
+        serde_json::json!({
+            "channel_id": channel_id,
+            "user_id": encode_mm_id(auth.user_id),
+            "raised": false,
+        }),
+        None,
+    ).await;
+    
+    Ok(Json(StatusResponse { status: "OK".to_string() }))
+}
+
+// ============ Helper Functions ============
+
+/// Get or initialize the call manager from app state
+fn get_call_manager(state: &AppState) -> &CallStateManager {
+    // For now, we'll use a static instance. In production, this should be in AppState
+    // This is a simplified version - in the real implementation, CallStateManager should be in AppState
+    lazy_static::lazy_static! {
+        static ref MANAGER: CallStateManager = CallStateManager::new();
+    }
+    &MANAGER
+}
+
+/// Check if user has permission to access channel
+async fn check_channel_permission(
+    state: &AppState,
+    user_id: Uuid,
+    channel_id: Uuid,
+) -> ApiResult<()> {
+    // Check if user is channel member
+    let member: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM channel_members WHERE channel_id = $1 AND user_id = $2"
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+    
+    if member.is_none() {
+        return Err(AppError::Forbidden("You are not a member of this channel".to_string()));
+    }
+    
+    Ok(())
+}
+
+/// Broadcast a call-related WebSocket event
+async fn broadcast_call_event(
+    state: &AppState,
+    event_name: &str,
+    channel_id: &Uuid,
+    data: Value,
+    exclude_user_id: Option<Uuid>,
+) {
+    let envelope = WsEnvelope {
+        msg_type: "event".to_string(),
+        event: event_name.to_string(),
+        seq: None,
+        channel_id: Some(*channel_id),
+        data,
+        broadcast: Some(crate::realtime::WsBroadcast {
+            channel_id: Some(*channel_id),
+            team_id: None,
+            user_id: None,
+            exclude_user_id,
+        }),
+    };
+    
+    state.ws_hub.broadcast(envelope).await;
+}

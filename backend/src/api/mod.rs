@@ -34,6 +34,7 @@ use tower_http::{
 
 use crate::realtime::WsHub;
 use crate::storage::S3Client;
+use crate::config::Config;
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -46,6 +47,7 @@ pub struct AppState {
     pub s3_client: S3Client,
     pub http_client: reqwest::Client,
     pub start_time: std::time::Instant,
+    pub config: Config,
 }
 
 /// Build the main application router
@@ -56,6 +58,7 @@ pub fn router(
     jwt_expiry_hours: u64,
     ws_hub: Arc<WsHub>,
     s3_client: S3Client,
+    config: Config,
 ) -> Router {
     let state = AppState {
         db,
@@ -66,6 +69,7 @@ pub fn router(
         s3_client,
         http_client: reqwest::Client::new(),
         start_time: std::time::Instant::now(),
+        config,
     };
 
     // CORS configuration
