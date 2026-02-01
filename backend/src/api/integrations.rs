@@ -428,18 +428,26 @@ pub async fn execute_command_internal(
     match trigger {
         "call" => {
             // Check if Calls Plugin is enabled (from database or env)
-            let calls_enabled = sqlx::query_scalar::<_, bool>(
-                "SELECT COALESCE(plugins->'calls'->>'enabled', $1)::boolean FROM server_config WHERE id = 'default'"
+            let db_value: Option<String> = sqlx::query_scalar(
+                "SELECT plugins->'calls'->>'enabled' FROM server_config WHERE id = 'default'"
             )
-            .bind(state.config.calls.enabled.to_string())
             .fetch_optional(&state.db)
-            .await?
-            .unwrap_or(state.config.calls.enabled);
+            .await?;
+            
+            tracing::info!("Calls enabled - DB value: {:?}, Env value: {}", db_value, state.config.calls.enabled);
+            
+            let calls_enabled = db_value
+                .as_ref()
+                .map(|v| v.parse::<bool>().unwrap_or(false))
+                .unwrap_or(state.config.calls.enabled);
+            
+            tracing::info!("Calls enabled - Final result: {}", calls_enabled);
             
             if !calls_enabled {
+                let db_val_clone = db_value.clone();
                 return Ok(CommandResponse {
                     response_type: "ephemeral".to_string(),
-                    text: "Calls are not enabled".to_string(),
+                    text: format!("Calls are not enabled (db: {:?}, env: {})", db_val_clone, state.config.calls.enabled),
                     username: None,
                     icon_url: None,
                     goto_location: None,
