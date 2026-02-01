@@ -606,9 +606,19 @@ async fn get_calls_plugin_config(
 async fn update_calls_plugin_config(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(payload): Json<UpdateCallsPluginConfig>,
+    Json(payload): Json<serde_json::Value>,
 ) -> ApiResult<Json<CallsPluginConfigResponse>> {
     require_admin(&auth)?;
+
+    // Log the incoming payload for debugging
+    tracing::info!("Received Calls Plugin config update: {}", payload);
+
+    // Deserialize manually to get better error messages
+    let payload: UpdateCallsPluginConfig = serde_json::from_value(payload)
+        .map_err(|e| {
+            tracing::error!("Failed to deserialize Calls Plugin config: {}", e);
+            AppError::BadRequest(format!("Invalid configuration data: {}", e))
+        })?;
 
     // Get existing credential if not provided in update
     let credential = if let Some(ref cred) = payload.turn_server_credential {

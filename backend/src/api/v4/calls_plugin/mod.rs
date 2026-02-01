@@ -21,7 +21,7 @@ use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
 use crate::realtime::WsEnvelope;
 
 pub mod commands;
-mod state;
+pub mod state;
 mod turn;
 pub mod sfu;
 
