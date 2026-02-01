@@ -5,7 +5,17 @@ use regex::Regex;
 static EMOJI_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9\-\+_]+$").unwrap());
 
 pub fn is_valid_emoji_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && EMOJI_NAME_RE.is_match(name)
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    // Allow standard names
+    if EMOJI_NAME_RE.is_match(name) {
+        return true;
+    }
+    // Allow literal Unicode emojis
+    name.chars().next()
+        .map(|c| c > '\u{1F300}' || c == '❤' || c == '✅' || c == '❓' || c == '❗')
+        .unwrap_or(false)
 }
 
 /// Standard Mattermost emojis mapping name to unicode hex.
@@ -393,10 +403,50 @@ pub static SYSTEM_EMOJIS: LazyLock<HashMap<&'static str, &'static str>> = LazyLo
     m
 });
 
+pub static REVERSE_SYSTEM_EMOJIS: LazyLock<HashMap<String, &'static str>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    for (&name, &hex) in SYSTEM_EMOJIS.iter() {
+        if let Ok(cp) = u32::from_str_radix(hex, 16) {
+            if let Some(emoji_char) = std::char::from_u32(cp) {
+                m.insert(emoji_char.to_string(), name);
+            }
+        }
+        
+        // Also handle common literal mappings for critical emojis
+        m.insert("👍".to_string(), "thumbsup");
+        m.insert("👎".to_string(), "thumbsdown");
+        m.insert("😄".to_string(), "smile");
+        m.insert("😊".to_string(), "blush");
+        m.insert("❤️".to_string(), "heart");
+        m.insert("🔥".to_string(), "fire");
+        m.insert("✅".to_string(), "white_check_mark");
+        m.insert("❌".to_string(), "x");
+        m.insert("🚀".to_string(), "rocket");
+        m.insert("👀".to_string(), "eyes");
+        m.insert("🎉".to_string(), "tada");
+        m.insert("🤔".to_string(), "thinking");
+    }
+    m
+});
+
+pub fn get_short_name_for_emoji(name_or_unicode: &str) -> String {
+    if let Some(&name) = REVERSE_SYSTEM_EMOJIS.get(name_or_unicode) {
+        name.to_string()
+    } else {
+        name_or_unicode.to_string()
+    }
+}
+
 pub fn is_system_emoji(name: &str) -> bool {
-    SYSTEM_EMOJIS.contains_key(name)
+    SYSTEM_EMOJIS.contains_key(name) || REVERSE_SYSTEM_EMOJIS.contains_key(name)
 }
 
 pub fn get_system_emoji_id(name: &str) -> Option<&'static str> {
-    SYSTEM_EMOJIS.get(name).copied()
+    if let Some(hex) = SYSTEM_EMOJIS.get(name) {
+        Some(*hex)
+    } else if let Some(alias) = REVERSE_SYSTEM_EMOJIS.get(name) {
+        SYSTEM_EMOJIS.get(alias).copied()
+    } else {
+        None
+    }
 }

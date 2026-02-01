@@ -213,6 +213,8 @@ fn legacy_config(site: &SiteConfig, auth: &AuthConfig, diagnostic_id: &str) -> s
     insert(&mut map, "WebsocketPort", "80");
     insert(&mut map, "WebsocketSecurePort", "443");
     insert(&mut map, "WebsocketURL", "");
+    insert(&mut map, "MaxReactionsPerPost", "50");
+    insert(&mut map, "MaxNotificationsPerChannel", "1000");
     
     // Add essential fields for mobile
     insert(&mut map, "EnableMobileFileDownload", bool_str(site.enable_mobile_file_download));

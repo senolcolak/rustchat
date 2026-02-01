@@ -909,17 +909,20 @@ async fn add_reaction(
     let post_id = parse_mm_or_uuid(&input.post_id)
         .ok_or_else(|| AppError::Validation("Invalid post_id".to_string()))?;
 
+    // Normalize emoji name (e.g., convert Unicode character to short name)
+    let emoji_name = crate::mattermost_compat::emoji_data::get_short_name_for_emoji(&input.emoji_name);
+
     // Validate emoji name
-    if !crate::mattermost_compat::emoji_data::is_valid_emoji_name(&input.emoji_name) {
+    if !crate::mattermost_compat::emoji_data::is_valid_emoji_name(&emoji_name) {
         return Err(AppError::BadRequest("Invalid emoji name".to_string()));
     }
 
     // Check if it exists as either a system emoji or custom emoji
-    if !crate::mattermost_compat::emoji_data::is_system_emoji(&input.emoji_name) {
+    if !crate::mattermost_compat::emoji_data::is_system_emoji(&emoji_name) {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM custom_emojis WHERE name = $1 AND delete_at IS NULL)",
         )
-        .bind(&input.emoji_name)
+        .bind(&emoji_name)
         .fetch_one(&state.db)
         .await?;
 
@@ -938,7 +941,7 @@ async fn add_reaction(
     )
     .bind(auth.user_id)
     .bind(post_id)
-    .bind(&input.emoji_name)
+    .bind(&emoji_name)
     .fetch_one(&state.db)
     .await?;
 
@@ -1045,12 +1048,15 @@ async fn remove_reaction_internal(
     post_id: Uuid,
     emoji_name: &str,
 ) -> ApiResult<()> {
+    // Normalize emoji name (e.g., convert Unicode character to short name)
+    let emoji_name = crate::mattermost_compat::emoji_data::get_short_name_for_emoji(emoji_name);
+
     let reaction: Option<crate::models::post::Reaction> = sqlx::query_as(
         "SELECT * FROM reactions WHERE user_id = $1 AND post_id = $2 AND emoji_name = $3",
     )
     .bind(user_id)
     .bind(post_id)
-    .bind(emoji_name)
+    .bind(&emoji_name)
     .fetch_optional(&state.db)
     .await?;
 
@@ -1058,7 +1064,7 @@ async fn remove_reaction_internal(
         sqlx::query("DELETE FROM reactions WHERE user_id = $1 AND post_id = $2 AND emoji_name = $3")
             .bind(user_id)
             .bind(post_id)
-            .bind(emoji_name)
+            .bind(&emoji_name)
             .execute(&state.db)
             .await?;
 

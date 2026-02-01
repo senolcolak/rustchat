@@ -116,10 +116,12 @@ pub async fn get_emoji_by_name(
     
     if is_unicode_emoji {
         // For Unicode emojis, return a synthetic "system emoji" response
-        // The emoji is valid because the user sent it - just return it as-is
+        // Convert Unicode character to short name if possible
+        let normalized_name = crate::mattermost_compat::emoji_data::get_short_name_for_emoji(&name);
+        
         return Ok(Json(mm::Emoji {
             id: "system".to_string(),
-            name: name.clone(),
+            name: normalized_name,
             creator_id: "".to_string(),
             create_at: 0,
             update_at: 0,
