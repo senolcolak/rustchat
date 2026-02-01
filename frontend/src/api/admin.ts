@@ -178,10 +178,10 @@ export interface CallsPluginConfig {
     turn_server_enabled: boolean;
     turn_server_url: string;
     turn_server_username: string;
-    turn_server_credential: string;
+    turn_server_credential: string | null;
     udp_port: number;
     tcp_port: number;
-    ice_host_override: string;
+    ice_host_override: string | null;
     stun_servers: string[];
 }
 

@@ -512,6 +512,19 @@ pub struct CallsPluginConfig {
     pub stun_servers: Vec<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateCallsPluginConfig {
+    pub enabled: bool,
+    pub turn_server_enabled: bool,
+    pub turn_server_url: String,
+    pub turn_server_username: String,
+    pub turn_server_credential: Option<String>,
+    pub udp_port: u16,
+    pub tcp_port: u16,
+    pub ice_host_override: Option<String>,
+    pub stun_servers: Vec<String>,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct CallsPluginConfigResponse {
     pub plugin_id: String,
@@ -593,9 +606,24 @@ async fn get_calls_plugin_config(
 async fn update_calls_plugin_config(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(payload): Json<CallsPluginConfig>,
+    Json(payload): Json<UpdateCallsPluginConfig>,
 ) -> ApiResult<Json<CallsPluginConfigResponse>> {
     require_admin(&auth)?;
+
+    // Get existing credential if not provided in update
+    let credential = if let Some(ref cred) = payload.turn_server_credential {
+        cred.clone()
+    } else {
+        // Fetch existing credential from database
+        let existing: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT plugins->'calls'->>'turn_server_credential' FROM server_config WHERE id = 'default'"
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .and_then(|(json,)| json.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| state.config.calls.turn_server_credential.clone());
+        existing
+    };
 
     // Build JSON object for calls config
     let calls_config_json = serde_json::json!({
@@ -603,7 +631,7 @@ async fn update_calls_plugin_config(
         "turn_server_enabled": payload.turn_server_enabled,
         "turn_server_url": payload.turn_server_url,
         "turn_server_username": payload.turn_server_username,
-        "turn_server_credential": payload.turn_server_credential,
+        "turn_server_credential": credential,
         "udp_port": payload.udp_port,
         "tcp_port": payload.tcp_port,
         "ice_host_override": payload.ice_host_override,
@@ -634,7 +662,17 @@ async fn update_calls_plugin_config(
     Ok(Json(CallsPluginConfigResponse {
         plugin_id: "com.rustchat.calls".to_string(),
         plugin_name: "RustChat Calls Plugin".to_string(),
-        settings: payload,
+        settings: CallsPluginConfig {
+            enabled: payload.enabled,
+            turn_server_enabled: payload.turn_server_enabled,
+            turn_server_url: payload.turn_server_url,
+            turn_server_username: payload.turn_server_username,
+            turn_server_credential: credential,
+            udp_port: payload.udp_port,
+            tcp_port: payload.tcp_port,
+            ice_host_override: payload.ice_host_override,
+            stun_servers: payload.stun_servers,
+        },
     }))
 }
 

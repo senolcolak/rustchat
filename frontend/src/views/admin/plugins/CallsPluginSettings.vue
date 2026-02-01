@@ -19,7 +19,7 @@ const config = ref<CallsPluginConfig>({
     turn_server_credential: '',
     udp_port: 8443,
     tcp_port: 8443,
-    ice_host_override: '',
+    ice_host_override: null,
     stun_servers: ['stun:stun.l.google.com:19302']
 });
 
@@ -28,7 +28,12 @@ const stunServerInput = ref('');
 onMounted(async () => {
     try {
         const { data } = await adminApi.getCallsPluginConfig();
-        config.value = data;
+        // Convert null values to empty strings for form inputs
+        config.value = {
+            ...data,
+            ice_host_override: data.ice_host_override || '',
+            turn_server_credential: data.turn_server_credential || ''
+        };
     } catch (e: any) {
         console.error("Failed to load Calls Plugin config", e);
         saveError.value = 'Failed to load configuration';
@@ -43,7 +48,14 @@ async function saveSettings() {
     saveSuccess.value = false;
 
     try {
-        const { data } = await adminApi.updateCallsPluginConfig(config.value);
+        // Create a copy of config with null conversions
+        const configToSend = {
+            ...config.value,
+            ice_host_override: config.value.ice_host_override || null,
+            turn_server_credential: config.value.turn_server_credential || null
+        };
+
+        const { data } = await adminApi.updateCallsPluginConfig(configToSend);
         config.value = data;
         saveSuccess.value = true;
         setTimeout(() => saveSuccess.value = false, 3000);
