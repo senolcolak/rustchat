@@ -58,7 +58,7 @@ async fn upload_file(
         } else if name == "client_ids" {
              let txt = field.text().await.unwrap_or_default();
              client_ids.push(txt);
-        } else if name == "files" || name == "file" || name == "attachment" || name.is_empty() {
+        } else if !name.is_empty() {
             // Accept multiple field names: "files", "file", "attachment", or unnamed
             // React Native network client may use different field names
             if field.file_name().is_some() || field.content_type().is_some() {
@@ -97,7 +97,7 @@ async fn upload_file(
         state.s3_client.upload(&key, file.data.clone(), &file.content_type).await?;
 
         // Image processing (Blocking offloaded)
-        let (width, height, thumbnail_data) = if file.content_type.starts_with("image/") {
+        let (width, height, thumbnail_data, preview_data) = if file.content_type.starts_with("image/") {
             let data_clone = file.data.clone();
 
             tokio::task::spawn_blocking(move || {
@@ -106,6 +106,7 @@ async fn upload_file(
                     let w_out = Some(w as i32);
                     let h_out = Some(h as i32);
 
+                    // Generate thumbnail (400x400 max)
                     let thumb_data = if w > 400 || h > 400 {
                          let thumb = img.thumbnail(400, 400);
                          let mut buf = Vec::new();
@@ -115,15 +116,44 @@ async fn upload_file(
                              None
                          }
                     } else {
-                        None
+                        // If small enough, just convert to WebP or use original if compatible?
+                        // For consistency, let's just make a webp copy if it's small, or skip.
+                        // Mattermost usually always has a thumbnail unless it's very small.
+                        // Let's generate a webp version anyway if it's an image.
+                        let mut buf = Vec::new();
+                        if img.write_to(&mut Cursor::new(&mut buf), ImageFormat::WebP).is_ok() {
+                            Some(buf)
+                        } else {
+                            None
+                        }
                     };
-                    (w_out, h_out, thumb_data)
+
+                    // Generate preview (1024x1024 max)
+                    let preview_data = if w > 1024 || h > 1024 {
+                        let preview = img.thumbnail(1024, 1024);
+                        let mut buf = Vec::new();
+                        if preview.write_to(&mut Cursor::new(&mut buf), ImageFormat::WebP).is_ok() {
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    } else {
+                        // If smaller than 1024, the preview is the same as the original (but webp)
+                        let mut buf = Vec::new();
+                        if img.write_to(&mut Cursor::new(&mut buf), ImageFormat::WebP).is_ok() {
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    };
+
+                    (w_out, h_out, thumb_data, preview_data)
                 } else {
-                    (None, None, None)
+                    (None, None, None, None)
                 }
-            }).await.unwrap_or((None, None, None))
+            }).await.unwrap_or((None, None, None, None))
         } else {
-             (None, None, None)
+             (None, None, None, None)
         };
 
         let mut thumbnail_key = None;
@@ -132,6 +162,14 @@ async fn upload_file(
              if state.s3_client.upload(&t_key, t_data, "image/webp").await.is_ok() {
                  thumbnail_key = Some(t_key);
              }
+        }
+
+        // We use the same 'has_thumbnail' flag to indicate if we have generated *any* derived images.
+        // In this implementation, we assume if we have a thumbnail, we also made a preview (or tried to).
+        // Storing preview_key derived from file_id convention: previews/{user_id}/{file_id}.webp
+        if let Some(p_data) = preview_data {
+             let p_key = format!("previews/{}/{}.webp", auth.user_id, file_id);
+             let _ = state.s3_client.upload(&p_key, p_data, "image/webp").await;
         }
 
         let has_thumbnail = thumbnail_key.is_some();
@@ -291,9 +329,10 @@ async fn get_preview(
 
     if file.mime_type.starts_with("image/") {
         if file.has_thumbnail {
-            if let Some(key) = file.thumbnail_key.as_ref() {
-                let data = state.s3_client.download(key).await?;
-                return Ok((
+             // Derive preview key from convention
+             let preview_key = format!("previews/{}/{}.webp", file.uploader_id, file.id);
+             if let Ok(data) = state.s3_client.download(&preview_key).await {
+                 return Ok((
                     [
                         (header::CONTENT_TYPE, "image/webp".to_string()),
                         (header::CONTENT_DISPOSITION, format!("inline; filename=\"preview_{}\"", file.name)),
@@ -301,12 +340,18 @@ async fn get_preview(
                     ],
                     data,
                 ).into_response());
-            }
+             }
+
+             // If preview not found but thumbnail exists, try to serve thumbnail (better than nothing)
+             // or fallback to original if image.
         }
     }
 
-    let url = state.s3_client.presigned_download_url(&file.key, 3600).await?;
-    Ok(axum::response::Redirect::temporary(&url).into_response())
+    // If we can't serve a preview image, return 404 or 400.
+    // Mattermost returns 404 if no preview (e.g. non-images).
+    // Redirecting non-images to S3 presigned URL for "preview" endpoint confuses mobile client
+    // because it expects an image or an error.
+    Err(AppError::NotFound("Preview not available".to_string()))
 }
 
 async fn get_link(
