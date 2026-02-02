@@ -32,7 +32,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::realtime::WsHub;
+use crate::realtime::{ConnectionStore, WsHub};
 use crate::storage::S3Client;
 use crate::config::Config;
 use crate::api::v4::calls_plugin::sfu::SFUManager;
@@ -45,11 +45,12 @@ pub struct AppState {
     pub jwt_secret: String,
     pub jwt_expiry_hours: u64,
     pub ws_hub: Arc<WsHub>,
+    pub connection_store: Arc<ConnectionStore>,
     pub s3_client: S3Client,
     pub http_client: reqwest::Client,
     pub start_time: std::time::Instant,
     pub config: Config,
-    pub sfu_manager: Arc<SFUManager>, // NEW
+    pub sfu_manager: Arc<SFUManager>,
 }
 
 /// Build the main application router
@@ -63,6 +64,7 @@ pub fn router(
     config: Config,
 ) -> Router {
     let sfu_manager = SFUManager::new(config.calls.clone());
+    let connection_store = ConnectionStore::new();
 
     let state = AppState {
         db,
@@ -70,11 +72,12 @@ pub fn router(
         jwt_secret,
         jwt_expiry_hours,
         ws_hub,
+        connection_store,
         s3_client,
         http_client: reqwest::Client::new(),
         start_time: std::time::Instant::now(),
         config,
-        sfu_manager, // NEW
+        sfu_manager,
     };
 
     // CORS configuration
