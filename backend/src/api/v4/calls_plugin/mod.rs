@@ -36,6 +36,8 @@ pub fn router() -> Router<AppState> {
         // Plugin info endpoints
         .route("/plugins/com.mattermost.calls/version", get(get_version))
         .route("/plugins/com.mattermost.calls/config", get(get_config))
+        // Channels with calls enabled
+        .route("/plugins/com.mattermost.calls/channels", get(get_channels))
         // Call management endpoints
         .route("/plugins/com.mattermost.calls/calls/{channel_id}/start", post(start_call))
         .route("/plugins/com.mattermost.calls/calls/{channel_id}/join", post(join_call))
@@ -181,6 +183,58 @@ async fn get_config(
     }
     
     Ok(Json(ConfigResponse { ice_servers }))
+}
+
+/// GET /plugins/com.mattermost.calls/channels
+/// Returns channels with calls enabled/active calls
+async fn get_channels(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+) -> ApiResult<Json<Vec<CallChannelInfo>>> {
+    // Get call manager
+    let call_manager = get_call_manager(&state);
+    
+    // Get all active calls
+    let active_calls = call_manager.get_all_calls().await;
+    
+    // Build response with channels that have active calls
+    let mut channels = Vec::new();
+    for call in active_calls {
+        // Check if user is a member of this channel
+        let is_member: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)"
+        )
+        .bind(call.channel_id)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false);
+        
+        if is_member {
+            let participant_count = call_manager.get_participant_count(call.call_id).await;
+            
+            channels.push(CallChannelInfo {
+                channel_id: encode_mm_id(call.channel_id),
+                call_id: Some(encode_mm_id(call.call_id)),
+                enabled: true,
+                has_call: participant_count > 0,
+                participant_count: participant_count as i32,
+            });
+        }
+    }
+    
+    Ok(Json(channels))
+}
+
+/// Channel call info response
+#[derive(Debug, Serialize)]
+struct CallChannelInfo {
+    channel_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call_id: Option<String>,
+    enabled: bool,
+    has_call: bool,
+    participant_count: i32,
 }
 
 /// POST /plugins/com.mattermost.calls/calls/{channel_id}/start

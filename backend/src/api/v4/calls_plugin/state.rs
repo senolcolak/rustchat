@@ -172,6 +172,15 @@ impl CallStateManager {
         calls.values().cloned().collect()
     }
     
+    /// Get participant count for a call
+    pub async fn get_participant_count(&self, call_id: Uuid) -> usize {
+        let calls = self.calls.read().await;
+        calls
+            .get(&call_id)
+            .map(|call| call.participants.len())
+            .unwrap_or(0)
+    }
+    
     /// End all calls (for shutdown)
     pub async fn end_all_calls(&self) {
         let mut calls = self.calls.write().await;
