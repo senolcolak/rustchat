@@ -228,7 +228,7 @@ async fn run_connection(
         event: "hello".to_string(),
         data: json!({
             "connection_id": actor_connection_id.clone(),
-            "server_version": "rustchat-0.1.0",
+            "server_version": format!("rustchat-{}", env!("CARGO_PKG_VERSION")),
             "protocol_version": "1.0"
         }),
         broadcast: mm::Broadcast {
