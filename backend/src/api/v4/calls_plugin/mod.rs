@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::api::v4::extractors::MmAuthUser;
@@ -297,6 +298,11 @@ async fn start_call(
 ) -> ApiResult<Json<StartCallResponse>> {
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    info!(
+        user_id = %auth.user_id,
+        channel_id = %channel_uuid,
+        "calls.start_call requested"
+    );
 
     // Check channel permissions
     check_channel_permission(&state, auth.user_id, channel_uuid).await?;
@@ -306,6 +312,13 @@ async fn start_call(
 
     // Check if call already exists
     if let Some(call) = call_manager.get_call_by_channel(&channel_uuid).await {
+        info!(
+            user_id = %auth.user_id,
+            channel_id = %channel_uuid,
+            call_id = %call.call_id,
+            owner_id = %call.owner_id,
+            "calls.start_call reused existing active call"
+        );
         return Ok(Json(StartCallResponse {
             id: encode_mm_id(call.call_id),
             id_raw: call.call_id.to_string(),
@@ -332,6 +345,12 @@ async fn start_call(
     };
 
     call_manager.add_call(call.clone()).await;
+    debug!(
+        call_id = %call_id,
+        channel_id = %channel_uuid,
+        owner_id = %auth.user_id,
+        "calls.start_call call state created"
+    );
 
     // Add owner as first participant (muted by default)
     let participant = Participant {
@@ -346,6 +365,12 @@ async fn start_call(
     call_manager
         .add_participant(call_id, participant.clone())
         .await;
+    debug!(
+        call_id = %call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.start_call owner participant added"
+    );
 
     // Get or create SFU for this call
     let sfu = state
@@ -365,6 +390,12 @@ async fn start_call(
         auth.user_id,
         participant.session_id,
         signaling_rx,
+    );
+    debug!(
+        call_id = %call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.start_call signaling forwarder spawned"
     );
 
     // Broadcast call_start event
@@ -398,6 +429,13 @@ async fn start_call(
         None,
     )
     .await;
+    info!(
+        call_id = %call_id,
+        channel_id = %channel_uuid,
+        owner_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.start_call completed"
+    );
 
     Ok(Json(StartCallResponse {
         id: encode_mm_id(call_id),
@@ -419,6 +457,11 @@ async fn join_call(
 ) -> ApiResult<Json<StatusResponse>> {
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    info!(
+        user_id = %auth.user_id,
+        channel_id = %channel_uuid,
+        "calls.join_call requested"
+    );
 
     // Check channel permissions
     check_channel_permission(&state, auth.user_id, channel_uuid).await?;
@@ -438,6 +481,12 @@ async fn join_call(
         .await
         .is_some()
     {
+        info!(
+            user_id = %auth.user_id,
+            channel_id = %channel_uuid,
+            call_id = %call.call_id,
+            "calls.join_call user already in call"
+        );
         return Ok(Json(StatusResponse {
             status: "OK".to_string(),
         }));
@@ -457,6 +506,12 @@ async fn join_call(
     call_manager
         .add_participant(call.call_id, participant.clone())
         .await;
+    debug!(
+        call_id = %call.call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.join_call participant added to call state"
+    );
 
     // Get or create SFU for this call
     let sfu = state
@@ -477,6 +532,12 @@ async fn join_call(
         participant.session_id,
         signaling_rx,
     );
+    debug!(
+        call_id = %call.call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.join_call signaling forwarder spawned"
+    );
 
     // Broadcast user_joined event
     broadcast_call_event(
@@ -493,6 +554,13 @@ async fn join_call(
         None,
     )
     .await;
+    info!(
+        call_id = %call.call_id,
+        channel_id = %channel_uuid,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        "calls.join_call completed"
+    );
 
     Ok(Json(StatusResponse {
         status: "OK".to_string(),
@@ -508,6 +576,11 @@ async fn leave_call(
 ) -> ApiResult<Json<StatusResponse>> {
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    info!(
+        user_id = %auth.user_id,
+        channel_id = %channel_uuid,
+        "calls.leave_call requested"
+    );
 
     // Get call manager
     let call_manager = state.call_state_manager.as_ref();
@@ -532,6 +605,12 @@ async fn leave_call(
     if let Some(participant) = participant {
         if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
             let _ = sfu.remove_participant(participant.session_id).await;
+            debug!(
+                call_id = %call.call_id,
+                user_id = %auth.user_id,
+                session_id = %participant.session_id,
+                "calls.leave_call participant removed from SFU"
+            );
         }
     }
 
@@ -568,6 +647,18 @@ async fn leave_call(
             None,
         )
         .await;
+        info!(
+            call_id = %call.call_id,
+            channel_id = %channel_uuid,
+            "calls.leave_call ended call because no participants remain"
+        );
+    } else {
+        info!(
+            call_id = %call.call_id,
+            channel_id = %channel_uuid,
+            remaining_participants = participants.len(),
+            "calls.leave_call completed"
+        );
     }
 
     Ok(Json(StatusResponse {
@@ -593,6 +684,12 @@ async fn get_call_state(
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    debug!(
+        channel_id = %channel_uuid,
+        call_id = %call.call_id,
+        owner_id = %call.owner_id,
+        "calls.get_call_state found active call"
+    );
 
     let call_participants = call_manager.get_participants(call.call_id).await;
     let participants: Vec<String> = call_participants
@@ -895,6 +992,12 @@ async fn handle_offer(
 ) -> ApiResult<Json<AnswerResponse>> {
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
+    info!(
+        user_id = %auth.user_id,
+        channel_id = %channel_uuid,
+        sdp_len = payload.sdp.len(),
+        "calls.offer received"
+    );
 
     // Get call manager
     let call_manager = state.call_state_manager.as_ref();
@@ -911,12 +1014,34 @@ async fn handle_offer(
         .await
         .ok_or_else(|| AppError::Forbidden("You are not in this call".to_string()))?;
 
-    // Get SFU for this call
+    // Get or create SFU for this call. In multi-node or resumed-state scenarios,
+    // call state can exist before a local SFU is hydrated.
     let sfu = state
         .sfu_manager
-        .get_sfu(call.call_id)
+        .get_or_create_sfu(call.call_id)
         .await
-        .ok_or_else(|| AppError::NotFound("SFU not found for this call".to_string()))?;
+        .map_err(|e| AppError::Internal(format!("Failed to get or create SFU: {}", e)))?;
+
+    // Ensure this participant is present in the SFU before handling signaling.
+    if !sfu.has_participant(participant.session_id).await {
+        warn!(
+            call_id = %call.call_id,
+            user_id = %auth.user_id,
+            session_id = %participant.session_id,
+            "calls.offer participant missing in SFU; recovering by re-registering"
+        );
+        let (_, signaling_rx) = sfu
+            .add_participant(auth.user_id, participant.session_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to add participant to SFU: {}", e)))?;
+        spawn_signaling_forwarder(
+            &state,
+            channel_uuid,
+            auth.user_id,
+            participant.session_id,
+            signaling_rx,
+        );
+    }
 
     // Parse the offer SDP
     let offer = RTCSessionDescription::offer(payload.sdp)
@@ -927,6 +1052,13 @@ async fn handle_offer(
         .handle_offer(participant.session_id, offer)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to handle offer: {}", e)))?;
+    debug!(
+        call_id = %call.call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        answer_sdp_len = answer.sdp.len(),
+        "calls.offer handled successfully"
+    );
 
     // Extract SDP from answer
     let sdp = answer.sdp;
@@ -956,27 +1088,72 @@ async fn handle_ice_candidate(
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
 
+    let candidate_len = payload.candidate.len();
+    debug!(
+        user_id = %auth.user_id,
+        channel_id = %channel_uuid,
+        candidate_len = candidate_len,
+        sdp_mid = ?payload.sdp_mid,
+        sdp_mline_index = ?payload.sdp_mline_index,
+        "calls.ice received candidate"
+    );
+
     // Get call manager
     let call_manager = state.call_state_manager.as_ref();
 
     // Find call
-    let call = call_manager
-        .get_call_by_channel(&channel_uuid)
-        .await
-        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    let Some(call) = call_manager.get_call_by_channel(&channel_uuid).await else {
+        warn!(
+            user_id = %auth.user_id,
+            channel_id = %channel_uuid,
+            "Ignoring ICE candidate: no active call in this channel"
+        );
+        return Ok(Json(StatusResponse {
+            status: "IGNORED".to_string(),
+        }));
+    };
 
     // Get participant session_id
-    let participant = call_manager
+    let Some(participant) = call_manager
         .get_participant(call.call_id, auth.user_id)
         .await
-        .ok_or_else(|| AppError::Forbidden("You are not in this call".to_string()))?;
+    else {
+        warn!(
+            user_id = %auth.user_id,
+            call_id = %call.call_id,
+            "Ignoring ICE candidate: user is not a participant of the call"
+        );
+        return Ok(Json(StatusResponse {
+            status: "IGNORED".to_string(),
+        }));
+    };
 
     // Get SFU for this call
     let sfu = state
         .sfu_manager
-        .get_sfu(call.call_id)
+        .get_or_create_sfu(call.call_id)
         .await
-        .ok_or_else(|| AppError::NotFound("SFU not found for this call".to_string()))?;
+        .map_err(|e| AppError::Internal(format!("Failed to get or create SFU: {}", e)))?;
+
+    if !sfu.has_participant(participant.session_id).await {
+        warn!(
+            call_id = %call.call_id,
+            user_id = %auth.user_id,
+            session_id = %participant.session_id,
+            "calls.ice participant missing in SFU; recovering by re-registering"
+        );
+        let (_, signaling_rx) = sfu
+            .add_participant(auth.user_id, participant.session_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to add participant to SFU: {}", e)))?;
+        spawn_signaling_forwarder(
+            &state,
+            call.channel_id,
+            auth.user_id,
+            participant.session_id,
+            signaling_rx,
+        );
+    }
 
     // Handle the ICE candidate
     sfu.handle_ice_candidate(
@@ -987,6 +1164,13 @@ async fn handle_ice_candidate(
     )
     .await
     .map_err(|e| AppError::Internal(format!("Failed to handle ICE candidate: {}", e)))?;
+    debug!(
+        call_id = %call.call_id,
+        user_id = %auth.user_id,
+        session_id = %participant.session_id,
+        candidate_len = candidate_len,
+        "calls.ice handled successfully"
+    );
 
     Ok(Json(StatusResponse {
         status: "OK".to_string(),
@@ -1028,6 +1212,12 @@ async fn broadcast_call_event(
     data: Value,
     exclude_user_id: Option<Uuid>,
 ) {
+    debug!(
+        event = event_name,
+        channel_id = %channel_id,
+        exclude_user_id = ?exclude_user_id,
+        "calls.broadcast_call_event"
+    );
     let envelope = WsEnvelope {
         msg_type: "event".to_string(),
         event: event_name.to_string(),
@@ -1078,6 +1268,21 @@ async fn send_signaling_event(
     session_id: Uuid,
     signal: SignalingMessage,
 ) {
+    let signal_kind = match &signal {
+        SignalingMessage::Offer { .. } => "offer",
+        SignalingMessage::Answer { .. } => "answer",
+        SignalingMessage::IceCandidate { .. } => "ice-candidate",
+        SignalingMessage::IceConnectionState { .. } => "ice-state",
+        SignalingMessage::ConnectionState { .. } => "connection-state",
+        SignalingMessage::Error { .. } => "error",
+    };
+    debug!(
+        channel_id = %channel_id,
+        user_id = %user_id,
+        session_id = %session_id,
+        signal_kind = signal_kind,
+        "calls.send_signaling_event"
+    );
     let signal_payload = serde_json::to_value(signal).unwrap_or_else(|_| {
         serde_json::json!({
             "type": "error",

@@ -169,6 +169,11 @@ impl SFU {
         Ok(())
     }
 
+    /// Check if a participant session is present in this SFU.
+    pub async fn has_participant(&self, session_id: Uuid) -> bool {
+        self.participants.read().await.contains_key(&session_id)
+    }
+
     /// Handle offer from client
     pub async fn handle_offer(
         &self,
