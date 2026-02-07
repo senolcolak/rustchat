@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     Json, Router,
 };
+use serde_json::json;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub mod access_control;
@@ -104,13 +105,27 @@ pub fn router() -> Router<AppState> {
         ))
 }
 
-async fn not_implemented() -> impl IntoResponse {
+pub fn mm_not_implemented(
+    id: &str,
+    message: &str,
+    detailed_error: &str,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     (
         axum::http::StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "id": "api.not_implemented",
-            "message": "Not implemented",
+        Json(json!({
+            "id": id,
+            "message": message,
+            "detailed_error": detailed_error,
+            "request_id": "",
             "status_code": 501
         })),
+    )
+}
+
+async fn not_implemented() -> impl IntoResponse {
+    mm_not_implemented(
+        "api.route.not_implemented.app_error",
+        "This API route is not implemented.",
+        "The requested Mattermost v4 endpoint is not available in this build.",
     )
 }

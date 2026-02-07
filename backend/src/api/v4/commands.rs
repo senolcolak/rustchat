@@ -34,7 +34,8 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct CommandsQuery {
-    team_id: Option<String>,
+    #[serde(rename = "team_id")]
+    _team_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,13 +48,16 @@ struct ExecuteCommandRequest {
 #[derive(Deserialize)]
 struct AutocompleteQuery {
     user_input: String,
-    channel_id: Option<String>,
-    root_id: Option<String>,
+    #[serde(rename = "channel_id")]
+    _channel_id: Option<String>,
+    #[serde(rename = "root_id")]
+    _root_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TeamPath {
-    team_id: String,
+    #[serde(rename = "team_id")]
+    _team_id: String,
 }
 
 async fn list_commands(

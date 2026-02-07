@@ -86,6 +86,9 @@ Response ← JSON Serialization ← Result
 Client ← WebSocket Hub ← Event Publisher ← Service ← Database Change
 ```
 
+Detailed adapter boundaries and v1/v4 contract mapping:
+`docs/websocket_architecture.md`.
+
 ## Database Schema
 
 Key tables:
@@ -100,5 +103,6 @@ Key tables:
 
 - **Stateless API servers** — Horizontal scaling behind load balancer
 - **Redis pub/sub** — Cross-instance event propagation
+- **Redis-backed calls state** — Shared call control-plane state (`docs/calls_deployment_modes.md`)
 - **Connection pooling** — Efficient database connections
 - **Async I/O** — Non-blocking operations throughout

@@ -208,6 +208,8 @@ impl ConnectionStore {
         user_id: Uuid,
         requested_seq: Option<i64>,
     ) -> (Arc<ConnectionState>, bool, Vec<SequencedMessage>) {
+        let mut rejected_resume = false;
+
         // Try to resume existing connection
         if let Some(ref conn_id) = connection_id {
             if let Some(existing) = self.connections.get(conn_id) {
@@ -236,13 +238,24 @@ impl ConnectionStore {
                         actual_user = %user_id,
                         "User mismatch during connection resume"
                     );
+                    rejected_resume = true;
                 }
             }
         }
 
         // Create new connection
-        let new_conn_id = connection_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let initial_seq = requested_seq.unwrap_or(0);
+        let new_conn_id = if rejected_resume {
+            Uuid::new_v4().to_string()
+        } else {
+            connection_id.unwrap_or_else(|| Uuid::new_v4().to_string())
+        };
+        // Start from the next server-side sequence value:
+        // - new connections begin at 1 (hello uses seq 0 in the v4 adapter)
+        // - resumption starts at requested_seq + 1 to avoid duplicate seq delivery
+        let initial_seq = requested_seq
+            .map(|s| s.saturating_add(1))
+            .unwrap_or(1)
+            .max(1);
 
         let state = ConnectionState::new(new_conn_id.clone(), user_id, initial_seq);
 
@@ -326,7 +339,7 @@ impl ConnectionStore {
         team_ids: Vec<Uuid>,
         channel_ids: Vec<Uuid>,
     ) {
-        if let Some(state) = self.connections.get(connection_id) {
+        if let Some(_state) = self.connections.get(connection_id) {
             // We need to store these - since ConnectionState uses simple Vec,
             // we need to add proper synchronization
             // For now, just log the update
@@ -476,10 +489,61 @@ mod tests {
 
         // Resume
         let (resumed_state, is_resumed, missed) =
-            store.resume_or_create(Some(conn_id.clone()), user_id, Some(2));
+            store.resume_or_create(Some(conn_id.clone()), user_id, Some(3));
 
         assert!(is_resumed);
-        assert_eq!(missed.len(), 2); // seq 3 and 4
+        assert_eq!(missed.len(), 2); // seq 4 and 5
+        assert_eq!(missed[0].seq, 4);
+        assert_eq!(missed[1].seq, 5);
         assert_eq!(resumed_state.connection_id, conn_id);
+    }
+
+    #[tokio::test]
+    async fn test_new_connection_first_queued_sequence_is_one() {
+        let store = ConnectionStore::new();
+        let user_id = Uuid::new_v4();
+
+        let (state, _, _) = store.resume_or_create(None, user_id, None);
+        let first = store
+            .queue_message(&state.connection_id, json!({"msg":"first"}))
+            .expect("message should be queued");
+
+        assert_eq!(first, 1);
+    }
+
+    #[tokio::test]
+    async fn test_new_connection_with_requested_sequence_starts_at_next_value() {
+        let store = ConnectionStore::new();
+        let user_id = Uuid::new_v4();
+
+        let (state, _, _) = store.resume_or_create(None, user_id, Some(10));
+        let first = store
+            .queue_message(&state.connection_id, json!({"msg":"first"}))
+            .expect("message should be queued");
+
+        assert_eq!(first, 11);
+    }
+
+    #[tokio::test]
+    async fn test_resume_rejects_connection_hijack() {
+        let store = ConnectionStore::new();
+        let owner_id = Uuid::new_v4();
+        let attacker_id = Uuid::new_v4();
+
+        let (owner_conn, _, _) = store.resume_or_create(None, owner_id, None);
+        let owner_connection_id = owner_conn.connection_id.clone();
+        store.disconnect_connection(&owner_connection_id);
+
+        let (attacker_conn, is_resumed, missed) =
+            store.resume_or_create(Some(owner_connection_id.clone()), attacker_id, Some(0));
+
+        assert!(!is_resumed);
+        assert!(missed.is_empty());
+        assert_ne!(attacker_conn.connection_id, owner_connection_id);
+
+        let original = store
+            .get_connection(&owner_connection_id)
+            .expect("original owner state should remain");
+        assert_eq!(original.user_id, owner_id);
     }
 }

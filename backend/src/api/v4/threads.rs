@@ -96,6 +96,7 @@ pub struct ThreadSetUnreadPath {
 
 // Query parameters for thread list
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct ThreadsQuery {
     #[serde(default)]
     pub deleted: bool,
@@ -121,6 +122,7 @@ fn default_per_page() -> i64 {
 
 // Thread membership for DB queries
 #[derive(sqlx::FromRow, Debug)]
+#[allow(dead_code)]
 struct ThreadMembership {
     user_id: Uuid,
     post_id: Uuid,

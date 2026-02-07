@@ -23,6 +23,20 @@ use crate::models::post::PostResponse;
 use crate::models::Channel;
 use serde_json::json;
 
+mod compat;
+mod helpers;
+mod view;
+
+use compat::{
+    create_channel_bookmark, delete_channel_bookmark, get_channel_access_control_attributes,
+    get_channel_bookmarks, get_channel_common_teams, get_channel_groups,
+    get_channel_member_counts_by_group, get_channel_members_minus_group_members,
+    get_channel_moderations, patch_channel_bookmark, patch_channel_moderations,
+    search_group_channels, update_channel_bookmark_sort_order, update_channel_scheme,
+};
+use helpers::normalize_notify_props;
+use view::{view_channel, view_channel_for_user};
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/channels/{channel_id}/posts", get(get_posts))
@@ -137,70 +151,6 @@ struct Pagination {
     after: Option<String>,
     /// Timestamp in milliseconds to fetch posts since (for incremental sync)
     since: Option<i64>,
-}
-
-#[derive(serde::Deserialize)]
-struct ViewChannelRequest {
-    channel_id: String,
-    #[allow(dead_code)]
-    prev_channel_id: Option<String>,
-}
-
-async fn view_channel(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<impl IntoResponse> {
-    if body.is_empty() {
-        return Ok(Json(serde_json::json!({"status": "OK"})));
-    }
-
-    let input = match parse_view_channel_request(&headers, &body) {
-        Ok(value) => value,
-        Err(_) => return Ok(Json(serde_json::json!({"status": "OK"}))),
-    };
-
-    if let Some(channel_id) = parse_mm_or_uuid(&input.channel_id) {
-        // Update last_viewed_at
-        sqlx::query(
-            "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2"
-        )
-        .bind(channel_id)
-        .bind(auth.user_id)
-        .execute(&state.db)
-        .await?;
-
-        // Broadcast channel_viewed
-        let broadcast = crate::realtime::WsEnvelope::event(
-            crate::realtime::EventType::ChannelViewed,
-            serde_json::json!({
-                "channel_id": channel_id,
-            }),
-            Some(channel_id),
-        );
-        // We don't usually broadcast view events to EVERYONE, just to the user's other sessions.
-        // But Mattermost sends 'channel_viewed' to the user.
-        // My WsHub broadcasts to channel subscribers.
-        // I'll skip broadcasting this generally to avoid noise, OR target only the user.
-        // WsHub targeting user only:
-        let broadcast = broadcast.with_broadcast(crate::realtime::WsBroadcast {
-            channel_id: None,
-            team_id: None,
-            user_id: Some(auth.user_id),
-            exclude_user_id: None,
-        });
-        state.ws_hub.broadcast(broadcast).await;
-    }
-
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-fn parse_view_channel_request(
-    headers: &axum::http::HeaderMap,
-    body: &Bytes,
-) -> ApiResult<ViewChannelRequest> {
-    parse_body(headers, body, "Invalid view body")
 }
 
 fn parse_body<T: DeserializeOwned>(
@@ -399,20 +349,6 @@ async fn get_channel_member_me(
         scheme_user: true,
         scheme_admin: member.role == "admin" || member.role == "channel_admin",
     }))
-}
-
-fn normalize_notify_props(value: serde_json::Value) -> serde_json::Value {
-    if value.is_null() {
-        return serde_json::json!({"desktop": "default", "mark_unread": "all"});
-    }
-
-    if let Some(obj) = value.as_object() {
-        if obj.is_empty() {
-            return serde_json::json!({"desktop": "default", "mark_unread": "all"});
-        }
-    }
-
-    value
 }
 
 async fn get_channel_stats(
@@ -1692,8 +1628,8 @@ async fn restore_channel(
 #[derive(serde::Deserialize)]
 struct MoveChannelRequest {
     team_id: String,
-    #[serde(default)]
-    force: bool,
+    #[serde(rename = "force", default)]
+    _force: bool,
 }
 
 async fn move_channel(
@@ -1749,8 +1685,8 @@ async fn move_channel(
 struct UpdateSchemeRolesRequest {
     #[serde(default)]
     scheme_admin: bool,
-    #[serde(default)]
-    scheme_user: bool,
+    #[serde(rename = "scheme_user", default)]
+    _scheme_user: bool,
 }
 
 async fn update_channel_member_scheme_roles(
@@ -1790,194 +1726,4 @@ async fn update_channel_member_scheme_roles(
         .await?;
 
     Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// POST /channels/members/{user_id}/view - View channel for specific user
-async fn view_channel_for_user(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<impl IntoResponse> {
-    let resolved_user_id = if user_id == "me" {
-        auth.user_id
-    } else {
-        parse_mm_or_uuid(&user_id)
-            .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?
-    };
-
-    // Only allow viewing for self
-    if resolved_user_id != auth.user_id {
-        return Err(crate::error::AppError::Forbidden(
-            "Cannot view channel for other users".to_string(),
-        ));
-    }
-
-    if body.is_empty() {
-        return Ok(Json(serde_json::json!({"status": "OK"})));
-    }
-
-    let input = match parse_view_channel_request(&headers, &body) {
-        Ok(value) => value,
-        Err(_) => return Ok(Json(serde_json::json!({"status": "OK"}))),
-    };
-
-    if let Some(channel_id) = parse_mm_or_uuid(&input.channel_id) {
-        sqlx::query(
-            "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2"
-        )
-        .bind(channel_id)
-        .bind(auth.user_id)
-        .execute(&state.db)
-        .await?;
-
-        let broadcast = crate::realtime::WsEnvelope::event(
-            crate::realtime::EventType::ChannelViewed,
-            serde_json::json!({
-                "channel_id": channel_id,
-            }),
-            Some(channel_id),
-        )
-        .with_broadcast(crate::realtime::WsBroadcast {
-            channel_id: None,
-            team_id: None,
-            user_id: Some(auth.user_id),
-            exclude_user_id: None,
-        });
-        state.ws_hub.broadcast(broadcast).await;
-    }
-
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// POST /api/v4/channels/group/search
-async fn search_group_channels(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Json(_query): Json<serde_json::Value>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// PUT /api/v4/channels/{channel_id}/scheme
-async fn update_channel_scheme(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-    Json(_patch): Json<serde_json::Value>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// GET /api/v4/channels/{channel_id}/members_minus_group_members
-async fn get_channel_members_minus_group_members(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// GET /api/v4/channels/{channel_id}/member_counts_by_group
-async fn get_channel_member_counts_by_group(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// GET /api/v4/channels/{channel_id}/moderations
-async fn get_channel_moderations(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// PUT /api/v4/channels/{channel_id}/moderations/patch
-async fn patch_channel_moderations(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-    Json(_patch): Json<serde_json::Value>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// GET /api/v4/channels/{channel_id}/common_teams
-async fn get_channel_common_teams(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// GET /api/v4/channels/{channel_id}/groups
-async fn get_channel_groups(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// GET /api/v4/channels/{channel_id}/bookmarks
-async fn get_channel_bookmarks(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// POST /api/v4/channels/{channel_id}/bookmarks
-async fn create_channel_bookmark(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-    Json(_bookmark): Json<serde_json::Value>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// PATCH /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
-async fn patch_channel_bookmark(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
-    Json(_patch): Json<serde_json::Value>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// POST /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order
-async fn update_channel_bookmark_sort_order(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
-    Json(_order): Json<serde_json::Value>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
-}
-
-/// DELETE /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
-async fn delete_channel_bookmark(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path((_channel_id, _bookmark_id)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// GET /api/v4/channels/{channel_id}/access_control/attributes
-async fn get_channel_access_control_attributes(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({})))
 }

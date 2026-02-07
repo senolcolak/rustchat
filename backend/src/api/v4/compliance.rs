@@ -2,7 +2,7 @@ use crate::api::AppState;
 use crate::error::ApiResult;
 use axum::{
     extract::{Path, State},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use serde_json::json;

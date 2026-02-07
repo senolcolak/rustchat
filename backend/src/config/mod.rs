@@ -7,6 +7,10 @@ use serde::Deserialize;
 /// Application configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    /// Runtime environment (development, staging, production)
+    #[serde(default = "default_environment")]
+    pub environment: String,
+
     /// Server host address
     #[serde(default = "default_host")]
     pub server_host: String,
@@ -68,6 +72,11 @@ pub struct Config {
     #[serde(default)]
     pub admin_password: Option<String>,
 
+    /// Comma-separated CORS origin allowlist.
+    /// Example: "https://chat.example.com,https://admin.example.com"
+    #[serde(default)]
+    pub cors_allowed_origins: Option<String>,
+
     /// Calls plugin configuration
     #[serde(default)]
     pub calls: CallsConfig,
@@ -115,6 +124,10 @@ pub struct CallsConfig {
     /// STUN server URLs
     #[serde(default = "default_stun_servers")]
     pub stun_servers: Vec<String>,
+
+    /// Call state backend mode: memory, redis, auto
+    #[serde(default = "default_calls_state_backend")]
+    pub state_backend: String,
 }
 
 impl Default for CallsConfig {
@@ -130,6 +143,7 @@ impl Default for CallsConfig {
             turn_server_credential: String::new(),
             turn_ttl_minutes: default_turn_ttl(),
             stun_servers: default_stun_servers(),
+            state_backend: default_calls_state_backend(),
         }
     }
 }
@@ -162,8 +176,16 @@ fn default_stun_servers() -> Vec<String> {
     vec!["stun:stun.l.google.com:19302".to_string()]
 }
 
+fn default_calls_state_backend() -> String {
+    "auto".to_string()
+}
+
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_environment() -> String {
+    "development".to_string()
 }
 
 fn default_port() -> u16 {
@@ -213,6 +235,13 @@ impl Config {
         let config = builder.build()?;
         let settings: Config = config.try_deserialize()?;
         Ok(settings)
+    }
+
+    pub fn is_production(&self) -> bool {
+        matches!(
+            self.environment.trim().to_ascii_lowercase().as_str(),
+            "prod" | "production"
+        )
     }
 }
 

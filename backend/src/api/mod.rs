@@ -20,11 +20,16 @@ mod unreads;
 mod users;
 mod v4;
 mod video;
+mod websocket_core;
 mod ws;
 
 use std::sync::Arc;
 
-use axum::{extract::DefaultBodyLimit, http::Method, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    http::{HeaderValue, Method},
+    Router,
+};
 use sqlx::PgPool;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -58,9 +63,56 @@ fn handle_panic(
 }
 
 use crate::api::v4::calls_plugin::sfu::SFUManager;
+use crate::api::v4::calls_plugin::state::{CallStateBackend, CallStateManager};
 use crate::config::Config;
 use crate::realtime::{ConnectionStore, WsHub};
 use crate::storage::S3Client;
+
+fn parse_cors_allowed_origins(raw: &str) -> Vec<HeaderValue> {
+    raw.split(',')
+        .filter_map(|origin| {
+            let trimmed = origin.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            HeaderValue::from_str(trimmed).ok()
+        })
+        .collect()
+}
+
+fn build_cors_layer(config: &Config) -> CorsLayer {
+    let cors = CorsLayer::new().allow_methods([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ]);
+
+    if let Some(raw_origins) = config.cors_allowed_origins.as_deref() {
+        let origins = parse_cors_allowed_origins(raw_origins);
+        if !origins.is_empty() {
+            return cors.allow_origin(origins).allow_headers(Any);
+        }
+
+        if config.is_production() {
+            tracing::warn!(
+                "RUSTCHAT_CORS_ALLOWED_ORIGINS is set but no valid origins were parsed; CORS is restricted"
+            );
+            return cors;
+        }
+    }
+
+    if config.is_production() {
+        tracing::warn!(
+            "No CORS allowlist configured in production mode; cross-origin browser requests are blocked"
+        );
+        return cors;
+    }
+
+    cors.allow_origin(Any).allow_headers(Any)
+}
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -76,6 +128,7 @@ pub struct AppState {
     pub start_time: std::time::Instant,
     pub config: Config,
     pub sfu_manager: Arc<SFUManager>,
+    pub call_state_manager: Arc<CallStateManager>,
 }
 
 /// Build the main application router
@@ -89,6 +142,10 @@ pub fn router(
     config: Config,
 ) -> Router {
     let sfu_manager = SFUManager::new(config.calls.clone());
+    let call_state_manager = Arc::new(CallStateManager::with_backend(
+        Some(redis.clone()),
+        CallStateBackend::parse(&config.calls.state_backend),
+    ));
     let connection_store = ConnectionStore::new();
 
     let state = AppState {
@@ -103,19 +160,11 @@ pub fn router(
         start_time: std::time::Instant::now(),
         config,
         sfu_manager,
+        call_state_manager,
     };
 
     // CORS configuration
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-        ])
-        .allow_headers(Any);
+    let cors = build_cors_layer(&state.config);
 
     // API v1 routes
     let api_v1 = Router::new()
