@@ -90,12 +90,16 @@ jobs:
           echo "::endgroup::"
           echo "::group::Waiting for Redis"
           for i in {1..30}; do
-            if redis-cli -h localhost -p 6379 ping >/dev/null 2>&1; then
+            if (echo > /dev/tcp/127.0.0.1/6379) >/dev/null 2>&1; then
+              echo "Redis is accepting TCP connections"
               break
             fi
             sleep 1
           done
-          redis-cli -h localhost -p 6379 ping
+          if ! (echo > /dev/tcp/127.0.0.1/6379) >/dev/null 2>&1; then
+            echo "Redis did not become ready in time" >&2
+            exit 1
+          fi
           echo "::endgroup::"
 
       - name: Run cargo check
