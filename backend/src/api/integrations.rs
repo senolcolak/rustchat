@@ -79,6 +79,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CommandAuth {
     pub user_id: Uuid,
     pub email: String,

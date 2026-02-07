@@ -339,7 +339,7 @@ impl ConnectionStore {
         team_ids: Vec<Uuid>,
         channel_ids: Vec<Uuid>,
     ) {
-        if let Some(state) = self.connections.get(connection_id) {
+        if let Some(_state) = self.connections.get(connection_id) {
             // We need to store these - since ConnectionState uses simple Vec,
             // we need to add proper synchronization
             // For now, just log the update

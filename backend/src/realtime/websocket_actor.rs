@@ -94,6 +94,7 @@ pub struct WebSocketActor {
     /// User ID
     pub user_id: Uuid,
     /// Connection state for resumption
+    #[allow(dead_code)]
     state: Arc<ConnectionState>,
     /// Connection store for session management
     store: Arc<ConnectionStore>,
@@ -102,10 +103,12 @@ pub struct WebSocketActor {
     /// Channel for receiving events from the actor
     event_rx: Mutex<mpsc::UnboundedReceiver<WsEvent>>,
     /// Last activity timestamp (for pong timeout)
+    #[allow(dead_code)]
     last_activity: Arc<std::sync::atomic::AtomicU64>,
     /// Whether the connection is closing
     is_closing: Arc<AtomicBool>,
     /// Remote address (for logging)
+    #[allow(dead_code)]
     remote_addr: Option<SocketAddr>,
 }
 
@@ -221,6 +224,7 @@ impl WebSocketActor {
     }
 
     /// Update last activity (called when any message is received)
+    #[allow(dead_code)]
     fn update_activity(&self) {
         self.last_activity
             .store(Instant::now().elapsed().as_secs(), Ordering::SeqCst);
@@ -274,6 +278,7 @@ struct ActorTask {
     store: Arc<ConnectionStore>,
     cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
+    #[allow(dead_code)]
     last_activity: Arc<std::sync::atomic::AtomicU64>,
     is_closing: Arc<AtomicBool>,
     user_id: Uuid,
@@ -408,7 +413,6 @@ impl ActorTask {
                             );
                             break;
                         }
-                        _ => {}
                     }
                 }
 

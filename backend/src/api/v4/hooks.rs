@@ -58,7 +58,8 @@ pub struct CreateOutgoingRequest {
     pub display_name: String,
     pub description: String,
     pub trigger_words: Vec<String>,
-    pub trigger_when: i32,
+    #[serde(rename = "trigger_when")]
+    pub _trigger_when: i32,
     pub callback_urls: Vec<String>,
     pub content_type: String,
 }
@@ -66,7 +67,8 @@ pub struct CreateOutgoingRequest {
 #[derive(serde::Deserialize)]
 pub struct HooksQuery {
     pub team_id: Option<String>,
-    pub channel_id: Option<String>,
+    #[serde(rename = "channel_id")]
+    pub _channel_id: Option<String>,
     #[serde(default)]
     pub page: i64,
     #[serde(default = "default_per_page")]
@@ -244,7 +246,8 @@ async fn get_incoming_hook(
 pub struct UpdateIncomingRequest {
     pub display_name: Option<String>,
     pub description: Option<String>,
-    pub channel_id: Option<String>,
+    #[serde(rename = "channel_id")]
+    pub _channel_id: Option<String>,
 }
 
 async fn update_incoming_hook(

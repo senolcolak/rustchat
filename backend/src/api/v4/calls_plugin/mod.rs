@@ -173,7 +173,7 @@ pub struct IceCandidateRequest {
 
 /// GET /plugins/com.mattermost.calls/version
 /// Returns plugin version info
-async fn get_version(State(state): State<AppState>) -> ApiResult<Json<VersionResponse>> {
+async fn get_version(State(_state): State<AppState>) -> ApiResult<Json<VersionResponse>> {
     Ok(Json(VersionResponse {
         version: "0.28.0".to_string(),
         rtcd: false, // We're using integrated mode

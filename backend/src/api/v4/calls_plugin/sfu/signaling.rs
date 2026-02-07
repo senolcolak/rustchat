@@ -1,6 +1,7 @@
 //! WebRTC Signaling Messages
 //!
 //! Handles offer/answer exchange and ICE candidate communication.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ impl SignalingServer {
     }
 
     /// Serialize SDP to string
-    pub fn serialize_sdp(sdp: &RTCSessionDescription) -> String {
+    pub fn serialize_sdp(_sdp: &RTCSessionDescription) -> String {
         // Extract the SDP string from the session description
         // The webrtc crate stores this internally
         // For now, return a placeholder - in production you'd access the internal sdp field

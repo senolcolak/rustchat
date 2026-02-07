@@ -2,6 +2,7 @@
 //!
 //! Supports both static credentials (from environment variables) and REST API style ephemeral credentials.
 //! Static credentials are used by default if TURN_SERVER_USERNAME and TURN_SERVER_CREDENTIAL are provided.
+#![allow(dead_code)]
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;

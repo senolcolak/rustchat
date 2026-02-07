@@ -5,11 +5,7 @@
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
-use axum::{
-    extract::{Path, State},
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -24,9 +20,11 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 pub struct SlashCommandRequest {
     pub channel_id: String,
-    pub command: String,
+    #[serde(rename = "command")]
+    pub _command: String,
     pub text: String,
-    pub user_id: String,
+    #[serde(rename = "user_id")]
+    pub _user_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,9 +128,9 @@ async fn handle_join_command(
 
 /// Handle /call leave
 async fn handle_leave_command(
-    state: &AppState,
-    user_id: Uuid,
-    channel_id: Uuid,
+    _state: &AppState,
+    _user_id: Uuid,
+    _channel_id: Uuid,
 ) -> ApiResult<Json<SlashCommandResponse>> {
     Ok(Json(SlashCommandResponse {
         text: "You have left the call.".to_string(),
@@ -143,9 +141,9 @@ async fn handle_leave_command(
 
 /// Handle /call end
 async fn handle_end_command(
-    state: &AppState,
-    user_id: Uuid,
-    channel_id: Uuid,
+    _state: &AppState,
+    _user_id: Uuid,
+    _channel_id: Uuid,
 ) -> ApiResult<Json<SlashCommandResponse>> {
     Ok(Json(SlashCommandResponse {
         text: "The call has ended.".to_string(),
