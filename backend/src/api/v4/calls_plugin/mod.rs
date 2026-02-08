@@ -415,7 +415,7 @@ async fn start_call(
             "channel_id": channel_id,
             "user_id": encode_mm_id(auth.user_id),
             "call_id": encode_mm_id(call_id),
-            "start_at": now.to_string(),
+            "start_at": now,
             "owner_id": encode_mm_id(auth.user_id),
         }),
         Some(auth.user_id), // Exclude sender
