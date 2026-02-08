@@ -675,6 +675,16 @@ async fn get_call_state(
     _auth: MmAuthUser,
     Path(channel_id): Path<String>,
 ) -> ApiResult<Json<CallStateResponse>> {
+    let normalized_channel_id = channel_id.trim();
+    if normalized_channel_id.is_empty()
+        || normalized_channel_id.eq_ignore_ascii_case("undefined")
+        || normalized_channel_id.eq_ignore_ascii_case("null")
+    {
+        return Err(AppError::NotFound(
+            "No active call in this channel".to_string(),
+        ));
+    }
+
     let channel_uuid = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| AppError::BadRequest("Invalid channel_id".to_string()))?;
 
@@ -1247,12 +1257,7 @@ async fn handle_ws_join_call(
     let conn_uuid = Uuid::parse_str(connection_id)
         .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
     let data = data.ok_or_else(|| "Missing join payload".to_string())?;
-    let channel_id = data
-        .get("channelID")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing channelID in join payload".to_string())?;
-    let channel_uuid =
-        parse_mm_or_uuid(channel_id).ok_or_else(|| format!("Invalid channelID: {channel_id}"))?;
+    let channel_uuid = parse_join_channel_id(data)?;
 
     check_channel_permission(state, user_id, channel_uuid)
         .await
@@ -1363,9 +1368,15 @@ async fn handle_ws_join_call(
         "custom_com.mattermost.calls_join",
         serde_json::json!({
             "connID": connection_id,
+            "conn_id": connection_id,
             "channelID": encode_mm_id(channel_uuid),
+            "channel_id": encode_mm_id(channel_uuid),
+            "channel_id_raw": channel_uuid.to_string(),
             "callID": encode_mm_id(call.call_id),
+            "call_id": encode_mm_id(call.call_id),
+            "call_id_raw": call.call_id.to_string(),
             "sessionID": connection_id,
+            "session_id": connection_id,
         }),
     )
     .await;
@@ -1752,6 +1763,7 @@ async fn send_ws_plugin_error(state: &AppState, user_id: Uuid, connection_id: &s
         "custom_com.mattermost.calls_error",
         serde_json::json!({
             "connID": connection_id,
+            "conn_id": connection_id,
             "error": message,
         }),
     )
@@ -1770,11 +1782,23 @@ async fn send_ws_plugin_signal(
         "custom_com.mattermost.calls_signal",
         serde_json::json!({
             "connID": connection_id,
+            "conn_id": connection_id,
             "data": signal.to_string(),
             "signal": signal,
         }),
     )
     .await;
+}
+
+fn parse_join_channel_id(data: &Value) -> Result<Uuid, String> {
+    let raw = data
+        .get("channelID")
+        .or_else(|| data.get("channel_id"))
+        .or_else(|| data.get("channelId"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing channel ID in join payload".to_string())?;
+
+    parse_mm_or_uuid(raw).ok_or_else(|| format!("Invalid channel ID: {raw}"))
 }
 
 /// Check if user has permission to access channel
@@ -1807,9 +1831,18 @@ async fn broadcast_call_event(
     state: &AppState,
     event_name: &str,
     channel_id: &Uuid,
-    data: Value,
+    mut data: Value,
     exclude_user_id: Option<Uuid>,
 ) {
+    if let Some(obj) = data.as_object_mut() {
+        obj.entry("channelID".to_string())
+            .or_insert_with(|| Value::String(encode_mm_id(*channel_id)));
+        obj.entry("channel_id".to_string())
+            .or_insert_with(|| Value::String(encode_mm_id(*channel_id)));
+        obj.entry("channel_id_raw".to_string())
+            .or_insert_with(|| Value::String(channel_id.to_string()));
+    }
+
     debug!(
         event = event_name,
         channel_id = %channel_id,
