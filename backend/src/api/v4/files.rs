@@ -28,6 +28,8 @@ pub fn router() -> Router<AppState> {
         .route("/files/{file_id}/thumbnail", get(get_thumbnail))
         .route("/files/{file_id}/preview", get(get_preview))
         .route("/files/{file_id}/link", get(get_link))
+        .route("/files/search", post(search_files_global))
+        .route("/teams/{team_id}/files/search", post(search_files_for_team))
 }
 
 fn filename_extension(filename: &str) -> Option<&str> {
@@ -546,4 +548,111 @@ async fn get_link(
         .await?;
 
     Ok(Json(serde_json::json!({"link": url})))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileSearchParams {
+    terms: String,
+    #[serde(default)]
+    _is_or_search: bool,
+}
+
+/// POST /files/search - Search files globally
+async fn search_files_global(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Json(params): Json<FileSearchParams>,
+) -> ApiResult<Json<FileSearchResult>> {
+    search_files_impl(&state, auth.user_id, None, &params.terms).await
+}
+
+/// POST /teams/{team_id}/files/search - Search files within a team
+async fn search_files_for_team(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(team_id): Path<String>,
+    Json(params): Json<FileSearchParams>,
+) -> ApiResult<Json<FileSearchResult>> {
+    let team_id = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    search_files_impl(&state, auth.user_id, Some(team_id), &params.terms).await
+}
+
+#[derive(serde::Serialize)]
+pub struct FileSearchResult {
+    order: Vec<String>,
+    file_infos: std::collections::HashMap<String, mm::FileInfo>,
+}
+
+async fn search_files_impl(
+    state: &AppState,
+    user_id: Uuid,
+    team_id: Option<Uuid>,
+    terms: &str,
+) -> ApiResult<Json<FileSearchResult>> {
+    let search_pattern = format!("%{}%", terms);
+    
+    let files: Vec<FileInfo> = if let Some(tid) = team_id {
+        sqlx::query_as(
+            r#"
+            SELECT f.* FROM files f
+            JOIN channels c ON f.channel_id = c.id
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE cm.user_id = $1 AND c.team_id = $2 AND f.name ILIKE $3
+            ORDER BY f.created_at DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(user_id)
+        .bind(tid)
+        .bind(&search_pattern)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT f.* FROM files f
+            JOIN channel_members cm ON f.channel_id = cm.channel_id
+            WHERE cm.user_id = $1 AND f.name ILIKE $2
+            ORDER BY f.created_at DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(user_id)
+        .bind(&search_pattern)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    let mut order = Vec::new();
+    let mut file_infos = std::collections::HashMap::new();
+    
+    for file in files {
+        let id = encode_mm_id(file.id);
+        order.push(id.clone());
+        
+        let extension = filename_extension(&file.name)
+            .unwrap_or_default()
+            .to_string();
+            
+        file_infos.insert(id.clone(), mm::FileInfo {
+            id,
+            user_id: encode_mm_id(file.uploader_id),
+            post_id: file.post_id.map(encode_mm_id).unwrap_or_default(),
+            channel_id: file.channel_id.map(encode_mm_id).unwrap_or_default(),
+            create_at: file.created_at.timestamp_millis(),
+            update_at: file.created_at.timestamp_millis(),
+            delete_at: 0,
+            name: file.name,
+            extension,
+            size: file.size,
+            mime_type: file.mime_type,
+            width: file.width.unwrap_or(0),
+            height: file.height.unwrap_or(0),
+            has_preview_image: file.has_thumbnail,
+            mini_preview: None,
+        });
+    }
+
+    Ok(Json(FileSearchResult { order, file_infos }))
 }

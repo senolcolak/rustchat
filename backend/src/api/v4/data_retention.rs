@@ -38,6 +38,17 @@ pub fn router() -> Router<AppState> {
             "/data_retention/policies/{policy_id}/channels/search",
             post(search_channels_for_retention_policy),
         )
+        // User-specific data retention policies (for mobile compatibility)
+        .route(
+            "/users/{user_id}/data_retention/team_policies",
+            get(get_user_team_policies),
+        )
+        .route(
+            "/users/{user_id}/data_retention/channel_policies",
+            get(get_user_channel_policies),
+        )
+        // NPS endpoint stub
+        .route("/nps", post(submit_nps))
 }
 
 /// GET /api/v4/data_retention/policy
@@ -129,4 +140,31 @@ async fn search_channels_for_retention_policy(
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
     Ok(Json(vec![]))
+}
+
+/// GET /users/{user_id}/data_retention/team_policies - User's team retention policies
+async fn get_user_team_policies(
+    State(_state): State<AppState>,
+    _auth: crate::api::v4::extractors::MmAuthUser,
+    Path(_user_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"policies": [], "total_count": 0})))
+}
+
+/// GET /users/{user_id}/data_retention/channel_policies - User's channel retention policies
+async fn get_user_channel_policies(
+    State(_state): State<AppState>,
+    _auth: crate::api::v4::extractors::MmAuthUser,
+    Path(_user_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"policies": [], "total_count": 0})))
+}
+
+/// POST /nps - Submit NPS feedback
+async fn submit_nps(
+    State(_state): State<AppState>,
+    _auth: crate::api::v4::extractors::MmAuthUser,
+    Json(_feedback): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"status": "OK"})))
 }
