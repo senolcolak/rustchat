@@ -3682,6 +3682,7 @@ dependencies = [
  "dashmap",
  "deadpool-redis",
  "dotenvy",
+ "flate2",
  "futures-util",
  "hex",
  "hmac",

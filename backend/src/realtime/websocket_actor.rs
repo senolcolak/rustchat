@@ -72,6 +72,8 @@ pub enum WsCommand {
 pub enum WsEvent {
     /// Message received from client
     MessageReceived(String),
+    /// Binary message received from client
+    BinaryReceived(Vec<u8>),
     /// Client sent a pong (activity detected)
     PongReceived,
     /// Connection closed
@@ -350,12 +352,8 @@ impl ActorTask {
                         Some(Ok(Message::Binary(bin))) => {
                             *last_pong.lock().unwrap() = Instant::now();
                             self.state.touch();
-
-                            // Convert binary to string if possible, otherwise ignore
-                            if let Ok(text) = String::from_utf8(bin.to_vec()) {
-                                if let Err(_) = self.event_tx.send(WsEvent::MessageReceived(text)) {
-                                    break;
-                                }
+                            if let Err(_) = self.event_tx.send(WsEvent::BinaryReceived(bin.to_vec())) {
+                                break;
                             }
                         }
                         Some(Ok(Message::Pong(_))) => {

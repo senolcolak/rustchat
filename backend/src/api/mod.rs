@@ -24,18 +24,23 @@ mod websocket_core;
 mod ws;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::body::Body;
 use axum::{
     extract::DefaultBodyLimit,
+    extract::MatchedPath,
+    http::Request,
     http::{HeaderValue, Method},
     Router,
 };
 use sqlx::PgPool;
 use tower_http::{
     catch_panic::CatchPanicLayer,
+    classify::ServerErrorsFailureClass,
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+    trace::TraceLayer,
 };
 use tracing::Level;
 
@@ -196,9 +201,45 @@ pub fn router(
         .layer(CompressionLayer::new())
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                .on_request(DefaultOnRequest::new().level(Level::DEBUG))
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                .make_span_with(|request: &Request<Body>| {
+                    let matched_path = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map(MatchedPath::as_str)
+                        .unwrap_or("<unknown>");
+                    tracing::span!(
+                        Level::INFO,
+                        "http.request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        matched_path = matched_path
+                    )
+                })
+                .on_request(|_request: &Request<Body>, _span: &tracing::Span| {
+                    tracing::debug!("request started");
+                })
+                .on_response(
+                    |response: &axum::http::Response<Body>,
+                     latency: Duration,
+                     _span: &tracing::Span| {
+                        tracing::info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            "request completed"
+                        );
+                    },
+                )
+                .on_failure(
+                    |failure: ServerErrorsFailureClass,
+                     latency: Duration,
+                     _span: &tracing::Span| {
+                        tracing::error!(
+                            classification = %failure,
+                            latency_ms = latency.as_millis(),
+                            "request failed"
+                        );
+                    },
+                ),
         )
         .layer(cors)
         .with_state(state)

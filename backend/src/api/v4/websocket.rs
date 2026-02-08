@@ -23,6 +23,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::api::v4::calls_plugin;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::api::AppState;
 use crate::auth::validate_token;
@@ -296,11 +297,22 @@ async fn run_connection(
             event = actor.recv() => {
                 match event {
                     Some(WsEvent::MessageReceived(text)) => {
-                        handle_client_message(
+                        handle_client_text_message(
                             &state,
                             user_id,
                             &username,
+                            &actor_connection_id,
                             &text,
+                        )
+                        .await;
+                    }
+                    Some(WsEvent::BinaryReceived(bytes)) => {
+                        handle_client_binary_message(
+                            &state,
+                            user_id,
+                            &username,
+                            &actor_connection_id,
+                            &bytes,
                         )
                         .await;
                     }
@@ -358,45 +370,22 @@ async fn run_connection(
 }
 
 /// Handle a message from the client
-async fn handle_client_message(state: &AppState, user_id: Uuid, username: &str, text: &str) {
+async fn handle_client_text_message(
+    state: &AppState,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    text: &str,
+) {
     trace!(
         user_id = %user_id,
+        connection_id = connection_id,
         text = %text,
         "Received client message"
     );
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
-            if action == "user_typing" {
-                if let Some(data) = value.get("data") {
-                    if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
-                        if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
-                            let broadcast = WsEnvelope::event(
-                                crate::realtime::EventType::UserTyping,
-                                crate::realtime::TypingEvent {
-                                    user_id,
-                                    display_name: username.to_string(),
-                                    thread_root_id: data
-                                        .get("parent_id")
-                                        .and_then(|v| v.as_str())
-                                        .and_then(parse_mm_or_uuid),
-                                },
-                                Some(channel_id),
-                            )
-                            .with_broadcast(WsBroadcast {
-                                channel_id: Some(channel_id),
-                                team_id: None,
-                                user_id: None,
-                                exclude_user_id: Some(user_id),
-                            });
-                            state.ws_hub.broadcast(broadcast).await;
-                        }
-                    }
-                }
-            } else {
-                trace!(action = %action, "Unknown action received");
-            }
-        }
+        handle_client_value_message(state, user_id, username, connection_id, &value).await;
     }
 
     let _ = websocket_core::handle_client_envelope_message(
@@ -407,6 +396,223 @@ async fn handle_client_message(state: &AppState, user_id: Uuid, username: &str, 
         EnvelopeCommandOptions::V4,
     )
     .await;
+}
+
+async fn handle_client_binary_message(
+    state: &AppState,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    bytes: &[u8],
+) {
+    if let Some(value) = decode_msgpack_value(bytes) {
+        trace!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            "Received binary client message"
+        );
+        handle_client_value_message(state, user_id, username, connection_id, &value).await;
+    } else {
+        warn!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            "Failed to decode binary websocket message as msgpack"
+        );
+    }
+}
+
+async fn handle_client_value_message(
+    state: &AppState,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    value: &serde_json::Value,
+) {
+    let Some(action) = value.get("action").and_then(|v| v.as_str()) else {
+        return;
+    };
+
+    if calls_plugin::handle_ws_action(state, user_id, connection_id, action, value.get("data"))
+        .await
+    {
+        return;
+    }
+
+    if action == "user_typing" {
+        if let Some(data) = value.get("data") {
+            if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
+                if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
+                    let broadcast = WsEnvelope::event(
+                        crate::realtime::EventType::UserTyping,
+                        crate::realtime::TypingEvent {
+                            user_id,
+                            display_name: username.to_string(),
+                            thread_root_id: data
+                                .get("parent_id")
+                                .and_then(|v| v.as_str())
+                                .and_then(parse_mm_or_uuid),
+                        },
+                        Some(channel_id),
+                    )
+                    .with_broadcast(WsBroadcast {
+                        channel_id: Some(channel_id),
+                        team_id: None,
+                        user_id: None,
+                        exclude_user_id: Some(user_id),
+                    });
+                    state.ws_hub.broadcast(broadcast).await;
+                }
+            }
+        }
+    } else {
+        trace!(action = %action, "Unknown action received");
+    }
+}
+
+fn decode_msgpack_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut idx = 0usize;
+    decode_msgpack_at(bytes, &mut idx)
+}
+
+fn decode_msgpack_at(bytes: &[u8], idx: &mut usize) -> Option<serde_json::Value> {
+    let marker = *bytes.get(*idx)?;
+    *idx += 1;
+
+    match marker {
+        0x00..=0x7f => Some(serde_json::Value::from(marker as u64)),
+        0xe0..=0xff => Some(serde_json::Value::from((marker as i8) as i64)),
+        0xc0 => Some(serde_json::Value::Null),
+        0xc2 => Some(serde_json::Value::Bool(false)),
+        0xc3 => Some(serde_json::Value::Bool(true)),
+        0xcc => Some(serde_json::Value::from(read_u8(bytes, idx)? as u64)),
+        0xcd => Some(serde_json::Value::from(read_u16(bytes, idx)? as u64)),
+        0xce => Some(serde_json::Value::from(read_u32(bytes, idx)? as u64)),
+        0xd0 => Some(serde_json::Value::from(read_i8(bytes, idx)? as i64)),
+        0xd1 => Some(serde_json::Value::from(read_i16(bytes, idx)? as i64)),
+        0xd2 => Some(serde_json::Value::from(read_i32(bytes, idx)? as i64)),
+        0xa0..=0xbf => {
+            let len = (marker & 0x1f) as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xd9 => {
+            let len = read_u8(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xda => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xdb => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xc4 => {
+            let len = read_u8(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0xc5 => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0xc6 => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0x90..=0x9f => decode_array(bytes, idx, (marker & 0x0f) as usize),
+        0xdc => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_array(bytes, idx, len)
+        }
+        0xdd => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_array(bytes, idx, len)
+        }
+        0x80..=0x8f => decode_map(bytes, idx, (marker & 0x0f) as usize),
+        0xde => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_map(bytes, idx, len)
+        }
+        0xdf => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_map(bytes, idx, len)
+        }
+        _ => None,
+    }
+}
+
+fn decode_array(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let mut items = Vec::with_capacity(len);
+    for _ in 0..len {
+        items.push(decode_msgpack_at(bytes, idx)?);
+    }
+    Some(serde_json::Value::Array(items))
+}
+
+fn decode_map(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::with_capacity(len);
+    for _ in 0..len {
+        let key = decode_msgpack_at(bytes, idx)?.as_str()?.to_string();
+        let value = decode_msgpack_at(bytes, idx)?;
+        map.insert(key, value);
+    }
+    Some(serde_json::Value::Object(map))
+}
+
+fn decode_str(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let slice = read_exact(bytes, idx, len)?;
+    let text = std::str::from_utf8(slice).ok()?.to_string();
+    Some(serde_json::Value::String(text))
+}
+
+fn decode_bin_as_json_array(
+    bytes: &[u8],
+    idx: &mut usize,
+    len: usize,
+) -> Option<serde_json::Value> {
+    let slice = read_exact(bytes, idx, len)?;
+    Some(serde_json::Value::Array(
+        slice
+            .iter()
+            .map(|b| serde_json::Value::from(*b as u64))
+            .collect(),
+    ))
+}
+
+fn read_exact<'a>(bytes: &'a [u8], idx: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = idx.checked_add(len)?;
+    let slice = bytes.get(*idx..end)?;
+    *idx = end;
+    Some(slice)
+}
+
+fn read_u8(bytes: &[u8], idx: &mut usize) -> Option<u8> {
+    let value = *bytes.get(*idx)?;
+    *idx += 1;
+    Some(value)
+}
+
+fn read_i8(bytes: &[u8], idx: &mut usize) -> Option<i8> {
+    read_u8(bytes, idx).map(|v| v as i8)
+}
+
+fn read_u16(bytes: &[u8], idx: &mut usize) -> Option<u16> {
+    let arr: [u8; 2] = read_exact(bytes, idx, 2)?.try_into().ok()?;
+    Some(u16::from_be_bytes(arr))
+}
+
+fn read_i16(bytes: &[u8], idx: &mut usize) -> Option<i16> {
+    let arr: [u8; 2] = read_exact(bytes, idx, 2)?.try_into().ok()?;
+    Some(i16::from_be_bytes(arr))
+}
+
+fn read_u32(bytes: &[u8], idx: &mut usize) -> Option<u32> {
+    let arr: [u8; 4] = read_exact(bytes, idx, 4)?.try_into().ok()?;
+    Some(u32::from_be_bytes(arr))
+}
+
+fn read_i32(bytes: &[u8], idx: &mut usize) -> Option<i32> {
+    let arr: [u8; 4] = read_exact(bytes, idx, 4)?.try_into().ok()?;
+    Some(i32::from_be_bytes(arr))
 }
 
 #[derive(Debug, Clone)]
