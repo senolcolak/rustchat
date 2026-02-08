@@ -82,6 +82,15 @@ impl From<Team> for mm::Team {
 
 impl From<Channel> for mm::Channel {
     fn from(channel: Channel) -> Self {
+        let display_name = match channel.display_name {
+            Some(name) if !name.trim().is_empty() => name,
+            _ => match channel.channel_type {
+                ChannelType::Direct => "Direct Message".to_string(),
+                ChannelType::Group => "Group Message".to_string(),
+                _ => channel.name.clone(),
+            },
+        };
+
         mm::Channel {
             id: encode_mm_id(channel.id),
             create_at: channel.created_at.timestamp_millis(),
@@ -99,7 +108,7 @@ impl From<Channel> for mm::Channel {
                 ChannelType::Group => "G",
             }
             .to_string(),
-            display_name: channel.display_name.unwrap_or_else(|| channel.name.clone()),
+            display_name,
             name: channel.name,
             header: channel.header.unwrap_or_default(),
             purpose: channel.purpose.unwrap_or_default(),
@@ -191,6 +200,13 @@ impl From<ChannelMember> for mm::ChannelMember {
 
 impl From<FileInfo> for mm::FileInfo {
     fn from(f: FileInfo) -> Self {
+        let extension = f
+            .name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext)
+            .unwrap_or_default()
+            .to_string();
+
         mm::FileInfo {
             id: encode_mm_id(f.id),
             user_id: encode_mm_id(f.uploader_id),
@@ -200,7 +216,7 @@ impl From<FileInfo> for mm::FileInfo {
             update_at: f.created_at.timestamp_millis(),
             delete_at: 0,
             name: f.name.clone(),
-            extension: f.name.rsplit('.').next().unwrap_or_default().to_string(),
+            extension,
             size: f.size,
             mime_type: f.mime_type,
             width: f.width.unwrap_or(0),

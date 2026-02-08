@@ -577,6 +577,41 @@ async fn get_team_members_for_user(
     Ok(Json(mm_members))
 }
 
+fn is_blank_display_name(value: Option<&str>) -> bool {
+    value.map(|v| v.trim().is_empty()).unwrap_or(true)
+}
+
+async fn hydrate_direct_channel_display_name(
+    state: &AppState,
+    viewer_id: Uuid,
+    channel: &mut Channel,
+) -> ApiResult<()> {
+    if channel.channel_type != crate::models::channel::ChannelType::Direct
+        || !is_blank_display_name(channel.display_name.as_deref())
+    {
+        return Ok(());
+    }
+
+    let display_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.channel_id = $1
+          AND cm.user_id <> $2
+        ORDER BY u.username ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel.id)
+    .bind(viewer_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    channel.display_name = display_name.or_else(|| Some("Direct Message".to_string()));
+    Ok(())
+}
+
 async fn my_team_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
@@ -584,7 +619,7 @@ async fn my_team_channels(
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -595,6 +630,10 @@ async fn my_team_channels(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
@@ -608,7 +647,7 @@ async fn get_team_channels_for_user(
     let user_id = resolve_user_id(&user_id, &auth)?;
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -620,6 +659,10 @@ async fn get_team_channels_for_user(
     .fetch_all(&state.db)
     .await?;
 
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, user_id, channel).await?;
+    }
+
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
 }
@@ -628,7 +671,7 @@ async fn my_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -638,6 +681,10 @@ async fn my_channels(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
@@ -649,7 +696,7 @@ async fn get_channels_for_user(
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let user_id = resolve_user_id(&user_id, &auth)?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -659,6 +706,10 @@ async fn get_channels_for_user(
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
-use crate::models::{Channel, ChannelMember, CreateChannel, UpdateChannel};
+use crate::models::{Channel, ChannelMember, ChannelType, CreateChannel, UpdateChannel};
 use crate::realtime::events::{EventType, WsBroadcast, WsEnvelope};
 
 /// Build channels routes
@@ -61,6 +61,41 @@ pub struct ListChannelsQuery {
     pub available_to_join: Option<bool>,
 }
 
+fn is_blank_display_name(value: Option<&str>) -> bool {
+    value.map(|v| v.trim().is_empty()).unwrap_or(true)
+}
+
+async fn hydrate_direct_channel_display_name(
+    state: &AppState,
+    viewer_id: Uuid,
+    channel: &mut Channel,
+) -> ApiResult<()> {
+    if channel.channel_type != ChannelType::Direct
+        || !is_blank_display_name(channel.display_name.as_deref())
+    {
+        return Ok(());
+    }
+
+    let display_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.channel_id = $1
+          AND cm.user_id <> $2
+        ORDER BY u.username ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel.id)
+    .bind(viewer_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    channel.display_name = display_name.or_else(|| Some("Direct Message".to_string()));
+    Ok(())
+}
+
 /// List channels in a team
 async fn list_channels(
     State(state): State<AppState>,
@@ -105,7 +140,7 @@ async fn list_channels(
     }
 
     // Default behavior: List channels user is a member of
-    let channels: Vec<Channel> = if include_archived {
+    let mut channels: Vec<Channel> = if include_archived {
         sqlx::query_as(
             r#"
             SELECT c.* FROM channels c
@@ -132,6 +167,10 @@ async fn list_channels(
         .fetch_all(&state.db)
         .await?
     };
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
+    }
 
     Ok(Json(channels))
 }
@@ -162,9 +201,10 @@ async fn create_channel(
         .fetch_optional(&state.db)
         .await?;
 
-        if let Some(channel) = existing {
+        if let Some(mut channel) = existing {
             // Re-add both users as members just in case they left (resurrect DM)
             let _ = crate::services::posts::ensure_dm_membership(&state, channel.id).await;
+            hydrate_direct_channel_display_name(&state, auth.user_id, &mut channel).await?;
             return Ok(Json(channel));
         }
 
@@ -182,6 +222,21 @@ async fn create_channel(
             ));
         }
 
+        let teammate_display_name: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = $1",
+        )
+        .bind(target_id)
+        .fetch_optional(&state.db)
+        .await?;
+        let display_name = input
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .or(teammate_display_name)
+            .unwrap_or_else(|| "Direct Message".to_string());
+
         // Create DM channel
         let channel: Channel = sqlx::query_as(
             r#"
@@ -192,12 +247,7 @@ async fn create_channel(
         )
         .bind(input.team_id)
         .bind(&dm_name)
-        .bind(
-            input
-                .display_name
-                .as_ref()
-                .unwrap_or(&"Direct Message".to_string()),
-        )
+        .bind(&display_name)
         .bind(&input.purpose)
         .bind(input.channel_type)
         .bind(auth.user_id)
@@ -313,10 +363,12 @@ async fn get_channel(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    let channel: Channel = sqlx::query_as("SELECT * FROM channels WHERE id = $1")
+    let mut channel: Channel = sqlx::query_as("SELECT * FROM channels WHERE id = $1")
         .bind(id)
         .fetch_one(&state.db)
         .await?;
+
+    hydrate_direct_channel_display_name(&state, auth.user_id, &mut channel).await?;
 
     Ok(Json(channel))
 }

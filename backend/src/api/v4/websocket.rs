@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
+        Query, State,
     },
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -49,30 +49,69 @@ pub struct WsQuery {
 
 /// Main WebSocket handler
 pub async fn handle_websocket(
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
     headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let token = websocket_core::resolve_auth_token(query.token.as_deref(), &headers, None, false);
+    let requested_protocol = websocket_core::requested_protocol(&headers);
+    let ws = match ws {
+        Ok(upgrade) => upgrade,
+        Err(err) => {
+            warn!(
+                error = %err,
+                connection_header = ?headers.get("connection").and_then(|v| v.to_str().ok()),
+                upgrade_header = ?headers.get("upgrade").and_then(|v| v.to_str().ok()),
+                has_sec_websocket_key = headers.contains_key("sec-websocket-key"),
+                sec_websocket_version = ?headers.get("sec-websocket-version").and_then(|v| v.to_str().ok()),
+                user_agent = ?headers.get("user-agent").and_then(|v| v.to_str().ok()),
+                "WebSocket upgrade rejected"
+            );
+            return err.into_response();
+        }
+    };
+
+    let token = websocket_core::resolve_auth_token(
+        query.token.as_deref(),
+        &headers,
+        requested_protocol.as_deref(),
+        true,
+    );
     let sequence_number = query.sequence_number;
-    let connection_id = query.connection_id.clone();
+    let connection_id = query.connection_id.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
 
     let user_id = websocket_core::validate_user_id(token.as_deref(), &state.jwt_secret);
 
     trace!(
-        addr = %addr,
         has_token = token.is_some(),
+        has_protocol = requested_protocol.is_some(),
         has_user = user_id.is_some(),
         connection_id = ?connection_id,
         sequence_number = ?sequence_number,
         "WebSocket connection request"
     );
 
-    ws.on_upgrade(move |socket| {
-        handle_socket(socket, state, user_id, connection_id, sequence_number, addr)
-    })
+    let mut response = ws.on_upgrade(move |socket| {
+        handle_socket(socket, state, user_id, connection_id, sequence_number, None)
+    });
+
+    // Match Mattermost behavior by echoing the requested protocol when present.
+    if let Some(protocol) = requested_protocol {
+        if let Ok(value) = protocol.parse() {
+            response
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", value);
+        }
+    }
+
+    response
 }
 
 /// Handle the WebSocket connection
@@ -82,7 +121,7 @@ async fn handle_socket(
     user_id: Option<Uuid>,
     connection_id: Option<String>,
     sequence_number: Option<i64>,
-    addr: SocketAddr,
+    addr: Option<SocketAddr>,
 ) {
     // Handle authentication if not already done
     let user_id = match user_id {
@@ -96,7 +135,7 @@ async fn handle_socket(
                         .await;
                 }
                 None => {
-                    warn!(addr = %addr, "WebSocket authentication failed");
+                    warn!(addr = ?addr, "WebSocket authentication failed");
                     return;
                 }
             }
@@ -161,7 +200,7 @@ async fn run_connection(
     user_id: Uuid,
     connection_id: Option<String>,
     sequence_number: Option<i64>,
-    addr: SocketAddr,
+    addr: Option<SocketAddr>,
 ) {
     // Check connection limits
     if let Err(limit) = websocket_core::enforce_connection_limit(&state, user_id).await {
@@ -186,15 +225,8 @@ async fn run_connection(
     let is_resumption_attempt = connection_id.is_some();
 
     // Create WebSocket actor with session resumption
-    let (actor, missed_messages) = WebSocketActor::new(
-        socket,
-        store,
-        user_id,
-        connection_id,
-        sequence_number,
-        Some(addr),
-    )
-    .await;
+    let (actor, missed_messages) =
+        WebSocketActor::new(socket, store, user_id, connection_id, sequence_number, addr).await;
 
     let actor_connection_id = actor.connection_id.clone();
     let is_resumed = !missed_messages.is_empty() || is_resumption_attempt;
@@ -204,7 +236,7 @@ async fn run_connection(
         user_id = %user_id,
         resumed = is_resumed,
         missed_count = missed_messages.len(),
-        addr = %addr,
+        addr = ?addr,
         "WebSocket connection established"
     );
 

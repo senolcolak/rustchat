@@ -30,6 +30,72 @@ pub fn router() -> Router<AppState> {
         .route("/files/{file_id}/link", get(get_link))
 }
 
+fn filename_extension(filename: &str) -> Option<&str> {
+    filename
+        .rsplit_once('.')
+        .and_then(|(_, ext)| if ext.is_empty() { None } else { Some(ext) })
+}
+
+fn image_mime_and_extension_from_bytes(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    let format = image::guess_format(data).ok()?;
+    match format {
+        ImageFormat::Png => Some(("image/png", "png")),
+        ImageFormat::Jpeg => Some(("image/jpeg", "jpg")),
+        ImageFormat::Gif => Some(("image/gif", "gif")),
+        ImageFormat::WebP => Some(("image/webp", "webp")),
+        ImageFormat::Bmp => Some(("image/bmp", "bmp")),
+        ImageFormat::Tiff => Some(("image/tiff", "tiff")),
+        _ => None,
+    }
+}
+
+fn extension_from_mime(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        _ => None,
+    }
+}
+
+fn normalize_uploaded_file_metadata(
+    filename: &str,
+    declared_content_type: &str,
+    data: &[u8],
+) -> (String, String, String) {
+    let declared = declared_content_type.trim().to_ascii_lowercase();
+    let declared_is_generic = declared.is_empty() || declared == "application/octet-stream";
+    let mut normalized_filename = filename.to_string();
+    let mut mime_type = if declared.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        declared
+    };
+
+    if let Some((detected_mime, detected_ext)) = image_mime_and_extension_from_bytes(data) {
+        if declared_is_generic || !mime_type.starts_with("image/") {
+            mime_type = detected_mime.to_string();
+        }
+
+        if filename_extension(&normalized_filename).is_none() {
+            normalized_filename = format!("{}.{}", normalized_filename, detected_ext);
+        }
+    } else if filename_extension(&normalized_filename).is_none() {
+        if let Some(ext) = extension_from_mime(&mime_type) {
+            normalized_filename = format!("{}.{}", normalized_filename, ext);
+        }
+    }
+
+    let extension = filename_extension(&normalized_filename)
+        .unwrap_or_default()
+        .to_string();
+
+    (normalized_filename, mime_type, extension)
+}
+
 async fn upload_file(
     State(state): State<AppState>,
     auth: MmAuthUser,
@@ -88,9 +154,14 @@ async fn upload_file(
     let mut file_infos: Vec<mm::FileInfo> = Vec::new();
 
     for file in pending_files {
+        let (filename, content_type, extension) =
+            normalize_uploaded_file_metadata(&file.filename, &file.content_type, &file.data);
         let file_id = Uuid::new_v4();
-        let extension = file.filename.rsplit('.').next().unwrap_or("").to_string();
-        let key = format!("files/{}/{}.{}", auth.user_id, file_id, extension);
+        let key = if extension.is_empty() {
+            format!("files/{}/{}", auth.user_id, file_id)
+        } else {
+            format!("files/{}/{}.{}", auth.user_id, file_id, extension)
+        };
 
         let mut hasher = Sha256::new();
         hasher.update(&file.data);
@@ -99,82 +170,81 @@ async fn upload_file(
 
         state
             .s3_client
-            .upload(&key, file.data.clone(), &file.content_type)
+            .upload(&key, file.data.clone(), &content_type)
             .await?;
 
         // Image processing (Blocking offloaded)
-        let (width, height, thumbnail_data, preview_data) =
-            if file.content_type.starts_with("image/") {
-                let data_clone = file.data.clone();
+        let (width, height, thumbnail_data, preview_data) = if content_type.starts_with("image/") {
+            let data_clone = file.data.clone();
 
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(img) = image::load_from_memory(&data_clone) {
-                        let (w, h) = img.dimensions();
-                        let w_out = Some(w as i32);
-                        let h_out = Some(h as i32);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(img) = image::load_from_memory(&data_clone) {
+                    let (w, h) = img.dimensions();
+                    let w_out = Some(w as i32);
+                    let h_out = Some(h as i32);
 
-                        // Generate thumbnail (400x400 max) as JPEG for Mattermost mobile compatibility
-                        let thumb_data = if w > 400 || h > 400 {
-                            let thumb = img.thumbnail(400, 400);
-                            let mut buf = Vec::new();
-                            // Use JPEG format for mobile compatibility (Mattermost expects image/jpeg)
-                            if thumb
-                                .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
-                                .is_ok()
-                            {
-                                Some(buf)
-                            } else {
-                                None
-                            }
+                    // Generate thumbnail (400x400 max) as JPEG for Mattermost mobile compatibility
+                    let thumb_data = if w > 400 || h > 400 {
+                        let thumb = img.thumbnail(400, 400);
+                        let mut buf = Vec::new();
+                        // Use JPEG format for mobile compatibility (Mattermost expects image/jpeg)
+                        if thumb
+                            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+                            .is_ok()
+                        {
+                            Some(buf)
                         } else {
-                            // For small images, generate JPEG thumbnail for consistency
-                            let mut buf = Vec::new();
-                            if img
-                                .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
-                                .is_ok()
-                            {
-                                Some(buf)
-                            } else {
-                                None
-                            }
-                        };
-
-                        // Generate preview (1024x1024 max) as JPEG for Mattermost mobile compatibility
-                        let preview_data = if w > 1024 || h > 1024 {
-                            let preview = img.thumbnail(1024, 1024);
-                            let mut buf = Vec::new();
-                            // Use JPEG format for mobile compatibility (Mattermost expects image/jpeg)
-                            if preview
-                                .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
-                                .is_ok()
-                            {
-                                Some(buf)
-                            } else {
-                                None
-                            }
-                        } else {
-                            // If smaller than 1024, generate JPEG preview for consistency
-                            let mut buf = Vec::new();
-                            if img
-                                .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
-                                .is_ok()
-                            {
-                                Some(buf)
-                            } else {
-                                None
-                            }
-                        };
-
-                        (w_out, h_out, thumb_data, preview_data)
+                            None
+                        }
                     } else {
-                        (None, None, None, None)
-                    }
-                })
-                .await
-                .unwrap_or((None, None, None, None))
-            } else {
-                (None, None, None, None)
-            };
+                        // For small images, generate JPEG thumbnail for consistency
+                        let mut buf = Vec::new();
+                        if img
+                            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+                            .is_ok()
+                        {
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    };
+
+                    // Generate preview (1024x1024 max) as JPEG for Mattermost mobile compatibility
+                    let preview_data = if w > 1024 || h > 1024 {
+                        let preview = img.thumbnail(1024, 1024);
+                        let mut buf = Vec::new();
+                        // Use JPEG format for mobile compatibility (Mattermost expects image/jpeg)
+                        if preview
+                            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+                            .is_ok()
+                        {
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    } else {
+                        // If smaller than 1024, generate JPEG preview for consistency
+                        let mut buf = Vec::new();
+                        if img
+                            .write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+                            .is_ok()
+                        {
+                            Some(buf)
+                        } else {
+                            None
+                        }
+                    };
+
+                    (w_out, h_out, thumb_data, preview_data)
+                } else {
+                    (None, None, None, None)
+                }
+            })
+            .await
+            .unwrap_or((None, None, None, None))
+        } else {
+            (None, None, None, None)
+        };
 
         let mut thumbnail_key = None;
         if let Some(t_data) = thumbnail_data {
@@ -208,9 +278,9 @@ async fn upload_file(
         .bind(file_id)
         .bind(auth.user_id)
         .bind(channel_id)
-        .bind(&file.filename)
+        .bind(&filename)
         .bind(&key)
-        .bind(&file.content_type)
+        .bind(&content_type)
         .bind(size)
         .bind(&hash)
         .bind(width)
@@ -228,10 +298,10 @@ async fn upload_file(
             create_at: Utc::now().timestamp_millis(),
             update_at: Utc::now().timestamp_millis(),
             delete_at: 0,
-            name: file.filename,
+            name: filename,
             extension,
             size,
-            mime_type: file.content_type,
+            mime_type: content_type,
             width: width.unwrap_or(0),
             height: height.unwrap_or(0),
             has_preview_image: has_thumbnail,
@@ -307,7 +377,9 @@ async fn get_file_info(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     // Get file extension from name
-    let extension = file.name.rsplit('.').next().unwrap_or("").to_string();
+    let extension = filename_extension(&file.name)
+        .unwrap_or_default()
+        .to_string();
 
     Ok(Json(mm::FileInfo {
         id: encode_mm_id(file.id),
@@ -344,10 +416,14 @@ async fn get_thumbnail(
     if file.has_thumbnail {
         if let Some(key) = file.thumbnail_key {
             let data = state.s3_client.download(&key).await?;
+            let content_type = if key.ends_with(".webp") {
+                "image/webp"
+            } else {
+                "image/jpeg"
+            };
             return Ok((
                 [
-                    // Use image/jpeg for Mattermost mobile compatibility
-                    (header::CONTENT_TYPE, "image/jpeg".to_string()),
+                    (header::CONTENT_TYPE, content_type.to_string()),
                     (
                         header::CONTENT_DISPOSITION,
                         format!("inline; filename=\"thumb_{}\"", file.name),
@@ -387,14 +463,43 @@ async fn get_preview(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     if file.mime_type.starts_with("image/") {
-        if file.has_thumbnail {
-            // Derive preview key from convention (now using .jpg for JPEG format)
-            let preview_key = format!("previews/{}/{}.jpg", file.uploader_id, file.id);
-            if let Ok(data) = state.s3_client.download(&preview_key).await {
+        // Derive preview key from convention (now using .jpg for JPEG format)
+        let preview_key = format!("previews/{}/{}.jpg", file.uploader_id, file.id);
+        if let Ok(data) = state.s3_client.download(&preview_key).await {
+            return Ok((
+                [
+                    // Use image/jpeg for Mattermost mobile compatibility
+                    (header::CONTENT_TYPE, "image/jpeg".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("inline; filename=\"preview_{}\"", file.name),
+                    ),
+                    (
+                        header::CACHE_CONTROL,
+                        "max-age=2592000, private".to_string(),
+                    ),
+                    // Security headers
+                    (
+                        header::HeaderName::from_static("x-content-type-options"),
+                        "nosniff".to_string(),
+                    ),
+                ],
+                data,
+            )
+                .into_response());
+        }
+
+        // If preview not found but thumbnail exists, try to serve thumbnail as fallback
+        if let Some(thumb_key) = &file.thumbnail_key {
+            if let Ok(data) = state.s3_client.download(thumb_key).await {
+                let content_type = if thumb_key.ends_with(".webp") {
+                    "image/webp"
+                } else {
+                    "image/jpeg"
+                };
                 return Ok((
                     [
-                        // Use image/jpeg for Mattermost mobile compatibility
-                        (header::CONTENT_TYPE, "image/jpeg".to_string()),
+                        (header::CONTENT_TYPE, content_type.to_string()),
                         (
                             header::CONTENT_DISPOSITION,
                             format!("inline; filename=\"preview_{}\"", file.name),
@@ -403,7 +508,6 @@ async fn get_preview(
                             header::CACHE_CONTROL,
                             "max-age=2592000, private".to_string(),
                         ),
-                        // Security headers
                         (
                             header::HeaderName::from_static("x-content-type-options"),
                             "nosniff".to_string(),
@@ -412,31 +516,6 @@ async fn get_preview(
                     data,
                 )
                     .into_response());
-            }
-
-            // If preview not found but thumbnail exists, try to serve thumbnail as fallback
-            if let Some(thumb_key) = &file.thumbnail_key {
-                if let Ok(data) = state.s3_client.download(thumb_key).await {
-                    return Ok((
-                        [
-                            (header::CONTENT_TYPE, "image/jpeg".to_string()),
-                            (
-                                header::CONTENT_DISPOSITION,
-                                format!("inline; filename=\"preview_{}\"", file.name),
-                            ),
-                            (
-                                header::CACHE_CONTROL,
-                                "max-age=2592000, private".to_string(),
-                            ),
-                            (
-                                header::HeaderName::from_static("x-content-type-options"),
-                                "nosniff".to_string(),
-                            ),
-                        ],
-                        data,
-                    )
-                        .into_response());
-                }
             }
         }
     }
