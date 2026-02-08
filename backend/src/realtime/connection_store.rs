@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use serde_json::Value;
 use tokio::time::interval;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 /// Time to retain connection state after disconnect (5 minutes)
@@ -208,6 +208,7 @@ impl ConnectionStore {
         user_id: Uuid,
         requested_seq: Option<i64>,
     ) -> (Arc<ConnectionState>, bool, Vec<SequencedMessage>) {
+        let resume_requested = connection_id.is_some();
         let mut rejected_resume = false;
 
         // Try to resume existing connection
@@ -244,18 +245,22 @@ impl ConnectionStore {
         }
 
         // Create new connection
-        let new_conn_id = if rejected_resume {
-            Uuid::new_v4().to_string()
-        } else {
-            connection_id.unwrap_or_else(|| Uuid::new_v4().to_string())
-        };
-        // Start from the next server-side sequence value:
-        // - new connections begin at 1 (hello uses seq 0 in the v4 adapter)
-        // - resumption starts at requested_seq + 1 to avoid duplicate seq delivery
-        let initial_seq = requested_seq
-            .map(|s| s.saturating_add(1))
-            .unwrap_or(1)
-            .max(1);
+        // No active resumable state found: force a brand-new connection ID.
+        // Mattermost clients rely on connection_id changes to reset local sequence state.
+        let new_conn_id = Uuid::new_v4().to_string();
+        // New streams always start at seq 1 (hello is seq 0 in the v4 adapter).
+        // Requested sequence applies only to true resumptions above.
+        let initial_seq = 1;
+
+        if resume_requested {
+            info!(
+                requested_connection_id = ?connection_id,
+                assigned_connection_id = %new_conn_id,
+                requested_seq = requested_seq.unwrap_or(-1),
+                rejected_resume = rejected_resume,
+                "Resume request could not be satisfied; creating fresh websocket stream"
+            );
+        }
 
         let state = ConnectionState::new(new_conn_id.clone(), user_id, initial_seq);
 
@@ -270,6 +275,9 @@ impl ConnectionStore {
         debug!(
             connection_id = %new_conn_id,
             user_id = %user_id,
+            resume_requested = resume_requested,
+            requested_seq = requested_seq.unwrap_or(-1),
+            rejected_resume = rejected_resume,
             "New connection created"
         );
 
@@ -512,7 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_connection_with_requested_sequence_starts_at_next_value() {
+    async fn test_new_connection_with_requested_sequence_starts_at_one() {
         let store = ConnectionStore::new();
         let user_id = Uuid::new_v4();
 
@@ -521,7 +529,26 @@ mod tests {
             .queue_message(&state.connection_id, json!({"msg":"first"}))
             .expect("message should be queued");
 
-        assert_eq!(first, 11);
+        assert_eq!(first, 1);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_resume_connection_id_creates_new_connection_id() {
+        let store = ConnectionStore::new();
+        let user_id = Uuid::new_v4();
+        let requested_connection_id = Uuid::new_v4().to_string();
+
+        let (state, is_resumed, missed) =
+            store.resume_or_create(Some(requested_connection_id.clone()), user_id, Some(10));
+
+        assert!(!is_resumed);
+        assert!(missed.is_empty());
+        assert_ne!(state.connection_id, requested_connection_id);
+
+        let first = store
+            .queue_message(&state.connection_id, json!({"msg":"first"}))
+            .expect("message should be queued");
+        assert_eq!(first, 1);
     }
 
     #[tokio::test]

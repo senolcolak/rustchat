@@ -221,12 +221,21 @@ async fn run_connection(
     let store = state.connection_store.clone();
     let replay_store = store.clone();
 
-    // Check if this is a resumption attempt before moving connection_id
-    let is_resumption_attempt = connection_id.is_some();
+    // Treat empty connection IDs as "not provided" (fresh connection),
+    // matching Mattermost reliable websocket semantics.
+    let requested_connection_id = connection_id.filter(|id| !id.is_empty());
+    let is_resumption_attempt = requested_connection_id.is_some();
 
     // Create WebSocket actor with session resumption
-    let (actor, missed_messages) =
-        WebSocketActor::new(socket, store, user_id, connection_id, sequence_number, addr).await;
+    let (actor, missed_messages) = WebSocketActor::new(
+        socket,
+        store,
+        user_id,
+        requested_connection_id.clone(),
+        sequence_number,
+        addr,
+    )
+    .await;
 
     let actor_connection_id = actor.connection_id.clone();
     let is_resumed = !missed_messages.is_empty() || is_resumption_attempt;
@@ -255,9 +264,27 @@ async fn run_connection(
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
-    // Send hello event. For reliable websockets, clients validate `hello.seq`
-    // against the requested `sequence_number` from the connection URL.
-    let hello_seq = sequence_number.unwrap_or(0).max(0);
+    // Send hello event. Mattermost reliable websocket clients reset their local sequence
+    // to 0 whenever connection_id changes, so hello.seq must also be 0 in that case.
+    // Only preserve requested sequence when we truly resumed the same connection_id.
+    let requested_seq = sequence_number.unwrap_or(0).max(0);
+    let resumed_same_connection = requested_connection_id
+        .as_deref()
+        .map(|id| id == actor_connection_id.as_str())
+        .unwrap_or(false);
+    let hello_seq = if resumed_same_connection {
+        requested_seq
+    } else {
+        0
+    };
+    info!(
+        connection_id = %actor_connection_id,
+        requested_connection_id = ?requested_connection_id,
+        requested_seq = requested_seq,
+        hello_seq = hello_seq,
+        resumed_same_connection = resumed_same_connection,
+        "Prepared hello message"
+    );
     let hello = mm::WebSocketMessage {
         seq: Some(hello_seq),
         event: "hello".to_string(),
