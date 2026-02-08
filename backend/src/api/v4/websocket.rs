@@ -360,6 +360,7 @@ async fn run_connection(
                     Some(WsEvent::MessageReceived(text)) => {
                         handle_client_text_message(
                             &state,
+                            &actor,
                             user_id,
                             &username,
                             &actor_connection_id,
@@ -370,6 +371,7 @@ async fn run_connection(
                     Some(WsEvent::BinaryReceived(bytes)) => {
                         handle_client_binary_message(
                             &state,
+                            &actor,
                             user_id,
                             &username,
                             &actor_connection_id,
@@ -433,6 +435,7 @@ async fn run_connection(
 /// Handle a message from the client
 async fn handle_client_text_message(
     state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
     user_id: Uuid,
     username: &str,
     connection_id: &str,
@@ -446,7 +449,7 @@ async fn handle_client_text_message(
     );
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        handle_client_value_message(state, user_id, username, connection_id, &value).await;
+        handle_client_value_message(state, actor, user_id, username, connection_id, &value).await;
     }
 
     let _ = websocket_core::handle_client_envelope_message(
@@ -461,6 +464,7 @@ async fn handle_client_text_message(
 
 async fn handle_client_binary_message(
     state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
     user_id: Uuid,
     username: &str,
     connection_id: &str,
@@ -472,7 +476,7 @@ async fn handle_client_binary_message(
             connection_id = connection_id,
             "Received binary client message"
         );
-        handle_client_value_message(state, user_id, username, connection_id, &value).await;
+        handle_client_value_message(state, actor, user_id, username, connection_id, &value).await;
     } else {
         warn!(
             user_id = %user_id,
@@ -484,6 +488,7 @@ async fn handle_client_binary_message(
 
 async fn handle_client_value_message(
     state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
     user_id: Uuid,
     username: &str,
     connection_id: &str,
@@ -499,7 +504,36 @@ async fn handle_client_value_message(
         return;
     }
 
-    if action == "user_typing" {
+    if action == "ping" {
+        let seq_reply = value
+            .get("seq")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let server_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        let response = json!({
+            "status": "OK",
+            "seq_reply": seq_reply,
+            "data": {
+                "text": "pong",
+                "version": format!("rustchat-{}", env!("CARGO_PKG_VERSION")),
+                "server_time": server_time_ms,
+                "node_id": ""
+            }
+        });
+
+        if let Err(err) = actor.send_raw(response) {
+            warn!(
+                user_id = %user_id,
+                connection_id = connection_id,
+                error = %err,
+                "Failed to send ping response"
+            );
+        }
+    } else if action == "user_typing" {
         if let Some(data) = value.get("data") {
             if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
                 if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
