@@ -255,9 +255,11 @@ async fn run_connection(
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
-    // Send hello event
+    // Send hello event. For reliable websockets, clients validate `hello.seq`
+    // against the requested `sequence_number` from the connection URL.
+    let hello_seq = sequence_number.unwrap_or(0).max(0);
     let hello = mm::WebSocketMessage {
-        seq: Some(0),
+        seq: Some(hello_seq),
         event: "hello".to_string(),
         data: json!({
             "connection_id": actor_connection_id.clone(),
