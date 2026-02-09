@@ -27,11 +27,11 @@ async fn get_custom_profile_fields(
 ) -> ApiResult<Json<Vec<CustomProfileFieldResponse>>> {
     let fields: Vec<CustomProfileField> = sqlx::query_as(
         r#"
-        SELECT id, group_id, name, type as field_type, attrs, target_id, target_type, 
-               create_at, update_at, delete_at
+        SELECT id, group_id, name, field_type, attrs, target_id, target_type,
+               created_at, updated_at, deleted_at
         FROM custom_profile_fields
-        WHERE delete_at = 0
-        ORDER BY create_at ASC
+        WHERE deleted_at IS NULL
+        ORDER BY created_at ASC
         "#,
     )
     .fetch_all(&state.db)
