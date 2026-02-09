@@ -59,6 +59,19 @@ where
                 .to_str()
                 .map_err(|_| AppError::Unauthorized("Invalid token header".to_string()))?
                 .trim()
+        } else if let Some(cookie_header) = parts.headers.get(HeaderName::from_static("cookie")) {
+            // Parse cookies to find MMAUTHTOKEN - used by img/video tags that can't send headers
+            let cookie_str = cookie_header
+                .to_str()
+                .map_err(|_| AppError::Unauthorized("Invalid cookie header".to_string()))?;
+            
+            cookie_str
+                .split(';')
+                .map(|s| s.trim())
+                .find_map(|cookie| {
+                    cookie.strip_prefix("MMAUTHTOKEN=")
+                })
+                .ok_or_else(|| AppError::Unauthorized("Missing MMAUTHTOKEN cookie".to_string()))?
         } else {
             return Err(AppError::Unauthorized(
                 "Missing authorization header".to_string(),
