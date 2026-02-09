@@ -18,7 +18,7 @@ export const useCallsStore = defineStore('calls', () => {
     const { onEvent } = useWebSocket()
     const toast = useToast()
     const authStore = useAuthStore()
-    
+
     // State
     const callsConfig = ref<CallsConfig | null>(null)
     const activeCalls = ref<Map<string, CallState>>(new Map())
@@ -28,6 +28,7 @@ export const useCallsStore = defineStore('calls', () => {
     const isMuted = ref(true)
     const isHandRaised = ref(false)
     const isScreenSharing = ref(false)
+    const speakingParticipants = ref<Set<string>>(new Set())
 
     // Getters
     const isInCall = computed(() => !!currentCall.value)
@@ -35,7 +36,7 @@ export const useCallsStore = defineStore('calls', () => {
         if (!currentCall.value) return []
         return Object.values(currentCall.value.call.sessions || {})
     })
-    
+
     const currentChannelCall = computed(() => (channelId: string) => {
         return activeCalls.value.get(channelId)
     })
@@ -77,6 +78,21 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_user_muted', (data) => {
         console.log('User muted:', data)
+        const eventChannelId = data.channel_id_raw || data.channel_id
+        if (currentCall.value?.channelId === eventChannelId) {
+            const userId = data.user_id_raw || data.user_id
+            if (userId === authStore.user?.id) {
+                isMuted.value = data.muted
+                // Update local tracks
+                const active = currentCall.value
+                if (active) {
+                    active.localStream?.getAudioTracks().forEach(track => {
+                        track.enabled = !data.muted
+                    })
+                }
+            }
+            loadCallForChannel(eventChannelId)
+        }
     })
 
     onEvent('custom_com.mattermost.calls_user_unmuted', (data) => {
@@ -89,6 +105,68 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_lower_hand', (data) => {
         console.log('Hand lowered:', data)
+        const eventChannelId = data.channel_id_raw || data.channel_id
+        if (currentCall.value?.channelId === eventChannelId) {
+            const userId = data.user_id_raw || data.user_id
+            if (userId === authStore.user?.id) {
+                isHandRaised.value = false
+            }
+            loadCallForChannel(eventChannelId)
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_user_voice_on', (data) => {
+        const sessionId = data.session_id_raw || data.session_id
+        if (sessionId) {
+            speakingParticipants.value.add(sessionId)
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_user_voice_off', (data) => {
+        const sessionId = data.session_id_raw || data.session_id
+        if (sessionId) {
+            speakingParticipants.value.delete(sessionId)
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_host_mute', (data) => {
+        if (!currentCall.value) return
+        const sessionId = data.session_id_raw || data.session_id
+        if (sessionId === currentCall.value?.mySessionId) {
+            isMuted.value = true
+            const active = currentCall.value
+            if (active) {
+                active.localStream?.getAudioTracks().forEach(track => {
+                    track.enabled = false
+                })
+            }
+            toast.info('Host muted you', 'Your microphone has been disabled by the host')
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_host_removed', (data) => {
+        if (!currentCall.value) return
+        const sessionId = data.session_id_raw || data.session_id
+        if (sessionId === currentCall.value?.mySessionId) {
+            leaveCall()
+            toast.error('Removed from call', 'You have been removed from the call by the host')
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_host_changed', (data) => {
+        const eventChannelId = data.channel_id_raw || data.channel_id
+        if (currentCall.value?.channelId === eventChannelId) {
+            currentCall.value.call.host_id = data.host_id_raw || data.host_id
+        }
+    })
+
+    onEvent('custom_com.mattermost.calls_ringing', (data) => {
+        if (isInCall.value) return
+        const eventChannelId = data.channel_id_raw || data.channel_id
+        const callerId = data.sender_id_raw || data.sender_id
+        if (eventChannelId && callerId) {
+            setIncomingCall({ channelId: eventChannelId, callerId })
+        }
     })
 
     onEvent('custom_com.mattermost.calls_screen_on', (data) => {
@@ -218,10 +296,10 @@ export const useCallsStore = defineStore('calls', () => {
                 currentCall.value.peerConnection = rtc.peerConnection
                 currentCall.value.localStream = rtc.localStream
             }
-            
+
             isExpanded.value = true
             toast.success('Call started', 'You are now in a call')
-            
+
             return callData
         } catch (error: any) {
             cleanupWebRTC()
@@ -274,10 +352,10 @@ export const useCallsStore = defineStore('calls', () => {
                 currentCall.value.peerConnection = rtc.peerConnection
                 currentCall.value.localStream = rtc.localStream
             }
-            
+
             isExpanded.value = true
             toast.success('Joined call', 'You are now in the call')
-            
+
         } catch (error: any) {
             cleanupWebRTC()
             currentCall.value = null
@@ -289,22 +367,22 @@ export const useCallsStore = defineStore('calls', () => {
 
     async function leaveCall() {
         if (!currentCall.value) return
-        
+
         const channelId = currentCall.value.channelId
-        
+
         try {
             // Clean up WebRTC
             cleanupWebRTC()
-            
+
             // Leave on server
             await callsApi.leaveCall(channelId)
-            
+
             currentCall.value = null
             isMuted.value = true
             isHandRaised.value = false
             isScreenSharing.value = false
             isExpanded.value = false
-            
+
         } catch (error) {
             console.error('Failed to leave call', error)
         }
@@ -312,22 +390,22 @@ export const useCallsStore = defineStore('calls', () => {
 
     async function endCall() {
         if (!currentCall.value) return
-        
+
         const channelId = currentCall.value.channelId
-        
+
         try {
             // Clean up WebRTC
             cleanupWebRTC()
-            
+
             // End on server
             await callsApi.endCall(channelId)
-            
+
             currentCall.value = null
             isMuted.value = true
             isHandRaised.value = false
             isScreenSharing.value = false
             isExpanded.value = false
-            
+
         } catch (error) {
             console.error('Failed to end call', error)
             toast.error('Failed to end call', 'Only the host can end the call')
@@ -338,27 +416,27 @@ export const useCallsStore = defineStore('calls', () => {
     async function initializeWebRTC(channelId: string, iceServers: RTCIceServer[]) {
         try {
             // Get user media
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                audio: true, 
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
                 video: false // Audio only for now
             })
             // Calls start muted server-side, keep local tracks consistent.
             stream.getAudioTracks().forEach(track => {
                 track.enabled = false
             })
-            
+
             // Create peer connection
             const pc = new RTCPeerConnection({
                 iceServers: (iceServers || []).length > 0 ? iceServers : [
                     { urls: 'stun:stun.l.google.com:19302' }
                 ]
             })
-            
+
             // Add local stream tracks
             stream.getTracks().forEach(track => {
                 pc.addTrack(track, stream)
             })
-            
+
             // Handle ICE candidates
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
@@ -370,13 +448,13 @@ export const useCallsStore = defineStore('calls', () => {
                     )
                 }
             }
-            
+
             // Create and send offer
             const offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
-            
+
             const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
-            
+
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription({
                 type: 'answer',
@@ -387,7 +465,7 @@ export const useCallsStore = defineStore('calls', () => {
                 peerConnection: pc,
                 localStream: stream,
             }
-            
+
         } catch (error) {
             console.error('WebRTC initialization failed', error)
             throw error
@@ -406,7 +484,7 @@ export const useCallsStore = defineStore('calls', () => {
     // Call controls
     async function toggleMute() {
         if (!currentCall.value) return
-        
+
         const channelId = currentCall.value.channelId
         try {
             if (isMuted.value) {
@@ -430,7 +508,7 @@ export const useCallsStore = defineStore('calls', () => {
 
     async function toggleHand() {
         if (!currentCall.value) return
-        
+
         const channelId = currentCall.value.channelId
         try {
             if (isHandRaised.value) {
@@ -446,7 +524,7 @@ export const useCallsStore = defineStore('calls', () => {
 
     async function toggleScreenShare() {
         if (!currentCall.value) return
-        
+
         const channelId = currentCall.value.channelId
         try {
             await callsApi.toggleScreenShare(channelId)
@@ -458,11 +536,48 @@ export const useCallsStore = defineStore('calls', () => {
 
     async function sendReaction(emoji: string) {
         if (!currentCall.value) return
-        
+
         try {
             await callsApi.sendReaction(currentCall.value.channelId, emoji)
         } catch (error) {
             console.error('Failed to send reaction', error)
+        }
+    }
+
+    async function ring(channelId: string) {
+        try {
+            await callsApi.ringUsers(channelId)
+            toast.success('Ringing participants', 'Other channel members have been notified')
+        } catch (error) {
+            console.error('Failed to ring users', error)
+        }
+    }
+
+    async function hostMute(sessionId: string) {
+        if (!currentCall.value) return
+        try {
+            await callsApi.hostMute(currentCall.value.channelId, sessionId)
+        } catch (error) {
+            console.error('Failed to host mute', error)
+        }
+    }
+
+    async function hostMuteOthers() {
+        if (!currentCall.value) return
+        try {
+            await callsApi.hostMuteOthers(currentCall.value.channelId)
+            toast.success('Muted all', 'All other participants have been muted')
+        } catch (error) {
+            console.error('Failed to host mute others', error)
+        }
+    }
+
+    async function hostRemove(sessionId: string) {
+        if (!currentCall.value) return
+        try {
+            await callsApi.hostRemove(currentCall.value.channelId, sessionId)
+        } catch (error) {
+            console.error('Failed to host remove', error)
         }
     }
 
@@ -485,12 +600,13 @@ export const useCallsStore = defineStore('calls', () => {
         isMuted,
         isHandRaised,
         isScreenSharing,
-        
+        speakingParticipants,
+
         // Getters
         isInCall,
         currentCallParticipants,
         currentChannelCall,
-        
+
         // Actions
         loadConfig,
         loadCalls,
@@ -503,6 +619,10 @@ export const useCallsStore = defineStore('calls', () => {
         toggleHand,
         toggleScreenShare,
         sendReaction,
+        ring,
+        hostMute,
+        hostMuteOthers,
+        hostRemove,
         setIncomingCall,
         toggleExpanded,
         initializeWebRTC,

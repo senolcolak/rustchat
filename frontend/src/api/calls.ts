@@ -77,6 +77,7 @@ export interface StartCallResponse {
     channel_id: string
     start_at: number
     owner_id: string
+    host_id: string
 }
 
 export interface ApiResp {
@@ -109,6 +110,8 @@ interface CallStateWire {
     start_at?: number
     owner_id?: string
     owner_id_raw?: string
+    host_id?: string
+    host_id_raw?: string
     participants?: string[]
     participants_raw?: string[]
     sessions?: Record<string, CallSession>
@@ -168,7 +171,7 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
             channel_id: channelId,
             start_at: raw.start_at || Date.now(),
             owner_id: raw.owner_id_raw || raw.owner_id || '',
-            host_id: raw.owner_id_raw || raw.owner_id || '',
+            host_id: raw.host_id_raw || raw.host_id || raw.owner_id_raw || raw.owner_id || '',
             thread_id: raw.thread_id,
             screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_id,
             sessions: raw.sessions,
@@ -191,7 +194,7 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
         channel_id: channelId,
         start_at: raw.start_at || Date.now(),
         owner_id: raw.owner_id_raw || raw.owner_id || '',
-        host_id: raw.owner_id_raw || raw.owner_id || '',
+        host_id: raw.host_id_raw || raw.host_id || raw.owner_id_raw || raw.owner_id || '',
         thread_id: raw.thread_id,
         screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_id,
         sessions,
@@ -365,6 +368,15 @@ export default {
 
     hostRemove(channelId: string, sessionId: string) {
         return apiClient.post<ApiResp>(`${CALLS_ROUTE}/calls/${channelId}/host/remove`, { session_id: sessionId })
+    },
+
+    // Ringing
+    ringUsers(channelId: string) {
+        return apiClient.post<ApiResp>(`${CALLS_ROUTE}/calls/${channelId}/ring`)
+    },
+
+    dismissNotification(channelId: string) {
+        return apiClient.post<ApiResp>(`${CALLS_ROUTE}/calls/${channelId}/dismiss-notification`)
     },
 
     // Recording
