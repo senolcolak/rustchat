@@ -11,6 +11,7 @@ export interface CurrentCall {
     mySessionId: string
     peerConnection: RTCPeerConnection | null
     localStream: MediaStream | null
+    screenStream: MediaStream | null
     remoteStreams: Map<string, MediaStream>
 }
 
@@ -155,7 +156,7 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_host_changed', (data) => {
         const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
+        if (currentCall.value && currentCall.value.channelId === eventChannelId) {
             currentCall.value.call.host_id = data.host_id_raw || data.host_id
         }
     })
@@ -172,7 +173,7 @@ export const useCallsStore = defineStore('calls', () => {
     onEvent('custom_com.mattermost.calls_screen_on', (data) => {
         console.log('Screen share on:', data)
         const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
+        if (currentCall.value && currentCall.value.channelId === eventChannelId) {
             isScreenSharing.value = true
         }
     })
@@ -180,7 +181,7 @@ export const useCallsStore = defineStore('calls', () => {
     onEvent('custom_com.mattermost.calls_screen_off', (data) => {
         console.log('Screen share off:', data)
         const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
+        if (currentCall.value && currentCall.value.channelId === eventChannelId) {
             isScreenSharing.value = false
         }
     })
@@ -287,14 +288,15 @@ export const useCallsStore = defineStore('calls', () => {
                 mySessionId,
                 peerConnection: null,
                 localStream: null,
+                screenStream: null,
                 remoteStreams: new Map()
             }
 
             // Initialize WebRTC
             const rtc = await initializeWebRTC(channelId, config.ICEServersConfigs)
             if (currentCall.value) {
-                currentCall.value.peerConnection = rtc.peerConnection
-                currentCall.value.localStream = rtc.localStream
+                currentCall.value.peerConnection = rtc.pc
+                currentCall.value.localStream = rtc.stream
             }
 
             isExpanded.value = true
@@ -334,6 +336,7 @@ export const useCallsStore = defineStore('calls', () => {
                 mySessionId,
                 peerConnection: null,
                 localStream: null,
+                screenStream: null,
                 remoteStreams: new Map()
             }
 
@@ -349,8 +352,8 @@ export const useCallsStore = defineStore('calls', () => {
             // Initialize WebRTC
             const rtc = await initializeWebRTC(channelId, config.ICEServersConfigs)
             if (currentCall.value) {
-                currentCall.value.peerConnection = rtc.peerConnection
-                currentCall.value.localStream = rtc.localStream
+                currentCall.value.peerConnection = rtc.pc
+                currentCall.value.localStream = rtc.stream
             }
 
             isExpanded.value = true
@@ -437,6 +440,17 @@ export const useCallsStore = defineStore('calls', () => {
                 pc.addTrack(track, stream)
             })
 
+            // Handle incoming tracks
+            pc.ontrack = (event) => {
+                console.log('Received remote track:', event.track.kind, event.streams)
+                if (event.streams && event.streams[0] && currentCall.value) {
+                    const remoteStream = event.streams[0]
+                    // The stream ID contains the session ID if the SFU set it correctly
+                    // For now, we'll store it by its own ID or a fixed key if only 1 remote
+                    currentCall.value.remoteStreams.set(remoteStream.id, remoteStream)
+                }
+            }
+
             // Handle ICE candidates
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
@@ -462,8 +476,8 @@ export const useCallsStore = defineStore('calls', () => {
             }))
 
             return {
-                peerConnection: pc,
-                localStream: stream,
+                pc,
+                stream
             }
 
         } catch (error) {
@@ -523,15 +537,57 @@ export const useCallsStore = defineStore('calls', () => {
     }
 
     async function toggleScreenShare() {
-        if (!currentCall.value) return
+        if (!currentCall.value || !currentCall.value.peerConnection) return
 
         const channelId = currentCall.value.channelId
+        const pc = currentCall.value.peerConnection
+
         try {
-            await callsApi.toggleScreenShare(channelId)
-            // Screen sharing state is updated via WebSocket events
+            if (isScreenSharing.value) {
+                // Stop screen sharing
+                if (currentCall.value.screenStream) {
+                    currentCall.value.screenStream.getTracks().forEach(track => {
+                        track.stop()
+                        const sender = pc.getSenders().find(s => s.track === track)
+                        if (sender) pc.removeTrack(sender)
+                    })
+                    currentCall.value.screenStream = null
+                }
+
+                await callsApi.toggleScreenShare(channelId)
+                await renegotiate(channelId, pc)
+            } else {
+                // Start screen sharing
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: false
+                })
+
+                currentCall.value.screenStream = stream
+
+                stream.getTracks().forEach(track => {
+                    // Set stream ID to contain "screen" so SFU can detect it
+                    pc.addTrack(track, stream)
+                })
+
+                await callsApi.toggleScreenShare(channelId)
+                await renegotiate(channelId, pc)
+            }
         } catch (error) {
             console.error('Failed to toggle screen share', error)
+            isScreenSharing.value = false
         }
+    }
+
+    async function renegotiate(channelId: string, pc: RTCPeerConnection) {
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
+        await pc.setRemoteDescription(new RTCSessionDescription({
+            type: 'answer',
+            sdp: answer.sdp
+        }))
     }
 
     async function sendReaction(emoji: string) {

@@ -21,8 +21,9 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
-use webrtc::track::track_local::TrackLocalWriter;
+use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 
 use crate::config::CallsConfig;
 
@@ -140,14 +141,48 @@ impl SFU {
         self.setup_ice_handlers(&peer_connection, user_id, signaling_tx.clone())
             .await?;
 
+        // Create outgoing tracks for this participant
+        // These tracks will receive media from all other participants
+        let audio_track = Arc::new(TrackLocalStaticRTP::new(
+            RTCRtpCodecCapability {
+                mime_type: "audio/opus".to_string(),
+                ..Default::default()
+            },
+            format!("audio-{}", session_id),
+            format!("stream-{}", session_id),
+        ));
+
+        let video_track = Arc::new(TrackLocalStaticRTP::new(
+            RTCRtpCodecCapability {
+                mime_type: "video/VP8".to_string(),
+                ..Default::default()
+            },
+            format!("video-{}", session_id),
+            format!("stream-{}", session_id),
+        ));
+
+        let screen_track = Arc::new(TrackLocalStaticRTP::new(
+            RTCRtpCodecCapability {
+                mime_type: "video/VP8".to_string(),
+                ..Default::default()
+            },
+            format!("screen-{}", session_id),
+            format!("stream-{}", session_id),
+        ));
+
+        // Add tracks to peer connection
+        peer_connection.add_track(audio_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
+        peer_connection.add_track(video_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
+        peer_connection.add_track(screen_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
+
         // Store participant
         let participant = Participant {
             user_id,
             session_id,
             peer_connection: peer_connection.clone(),
-            audio_track: None,
-            video_track: None,
-            screen_track: None,
+            audio_track: Some(audio_track),
+            video_track: Some(video_track),
+            screen_track: Some(screen_track),
             signaling_tx: signaling_tx.clone(),
         };
 
@@ -405,9 +440,16 @@ impl SFU {
                                 }
                             }
                             webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video => {
-                                if let Some(video_track) = &participant.video_track {
-                                    // Write RTP packet to track
-                                    let _ = video_track.write_rtp(&packet).await;
+                                // Check if this is a screen share track (simplified detection)
+                                let is_screen = track.stream_id().contains("screen");
+                                if is_screen {
+                                    if let Some(screen_track) = &participant.screen_track {
+                                        let _ = screen_track.write_rtp(&packet).await;
+                                    }
+                                } else {
+                                    if let Some(video_track) = &participant.video_track {
+                                        let _ = video_track.write_rtp(&packet).await;
+                                    }
                                 }
                             }
                             _ => {}

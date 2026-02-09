@@ -2,7 +2,7 @@
 import { useCallsStore } from '../../stores/calls'
 import { useAuthStore } from '../../stores/auth'
 import { useChannelStore } from '../../stores/channels'
-import { computed, ref } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 import { 
     Maximize2, 
     Minimize2, 
@@ -34,6 +34,25 @@ const showMenu = ref(false)
 const participantMenuOpen = ref<string | null>(null) // session_id for which menu is open
 
 const speakingParticipants = computed(() => callsStore.speakingParticipants)
+const screenVideoRef = ref<HTMLVideoElement | null>(null)
+
+const screenShareStream = computed(() => {
+    if (!activeCall.value) return null
+    
+    // If local user is sharing, use local screen stream
+    if (activeCall.value.screenStream) return activeCall.value.screenStream
+    
+    // Otherwise look for remote screen share track
+    // The SFU sends "screen-" prefixed stream IDs
+    const remoteStreams = Array.from(activeCall.value.remoteStreams.values())
+    return remoteStreams.find(s => s.id.includes('screen')) || null
+})
+
+watchEffect(() => {
+    if (screenVideoRef.value && screenShareStream.value) {
+        screenVideoRef.value.srcObject = screenShareStream.value
+    }
+})
 
 const channelName = computed(() => {
     if (!activeCall.value) return ''
@@ -133,8 +152,19 @@ const formatDuration = (startAt: number) => {
         <!-- Participants List (Expanded) -->
         <div v-if="isExpanded" class="flex-1 overflow-hidden flex">
             <!-- Main Area - Could show active speaker or screen share here -->
-            <div class="flex-1 bg-slate-950 flex items-center justify-center">
-                <div class="text-center">
+            <div class="flex-1 bg-slate-950 flex items-center justify-center relative overflow-hidden">
+                <div v-if="screenShareStream" class="absolute inset-0 flex items-center justify-center bg-black">
+                    <video 
+                        ref="screenVideoRef" 
+                        autoplay 
+                        playsinline 
+                        class="max-w-full max-h-full object-contain"
+                    ></video>
+                    <div v-if="activeCall.screenStream" class="absolute top-4 left-4 bg-indigo-600 px-3 py-1 rounded text-xs font-medium text-white shadow-lg">
+                        You are sharing your screen
+                    </div>
+                </div>
+                <div v-else class="text-center">
                     <div class="w-24 h-24 rounded-full bg-slate-800 flex items-center justify-center mb-4 mx-auto">
                         <Users class="w-12 h-12 text-slate-400" />
                     </div>
