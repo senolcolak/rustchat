@@ -34,6 +34,18 @@ pub use manager::SFUManager;
 use signaling::{SignalingMessage, SignalingServer};
 use tracks::TrackManager;
 
+#[derive(Debug, Clone)]
+pub enum VoiceEvent {
+    VoiceOn {
+        call_id: Uuid,
+        session_id: Uuid,
+    },
+    VoiceOff {
+        call_id: Uuid,
+        session_id: Uuid,
+    },
+}
+
 /// Represents a participant in the SFU
 pub struct Participant {
     pub user_id: Uuid,
@@ -47,17 +59,21 @@ pub struct Participant {
 
 /// SFU manages all peer connections and routes media
 pub struct SFU {
+    call_id: Uuid,
     config: CallsConfig,
     participants: Arc<RwLock<HashMap<Uuid, Participant>>>,
     track_manager: Arc<TrackManager>,
     signaling: Arc<SignalingServer>,
     pending_ice_candidates: Arc<RwLock<HashMap<Uuid, Vec<RTCIceCandidateInit>>>>,
+    voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
 }
 
 impl SFU {
     /// Create a new SFU instance
     pub async fn new(
+        call_id: Uuid,
         config: CallsConfig,
+        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         let participants = Arc::new(RwLock::new(HashMap::new()));
         let track_manager = Arc::new(TrackManager::new());
@@ -65,11 +81,13 @@ impl SFU {
         let pending_ice_candidates = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(Self {
+            call_id,
             config,
             participants,
             track_manager,
             signaling,
             pending_ice_candidates,
+            voice_event_tx,
         }))
     }
 
@@ -294,6 +312,8 @@ impl SFU {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let track_manager = self.track_manager.clone();
         let participants = self.participants.clone();
+        let call_id = self.call_id;
+        let voice_event_tx = self.voice_event_tx.clone();
 
         // Handle incoming tracks
         peer_connection.on_track(Box::new(
@@ -303,6 +323,8 @@ impl SFU {
                 let track_manager = track_manager.clone();
                 let participants = participants.clone();
                 let session_id = session_id;
+                let call_id = call_id;
+                let voice_event_tx = voice_event_tx.clone();
 
                 tokio::spawn(async move {
                     // Register the track
@@ -311,7 +333,15 @@ impl SFU {
                         .await;
 
                     // Forward track to other participants
-                    Self::forward_track(track, track_manager, participants, session_id).await;
+                    Self::forward_track(
+                        call_id,
+                        track,
+                        track_manager,
+                        participants,
+                        session_id,
+                        voice_event_tx,
+                    )
+                    .await;
                 });
 
                 Box::pin(async {})
@@ -323,18 +353,34 @@ impl SFU {
 
     /// Forward a track to all other participants
     async fn forward_track(
+        call_id: Uuid,
         track: Arc<TrackRemote>,
         track_manager: Arc<TrackManager>,
         participants: Arc<RwLock<HashMap<Uuid, Participant>>>,
         sender_session_id: Uuid,
+        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
     ) {
         // Read RTP packets from the track
         let mut rtp_buffer = vec![0u8; 1500];
+
+        let mut voice_on = false;
+        let mut last_packet_at = tokio::time::Instant::now();
 
         loop {
             // Read RTP packet
             match track.read(&mut rtp_buffer).await {
                 Ok((packet, _)) => {
+                    // Update voice activity if it's an audio track
+                    if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
+                        last_packet_at = tokio::time::Instant::now();
+                        if !voice_on {
+                            voice_on = true;
+                            let _ = voice_event_tx.send(VoiceEvent::VoiceOn {
+                                call_id,
+                                session_id: sender_session_id,
+                            });
+                        }
+                    }
                     // Get the packet data length
                     let n = packet.payload.len();
                     if n == 0 {
@@ -372,6 +418,18 @@ impl SFU {
                     // Track closed or error
                     break;
                 }
+            }
+
+            // Check for voice silence (no packets for 500ms)
+            if voice_on
+                && track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio
+                && last_packet_at.elapsed() > tokio::time::Duration::from_millis(500)
+            {
+                voice_on = false;
+                let _ = voice_event_tx.send(VoiceEvent::VoiceOff {
+                    call_id,
+                    session_id: sender_session_id,
+                });
             }
         }
 

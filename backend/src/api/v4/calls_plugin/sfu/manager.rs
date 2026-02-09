@@ -8,8 +8,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::SFU;
+use super::{SFU, VoiceEvent};
 use crate::config::CallsConfig;
+use tokio::sync::mpsc;
 
 /// Manages SFU instances for all active calls
 pub struct SFUManager {
@@ -17,14 +18,20 @@ pub struct SFUManager {
     sfus: Arc<RwLock<HashMap<Uuid, Arc<SFU>>>>,
     /// Calls configuration
     config: CallsConfig,
+    /// Voice events channel
+    voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
 }
 
 impl SFUManager {
     /// Create a new SFU manager
-    pub fn new(config: CallsConfig) -> Arc<Self> {
+    pub fn new(
+        config: CallsConfig,
+        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             sfus: Arc::new(RwLock::new(HashMap::new())),
             config,
+            voice_event_tx,
         })
     }
 
@@ -42,7 +49,7 @@ impl SFUManager {
         }
 
         // Create new SFU
-        let sfu = SFU::new(self.config.clone()).await?;
+        let sfu = SFU::new(call_id, self.config.clone(), self.voice_event_tx.clone()).await?;
 
         // Store it
         self.sfus.write().await.insert(call_id, sfu.clone());
@@ -83,10 +90,12 @@ impl SFUManager {
 
 impl Default for SFUManager {
     fn default() -> Self {
+        let (tx, _) = mpsc::unbounded_channel();
         // Create with empty config - this is mainly for testing
         Self {
             sfus: Arc::new(RwLock::new(HashMap::new())),
             config: CallsConfig::default(),
+            voice_event_tx: tx,
         }
     }
 }

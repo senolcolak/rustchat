@@ -644,6 +644,7 @@ pub async fn execute_command_internal(
                 call_id,
                 channel_id,
                 owner_id: auth.user_id,
+                host_id: auth.user_id,
                 started_at: now,
                 participants: std::collections::HashMap::new(),
                 screen_sharer: None,
