@@ -9,7 +9,6 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::json;
 use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
@@ -132,29 +131,13 @@ pub fn router() -> Router<AppState> {
         .route("/users/known", get(get_known_users))
         .route("/users/stats", get(get_user_stats))
         .route("/users/stats/filtered", post(get_user_stats_filtered))
-        .route("/users/group_channels", get(get_user_group_channels))
+        .route("/users/group_channels", get(get_user_group_channels).post(get_profiles_in_group_channels))
         .route(
             "/users/{user_id}/oauth/apps/authorized",
             get(get_authorized_oauth_apps),
         )
-        .route(
-            "/users/{user_id}/data_retention/team_policies",
-            get(get_user_team_retention_policies),
-        )
-        .route(
-            "/users/{user_id}/data_retention/channel_policies",
-            get(get_user_channel_retention_policies),
-        )
         .route("/users/usernames", post(get_users_by_usernames))
         .route("/users/email/{email}", get(get_user_by_email))
-        .route(
-            "/custom_profile_attributes/fields",
-            get(get_custom_profile_attributes),
-        )
-        .route(
-            "/users/{user_id}/custom_profile_attributes",
-            get(get_user_custom_profile_attributes),
-        )
         .route("/users/{user_id}/patch", put(patch_user))
         .route("/users/{user_id}/roles", put(update_user_roles))
         .route("/users/{user_id}/active", put(update_user_active))
@@ -577,6 +560,39 @@ async fn get_team_members_for_user(
     Ok(Json(mm_members))
 }
 
+
+
+async fn hydrate_direct_channel_display_name(
+    state: &AppState,
+    viewer_id: Uuid,
+    channel: &mut Channel,
+) -> ApiResult<()> {
+    // For Direct channels, ALWAYS compute display_name from the other participant
+    // This ensures each user sees the other person's name, not their own
+    if channel.channel_type != crate::models::channel::ChannelType::Direct {
+        return Ok(());
+    }
+
+    let display_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.channel_id = $1
+          AND cm.user_id <> $2
+        ORDER BY u.username ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel.id)
+    .bind(viewer_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    channel.display_name = display_name.or_else(|| Some("Direct Message".to_string()));
+    Ok(())
+}
+
 async fn my_team_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
@@ -584,7 +600,7 @@ async fn my_team_channels(
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -595,6 +611,10 @@ async fn my_team_channels(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
@@ -608,7 +628,7 @@ async fn get_team_channels_for_user(
     let user_id = resolve_user_id(&user_id, &auth)?;
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -620,6 +640,10 @@ async fn get_team_channels_for_user(
     .fetch_all(&state.db)
     .await?;
 
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, user_id, channel).await?;
+    }
+
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
 }
@@ -628,7 +652,7 @@ async fn my_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -638,6 +662,10 @@ async fn my_channels(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
@@ -649,7 +677,7 @@ async fn get_channels_for_user(
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let user_id = resolve_user_id(&user_id, &auth)?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
         JOIN channel_members cm ON c.id = cm.channel_id
@@ -659,6 +687,10 @@ async fn get_channels_for_user(
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(&state, user_id, channel).await?;
+    }
 
     let mm_channels: Vec<mm::Channel> = channels.into_iter().map(|c| c.into()).collect();
     Ok(Json(mm_channels))
@@ -1238,13 +1270,9 @@ struct UpdateStatusRequest {
 
 #[derive(Deserialize)]
 struct PatchMeRequest {
-    #[allow(dead_code)]
     nickname: Option<String>,
-    #[allow(dead_code)]
     first_name: Option<String>,
-    #[allow(dead_code)]
     last_name: Option<String>,
-    #[allow(dead_code)]
     position: Option<String>,
 }
 
@@ -1299,7 +1327,29 @@ async fn patch_me(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<mm::User>> {
-    let _input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
+    let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
+    
+    // Update any provided fields
+    sqlx::query(
+        r#"
+        UPDATE users 
+        SET first_name = COALESCE($1, first_name),
+            last_name = COALESCE($2, last_name),
+            nickname = COALESCE($3, nickname),
+            position = COALESCE($4, position),
+            updated_at = NOW()
+        WHERE id = $5
+        "#,
+    )
+    .bind(&input.first_name)
+    .bind(&input.last_name)
+    .bind(&input.nickname)
+    .bind(&input.position)
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await?;
+
+    // Fetch updated user
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(auth.user_id)
         .fetch_one(&state.db)
@@ -1364,20 +1414,58 @@ async fn list_users(
     Ok(Json(mm_users))
 }
 
+/// GET /users/{user_id}/image - Get user profile image (requires auth)
 async fn get_user_image(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    _auth: MmAuthUser, // Require authentication - images are only accessible to logged-in users
     Path(user_id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let _user_id = parse_mm_or_uuid(&user_id)
+    let user_uuid = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
-    const PNG_1X1: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1,
-        13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-    ];
-
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], PNG_1X1))
+    // Try to fetch from S3
+    let key = format!("avatars/{}.png", user_uuid);
+    
+    match state.s3_client.download(&key).await {
+        Ok(data) => {
+            // Detect content type from magic bytes
+            let content_type = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+                "image/png"
+            } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                "image/jpeg"
+            } else if data.starts_with(b"GIF") {
+                "image/gif"
+            } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+                "image/webp"
+            } else {
+                "image/png"
+            };
+            
+            Ok((
+                [
+                    (axum::http::header::CONTENT_TYPE, content_type),
+                    (axum::http::header::CACHE_CONTROL, "private, max-age=86400"),
+                ],
+                data,
+            ).into_response())
+        }
+        Err(_) => {
+            // Return default 1x1 transparent PNG if no image uploaded
+            const PNG_1X1: &[u8] = &[
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+                0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1,
+                13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+            ];
+            
+            Ok((
+                [
+                    (axum::http::header::CONTENT_TYPE, "image/png"),
+                    (axum::http::header::CACHE_CONTROL, "private, max-age=300"),
+                ],
+                PNG_1X1.to_vec(),
+            ).into_response())
+        }
+    }
 }
 
 /// POST /users/{user_id}/image - Upload user profile image
@@ -1507,20 +1595,6 @@ async fn user_typing(
     Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
-/// GET /custom_profile_attributes/fields - Custom profile attributes (stub)
-async fn get_custom_profile_attributes() -> ApiResult<Json<Vec<serde_json::Value>>> {
-    // MM Enterprise feature - return empty array for compatibility
-    Ok(Json(vec![]))
-}
-
-/// GET /users/{user_id}/custom_profile_attributes - Per-user custom profile attributes (stub)
-async fn get_user_custom_profile_attributes(
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    // MM Enterprise feature - return empty array for compatibility
-    Ok(Json(vec![]))
-}
-
 fn status_ok() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "OK"}))
 }
@@ -1577,9 +1651,98 @@ async fn get_user_group_channels(
     Ok(Json(channels.into_iter().map(|c| c.into()).collect()))
 }
 
+/// POST /users/group_channels - Get user profiles for multiple group/DM channels
+/// Mobile client sends array of channel IDs and expects map of channel_id -> [user profiles]
+async fn get_profiles_in_group_channels(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    _headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<std::collections::HashMap<String, Vec<mm::User>>>> {
+    // Parse channel IDs from body (sent as raw JSON array)
+    let channel_ids: Vec<String> = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("Expected array of channel IDs".to_string()))?;
+
+    if channel_ids.is_empty() {
+        return Ok(Json(std::collections::HashMap::new()));
+    }
+
+    // Convert to UUIDs
+    let channel_uuids: Vec<Uuid> = channel_ids
+        .iter()
+        .filter_map(|id| parse_mm_or_uuid(id))
+        .collect();
+
+    if channel_uuids.is_empty() {
+        return Ok(Json(std::collections::HashMap::new()));
+    }
+
+    // Query users for each channel the requesting user is a member of
+    let rows: Vec<(Uuid, Uuid, String, String, Option<String>, Option<String>, bool)> = sqlx::query_as(
+        r#"
+        SELECT 
+            cm.channel_id,
+            u.id,
+            u.username,
+            u.email,
+            u.display_name,
+            u.avatar_url,
+            u.is_active
+        FROM channel_members cm
+        JOIN users u ON cm.user_id = u.id
+        WHERE cm.channel_id = ANY($1)
+          AND EXISTS (
+              SELECT 1 FROM channel_members cm2 
+              WHERE cm2.channel_id = cm.channel_id AND cm2.user_id = $2
+          )
+        ORDER BY cm.channel_id, u.username
+        "#,
+    )
+    .bind(&channel_uuids)
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Group by channel_id
+    let mut result: std::collections::HashMap<String, Vec<mm::User>> = std::collections::HashMap::new();
+    for (channel_id, user_id, username, email, display_name, _avatar_url, _is_active) in rows {
+        let mm_user = mm::User {
+            id: encode_mm_id(user_id),
+            username,
+            email,
+            nickname: display_name.clone().unwrap_or_default(),
+            first_name: display_name.unwrap_or_default(),
+            last_name: "".to_string(),
+            email_verified: true,
+            auth_service: "".to_string(),
+            roles: "system_user".to_string(),
+            locale: "en".to_string(),
+            timezone: serde_json::json!({}),
+            create_at: 0,
+            update_at: 0,
+            delete_at: 0,
+            props: serde_json::json!({}),
+            notify_props: serde_json::json!({}),
+            last_password_update: 0,
+            last_picture_update: 0,
+            failed_attempts: 0,
+            mfa_active: false,
+        };
+        result
+            .entry(encode_mm_id(channel_id))
+            .or_default()
+            .push(mm_user);
+    }
+
+
+    Ok(Json(result))
+}
+
 #[derive(Deserialize)]
-struct UsernamesRequest {
-    usernames: Vec<String>,
+#[serde(untagged)]
+enum UsersByUsernamesRequest {
+    Usernames(Vec<String>),
+    Wrapped { usernames: Vec<String> },
 }
 
 async fn get_users_by_usernames(
@@ -1587,13 +1750,20 @@ async fn get_users_by_usernames(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<Vec<mm::User>>> {
-    let input: UsernamesRequest = parse_body(&headers, &body, "Invalid usernames body")?;
-    if input.usernames.is_empty() {
+    // Mattermost clients send a raw JSON array for this endpoint:
+    // ["user1","user2"] (not an object wrapper). We also accept
+    // {"usernames":[...]} for compatibility with custom clients.
+    let usernames = parse_body::<UsersByUsernamesRequest>(&headers, &body, "Invalid usernames body")
+        .map(|parsed| match parsed {
+            UsersByUsernamesRequest::Usernames(usernames) => usernames,
+            UsersByUsernamesRequest::Wrapped { usernames } => usernames,
+        })?;
+    if usernames.is_empty() {
         return Ok(Json(vec![]));
     }
 
     let users: Vec<User> = sqlx::query_as("SELECT * FROM users WHERE username = ANY($1)")
-        .bind(&input.usernames)
+        .bind(&usernames)
         .fetch_all(&state.db)
         .await?;
 
@@ -1686,9 +1856,10 @@ async fn update_user_active(
 
 async fn get_user_image_default(
     State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    get_user_image(State(state), Path(user_id)).await
+    get_user_image(State(state), auth, Path(user_id)).await
 }
 
 async fn reset_password(headers: HeaderMap, body: Bytes) -> ApiResult<Json<serde_json::Value>> {
@@ -2056,24 +2227,6 @@ async fn get_authorized_oauth_apps(
     Path(_user_id): Path<String>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
     Ok(Json(vec![]))
-}
-
-/// GET /api/v4/users/{user_id}/data_retention/team_policies
-async fn get_user_team_retention_policies(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({"policies": [], "total_count": 0})))
-}
-
-/// GET /api/v4/users/{user_id}/data_retention/channel_policies
-async fn get_user_channel_retention_policies(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({"policies": [], "total_count": 0})))
 }
 
 async fn get_user_groups(

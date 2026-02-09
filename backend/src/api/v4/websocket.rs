@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
+        Query, State,
     },
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -23,6 +23,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::api::v4::calls_plugin;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::api::AppState;
 use crate::auth::validate_token;
@@ -48,30 +49,69 @@ pub struct WsQuery {
 
 /// Main WebSocket handler
 pub async fn handle_websocket(
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
     headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let token = websocket_core::resolve_auth_token(query.token.as_deref(), &headers, None, false);
+    let requested_protocol = websocket_core::requested_protocol(&headers);
+    let ws = match ws {
+        Ok(upgrade) => upgrade,
+        Err(err) => {
+            warn!(
+                error = %err,
+                connection_header = ?headers.get("connection").and_then(|v| v.to_str().ok()),
+                upgrade_header = ?headers.get("upgrade").and_then(|v| v.to_str().ok()),
+                has_sec_websocket_key = headers.contains_key("sec-websocket-key"),
+                sec_websocket_version = ?headers.get("sec-websocket-version").and_then(|v| v.to_str().ok()),
+                user_agent = ?headers.get("user-agent").and_then(|v| v.to_str().ok()),
+                "WebSocket upgrade rejected"
+            );
+            return err.into_response();
+        }
+    };
+
+    let token = websocket_core::resolve_auth_token(
+        query.token.as_deref(),
+        &headers,
+        requested_protocol.as_deref(),
+        true,
+    );
     let sequence_number = query.sequence_number;
-    let connection_id = query.connection_id.clone();
+    let connection_id = query.connection_id.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
 
     let user_id = websocket_core::validate_user_id(token.as_deref(), &state.jwt_secret);
 
     trace!(
-        addr = %addr,
         has_token = token.is_some(),
+        has_protocol = requested_protocol.is_some(),
         has_user = user_id.is_some(),
         connection_id = ?connection_id,
         sequence_number = ?sequence_number,
         "WebSocket connection request"
     );
 
-    ws.on_upgrade(move |socket| {
-        handle_socket(socket, state, user_id, connection_id, sequence_number, addr)
-    })
+    let mut response = ws.on_upgrade(move |socket| {
+        handle_socket(socket, state, user_id, connection_id, sequence_number, None)
+    });
+
+    // Match Mattermost behavior by echoing the requested protocol when present.
+    if let Some(protocol) = requested_protocol {
+        if let Ok(value) = protocol.parse() {
+            response
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", value);
+        }
+    }
+
+    response
 }
 
 /// Handle the WebSocket connection
@@ -81,7 +121,7 @@ async fn handle_socket(
     user_id: Option<Uuid>,
     connection_id: Option<String>,
     sequence_number: Option<i64>,
-    addr: SocketAddr,
+    addr: Option<SocketAddr>,
 ) {
     // Handle authentication if not already done
     let user_id = match user_id {
@@ -95,7 +135,7 @@ async fn handle_socket(
                         .await;
                 }
                 None => {
-                    warn!(addr = %addr, "WebSocket authentication failed");
+                    warn!(addr = ?addr, "WebSocket authentication failed");
                     return;
                 }
             }
@@ -160,7 +200,7 @@ async fn run_connection(
     user_id: Uuid,
     connection_id: Option<String>,
     sequence_number: Option<i64>,
-    addr: SocketAddr,
+    addr: Option<SocketAddr>,
 ) {
     // Check connection limits
     if let Err(limit) = websocket_core::enforce_connection_limit(&state, user_id).await {
@@ -181,17 +221,19 @@ async fn run_connection(
     let store = state.connection_store.clone();
     let replay_store = store.clone();
 
-    // Check if this is a resumption attempt before moving connection_id
-    let is_resumption_attempt = connection_id.is_some();
+    // Treat empty connection IDs as "not provided" (fresh connection),
+    // matching Mattermost reliable websocket semantics.
+    let requested_connection_id = connection_id.filter(|id| !id.is_empty());
+    let is_resumption_attempt = requested_connection_id.is_some();
 
     // Create WebSocket actor with session resumption
     let (actor, missed_messages) = WebSocketActor::new(
         socket,
         store,
         user_id,
-        connection_id,
+        requested_connection_id.clone(),
         sequence_number,
-        Some(addr),
+        addr,
     )
     .await;
 
@@ -203,7 +245,7 @@ async fn run_connection(
         user_id = %user_id,
         resumed = is_resumed,
         missed_count = missed_messages.len(),
-        addr = %addr,
+        addr = ?addr,
         "WebSocket connection established"
     );
 
@@ -222,13 +264,33 @@ async fn run_connection(
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
-    // Send hello event
+    // Send hello event. Mattermost reliable websocket clients reset their local sequence
+    // to 0 whenever connection_id changes, so hello.seq must also be 0 in that case.
+    // Only preserve requested sequence when we truly resumed the same connection_id.
+    let requested_seq = sequence_number.unwrap_or(0).max(0);
+    let resumed_same_connection = requested_connection_id
+        .as_deref()
+        .map(|id| id == actor_connection_id.as_str())
+        .unwrap_or(false);
+    let hello_seq = if resumed_same_connection {
+        requested_seq
+    } else {
+        0
+    };
+    info!(
+        connection_id = %actor_connection_id,
+        requested_connection_id = ?requested_connection_id,
+        requested_seq = requested_seq,
+        hello_seq = hello_seq,
+        resumed_same_connection = resumed_same_connection,
+        "Prepared hello message"
+    );
     let hello = mm::WebSocketMessage {
-        seq: Some(0),
+        seq: Some(hello_seq),
         event: "hello".to_string(),
         data: json!({
             "connection_id": actor_connection_id.clone(),
-            "server_version": "rustchat-0.1.0",
+            "server_version": format!("rustchat-{}", env!("CARGO_PKG_VERSION")),
             "protocol_version": "1.0"
         }),
         broadcast: mm::Broadcast {
@@ -266,25 +328,54 @@ async fn run_connection(
 
     // Spawn task to forward hub messages to client
     let mut hub_forward_task = tokio::spawn(async move {
-        while let Ok(msg_str) = hub_rx.recv().await {
-            if let Ok(envelope) = serde_json::from_str::<WsEnvelope>(&msg_str) {
-                if let Some(mut mm_msg) = map_envelope_to_mm(&envelope) {
-                    let replay_payload = json!({
-                        "event": mm_msg.event.clone(),
-                        "data": mm_msg.data.clone(),
-                        "broadcast": mm_msg.broadcast.clone(),
-                    });
-
-                    if let Some(seq) =
-                        replay_store.queue_message(&replay_connection_id, replay_payload)
-                    {
-                        mm_msg.seq = Some(seq);
-                    }
-
-                    if let Err(_) = actor_clone.send(mm_msg) {
-                        break;
-                    }
+        loop {
+            let msg_str = match hub_rx.recv().await {
+                Ok(msg) => msg,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        connection_id = %replay_connection_id,
+                        skipped = skipped,
+                        "Hub receiver lagged; dropping stale websocket messages"
+                    );
+                    continue;
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    debug!(
+                        connection_id = %replay_connection_id,
+                        "Hub receiver closed"
+                    );
+                    break;
+                }
+            };
+
+            let envelope = match serde_json::from_str::<WsEnvelope>(&msg_str) {
+                Ok(value) => value,
+                Err(err) => {
+                    warn!(
+                        connection_id = %replay_connection_id,
+                        error = %err,
+                        "Failed to deserialize hub websocket envelope"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(mut mm_msg) = map_envelope_to_mm(&envelope) else {
+                continue;
+            };
+
+            let replay_payload = json!({
+                "event": mm_msg.event.clone(),
+                "data": mm_msg.data.clone(),
+                "broadcast": mm_msg.broadcast.clone(),
+            });
+
+            if let Some(seq) = replay_store.queue_message(&replay_connection_id, replay_payload) {
+                mm_msg.seq = Some(seq);
+            }
+
+            if actor_clone.send(mm_msg).is_err() {
+                break;
             }
         }
     });
@@ -296,11 +387,24 @@ async fn run_connection(
             event = actor.recv() => {
                 match event {
                     Some(WsEvent::MessageReceived(text)) => {
-                        handle_client_message(
+                        handle_client_text_message(
                             &state,
+                            &actor,
                             user_id,
                             &username,
+                            &actor_connection_id,
                             &text,
+                        )
+                        .await;
+                    }
+                    Some(WsEvent::BinaryReceived(bytes)) => {
+                        handle_client_binary_message(
+                            &state,
+                            &actor,
+                            user_id,
+                            &username,
+                            &actor_connection_id,
+                            &bytes,
                         )
                         .await;
                     }
@@ -358,45 +462,23 @@ async fn run_connection(
 }
 
 /// Handle a message from the client
-async fn handle_client_message(state: &AppState, user_id: Uuid, username: &str, text: &str) {
+async fn handle_client_text_message(
+    state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    text: &str,
+) {
     trace!(
         user_id = %user_id,
+        connection_id = connection_id,
         text = %text,
         "Received client message"
     );
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
-            if action == "user_typing" {
-                if let Some(data) = value.get("data") {
-                    if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
-                        if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
-                            let broadcast = WsEnvelope::event(
-                                crate::realtime::EventType::UserTyping,
-                                crate::realtime::TypingEvent {
-                                    user_id,
-                                    display_name: username.to_string(),
-                                    thread_root_id: data
-                                        .get("parent_id")
-                                        .and_then(|v| v.as_str())
-                                        .and_then(parse_mm_or_uuid),
-                                },
-                                Some(channel_id),
-                            )
-                            .with_broadcast(WsBroadcast {
-                                channel_id: Some(channel_id),
-                                team_id: None,
-                                user_id: None,
-                                exclude_user_id: Some(user_id),
-                            });
-                            state.ws_hub.broadcast(broadcast).await;
-                        }
-                    }
-                }
-            } else {
-                trace!(action = %action, "Unknown action received");
-            }
-        }
+        handle_client_value_message(state, actor, user_id, username, connection_id, &value).await;
     }
 
     let _ = websocket_core::handle_client_envelope_message(
@@ -407,6 +489,254 @@ async fn handle_client_message(state: &AppState, user_id: Uuid, username: &str, 
         EnvelopeCommandOptions::V4,
     )
     .await;
+}
+
+async fn handle_client_binary_message(
+    state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    bytes: &[u8],
+) {
+    if let Some(value) = decode_msgpack_value(bytes) {
+        trace!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            "Received binary client message"
+        );
+        handle_client_value_message(state, actor, user_id, username, connection_id, &value).await;
+    } else {
+        warn!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            "Failed to decode binary websocket message as msgpack"
+        );
+    }
+}
+
+async fn handle_client_value_message(
+    state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
+    user_id: Uuid,
+    username: &str,
+    connection_id: &str,
+    value: &serde_json::Value,
+) {
+    let Some(action) = value.get("action").and_then(|v| v.as_str()) else {
+        return;
+    };
+
+    if calls_plugin::handle_ws_action(state, user_id, connection_id, action, value.get("data"))
+        .await
+    {
+        return;
+    }
+
+    if action == "ping" {
+        let seq_reply = value
+            .get("seq")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let server_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        let response = json!({
+            "status": "OK",
+            "seq_reply": seq_reply,
+            "data": {
+                "text": "pong",
+                "version": format!("rustchat-{}", env!("CARGO_PKG_VERSION")),
+                "server_time": server_time_ms,
+                "node_id": ""
+            }
+        });
+
+        if let Err(err) = actor.send_raw(response) {
+            warn!(
+                user_id = %user_id,
+                connection_id = connection_id,
+                error = %err,
+                "Failed to send ping response"
+            );
+        }
+    } else if action == "user_typing" {
+        if let Some(data) = value.get("data") {
+            if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
+                if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
+                    let broadcast = WsEnvelope::event(
+                        crate::realtime::EventType::UserTyping,
+                        crate::realtime::TypingEvent {
+                            user_id,
+                            display_name: username.to_string(),
+                            thread_root_id: data
+                                .get("parent_id")
+                                .and_then(|v| v.as_str())
+                                .and_then(parse_mm_or_uuid),
+                        },
+                        Some(channel_id),
+                    )
+                    .with_broadcast(WsBroadcast {
+                        channel_id: Some(channel_id),
+                        team_id: None,
+                        user_id: None,
+                        exclude_user_id: Some(user_id),
+                    });
+                    state.ws_hub.broadcast(broadcast).await;
+                }
+            }
+        }
+    } else {
+        trace!(action = %action, "Unknown action received");
+    }
+}
+
+fn decode_msgpack_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut idx = 0usize;
+    decode_msgpack_at(bytes, &mut idx)
+}
+
+fn decode_msgpack_at(bytes: &[u8], idx: &mut usize) -> Option<serde_json::Value> {
+    let marker = *bytes.get(*idx)?;
+    *idx += 1;
+
+    match marker {
+        0x00..=0x7f => Some(serde_json::Value::from(marker as u64)),
+        0xe0..=0xff => Some(serde_json::Value::from((marker as i8) as i64)),
+        0xc0 => Some(serde_json::Value::Null),
+        0xc2 => Some(serde_json::Value::Bool(false)),
+        0xc3 => Some(serde_json::Value::Bool(true)),
+        0xcc => Some(serde_json::Value::from(read_u8(bytes, idx)? as u64)),
+        0xcd => Some(serde_json::Value::from(read_u16(bytes, idx)? as u64)),
+        0xce => Some(serde_json::Value::from(read_u32(bytes, idx)? as u64)),
+        0xd0 => Some(serde_json::Value::from(read_i8(bytes, idx)? as i64)),
+        0xd1 => Some(serde_json::Value::from(read_i16(bytes, idx)? as i64)),
+        0xd2 => Some(serde_json::Value::from(read_i32(bytes, idx)? as i64)),
+        0xa0..=0xbf => {
+            let len = (marker & 0x1f) as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xd9 => {
+            let len = read_u8(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xda => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xdb => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_str(bytes, idx, len)
+        }
+        0xc4 => {
+            let len = read_u8(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0xc5 => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0xc6 => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_bin_as_json_array(bytes, idx, len)
+        }
+        0x90..=0x9f => decode_array(bytes, idx, (marker & 0x0f) as usize),
+        0xdc => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_array(bytes, idx, len)
+        }
+        0xdd => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_array(bytes, idx, len)
+        }
+        0x80..=0x8f => decode_map(bytes, idx, (marker & 0x0f) as usize),
+        0xde => {
+            let len = read_u16(bytes, idx)? as usize;
+            decode_map(bytes, idx, len)
+        }
+        0xdf => {
+            let len = read_u32(bytes, idx)? as usize;
+            decode_map(bytes, idx, len)
+        }
+        _ => None,
+    }
+}
+
+fn decode_array(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let mut items = Vec::with_capacity(len);
+    for _ in 0..len {
+        items.push(decode_msgpack_at(bytes, idx)?);
+    }
+    Some(serde_json::Value::Array(items))
+}
+
+fn decode_map(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::with_capacity(len);
+    for _ in 0..len {
+        let key = decode_msgpack_at(bytes, idx)?.as_str()?.to_string();
+        let value = decode_msgpack_at(bytes, idx)?;
+        map.insert(key, value);
+    }
+    Some(serde_json::Value::Object(map))
+}
+
+fn decode_str(bytes: &[u8], idx: &mut usize, len: usize) -> Option<serde_json::Value> {
+    let slice = read_exact(bytes, idx, len)?;
+    let text = std::str::from_utf8(slice).ok()?.to_string();
+    Some(serde_json::Value::String(text))
+}
+
+fn decode_bin_as_json_array(
+    bytes: &[u8],
+    idx: &mut usize,
+    len: usize,
+) -> Option<serde_json::Value> {
+    let slice = read_exact(bytes, idx, len)?;
+    Some(serde_json::Value::Array(
+        slice
+            .iter()
+            .map(|b| serde_json::Value::from(*b as u64))
+            .collect(),
+    ))
+}
+
+fn read_exact<'a>(bytes: &'a [u8], idx: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = idx.checked_add(len)?;
+    let slice = bytes.get(*idx..end)?;
+    *idx = end;
+    Some(slice)
+}
+
+fn read_u8(bytes: &[u8], idx: &mut usize) -> Option<u8> {
+    let value = *bytes.get(*idx)?;
+    *idx += 1;
+    Some(value)
+}
+
+fn read_i8(bytes: &[u8], idx: &mut usize) -> Option<i8> {
+    read_u8(bytes, idx).map(|v| v as i8)
+}
+
+fn read_u16(bytes: &[u8], idx: &mut usize) -> Option<u16> {
+    let arr: [u8; 2] = read_exact(bytes, idx, 2)?.try_into().ok()?;
+    Some(u16::from_be_bytes(arr))
+}
+
+fn read_i16(bytes: &[u8], idx: &mut usize) -> Option<i16> {
+    let arr: [u8; 2] = read_exact(bytes, idx, 2)?.try_into().ok()?;
+    Some(i16::from_be_bytes(arr))
+}
+
+fn read_u32(bytes: &[u8], idx: &mut usize) -> Option<u32> {
+    let arr: [u8; 4] = read_exact(bytes, idx, 4)?.try_into().ok()?;
+    Some(u32::from_be_bytes(arr))
+}
+
+fn read_i32(bytes: &[u8], idx: &mut usize) -> Option<i32> {
+    let arr: [u8; 4] = read_exact(bytes, idx, 4)?.try_into().ok()?;
+    Some(i32::from_be_bytes(arr))
 }
 
 #[derive(Debug, Clone)]
@@ -564,7 +894,7 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 None
             }
         }
-        "user_updated" => {
+        "user_updated" | "user_presence" => {
             if let Some(status_str) = env.data.get("status").and_then(|v| v.as_str()) {
                 let user_id = env
                     .data

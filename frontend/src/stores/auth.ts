@@ -9,11 +9,21 @@ export const useAuthStore = defineStore('auth', () => {
     const user = ref<any>(null)
     const router = useRouter()
 
+    // Set MMAUTHTOKEN cookie for img/video tags that can't send headers
+    function setAuthCookie(tokenValue: string) {
+        document.cookie = `MMAUTHTOKEN=${tokenValue}; path=/; SameSite=Strict`
+    }
+
+    function clearAuthCookie() {
+        document.cookie = 'MMAUTHTOKEN=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    }
+
     const isAuthenticated = computed(() => !!token.value)
 
     async function login(credentials: any) {
         const { data } = await client.post('/auth/login', credentials)
         token.value = data.token
+        setAuthCookie(data.token)
         user.value = data.user
         // Fetch full profile
         await fetchMe()
@@ -21,6 +31,8 @@ export const useAuthStore = defineStore('auth', () => {
 
     async function fetchMe() {
         if (!token.value) return
+        // Sync cookie on page reload (token may be in localStorage but cookie cleared)
+        setAuthCookie(token.value)
         try {
             const { data } = await client.get('/auth/me')
             // Map custom_status fields for easier access
@@ -37,6 +49,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     async function logout() {
         token.value = ''
+        clearAuthCookie()
         user.value = null
         router.push('/login')
     }
@@ -50,7 +63,7 @@ export const useAuthStore = defineStore('auth', () => {
                 user.value.status_text = data.text
                 user.value.status_emoji = data.emoji
                 user.value.status_expires_at = data.expires_at
-                
+
                 // Also update the nested object to stay in sync
                 user.value.custom_status = {
                     text: data.text,

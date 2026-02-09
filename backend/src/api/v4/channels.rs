@@ -176,6 +176,30 @@ fn parse_body<T: DeserializeOwned>(
     }
 }
 
+
+
+async fn resolve_direct_channel_display_name(
+    state: &AppState,
+    channel_id: Uuid,
+    viewer_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.channel_id = $1
+          AND cm.user_id <> $2
+        ORDER BY u.username ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel_id)
+    .bind(viewer_id)
+    .fetch_optional(&state.db)
+    .await
+}
+
 async fn get_channel(
     State(state): State<AppState>,
     auth: MmAuthUser,
@@ -194,10 +218,20 @@ async fn get_channel(
                 crate::error::AppError::Forbidden("Not a member of this channel".to_string())
             })?;
 
-    let channel: crate::models::Channel = sqlx::query_as("SELECT * FROM channels WHERE id = $1")
-        .bind(channel_id)
-        .fetch_one(&state.db)
-        .await?;
+    let mut channel: crate::models::Channel =
+        sqlx::query_as("SELECT * FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    // For Direct channels, ALWAYS compute display_name from the other participant
+    // This ensures each user sees the other person's name, not their own
+    if channel.channel_type == crate::models::channel::ChannelType::Direct {
+        channel.display_name =
+            resolve_direct_channel_display_name(&state, channel.id, auth.user_id)
+                .await?
+                .or_else(|| Some("Direct Message".to_string()));
+    }
 
     Ok(Json(channel.into()))
 }
@@ -446,9 +480,10 @@ pub async fn create_direct_channel_internal(
     creator_id: Uuid,
     other_id: Uuid,
 ) -> ApiResult<crate::models::channel::Channel> {
+    let canonical_name = crate::models::canonical_direct_channel_name(creator_id, other_id);
+    let legacy_name = crate::models::legacy_direct_channel_name(creator_id, other_id);
     let mut ids = vec![creator_id, other_id];
     ids.sort();
-    let name = format!("dm_{}_{}", ids[0], ids[1]);
 
     let team_id: Uuid = sqlx::query_scalar(
         "SELECT team_id FROM team_members WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1",
@@ -458,16 +493,60 @@ pub async fn create_direct_channel_internal(
     .await?
     .ok_or_else(|| crate::error::AppError::BadRequest("User has no team".to_string()))?;
 
+    let display_name: String = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = $1",
+    )
+    .bind(other_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or_else(|| "Direct Message".to_string());
+
+    if let Some(channel) = sqlx::query_as::<_, crate::models::Channel>(
+        r#"
+        SELECT *
+        FROM channels
+        WHERE team_id = $1
+          AND type = 'direct'::channel_type
+          AND (name = $2 OR name = $3)
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(team_id)
+    .bind(&canonical_name)
+    .bind(&legacy_name)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        for user_id in ids {
+            sqlx::query(
+                "INSERT INTO channel_members (channel_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING",
+            )
+            .bind(channel.id)
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+        }
+
+        return Ok(channel);
+    }
+
     let channel: crate::models::Channel = sqlx::query_as(
         r#"
         INSERT INTO channels (team_id, type, name, display_name, purpose, header, creator_id)
-        VALUES ($1, 'direct', $2, '', '', '', $3)
-        ON CONFLICT (team_id, name) DO UPDATE SET name = EXCLUDED.name
+        VALUES ($1, 'direct', $2, $3, '', '', $4)
+        ON CONFLICT (team_id, name) DO UPDATE SET
+            name = EXCLUDED.name,
+            display_name = CASE
+                WHEN channels.display_name IS NULL OR channels.display_name = '' THEN EXCLUDED.display_name
+                ELSE channels.display_name
+            END
         RETURNING *
         "#,
     )
     .bind(team_id)
-    .bind(&name)
+    .bind(&canonical_name)
+    .bind(&display_name)
     .bind(creator_id)
     .fetch_one(&state.db)
     .await?;

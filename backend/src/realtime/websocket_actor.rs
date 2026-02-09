@@ -72,6 +72,8 @@ pub enum WsCommand {
 pub enum WsEvent {
     /// Message received from client
     MessageReceived(String),
+    /// Binary message received from client
+    BinaryReceived(Vec<u8>),
     /// Client sent a pong (activity detected)
     PongReceived,
     /// Connection closed
@@ -350,12 +352,8 @@ impl ActorTask {
                         Some(Ok(Message::Binary(bin))) => {
                             *last_pong.lock().unwrap() = Instant::now();
                             self.state.touch();
-
-                            // Convert binary to string if possible, otherwise ignore
-                            if let Ok(text) = String::from_utf8(bin.to_vec()) {
-                                if let Err(_) = self.event_tx.send(WsEvent::MessageReceived(text)) {
-                                    break;
-                                }
+                            if let Err(_) = self.event_tx.send(WsEvent::BinaryReceived(bin.to_vec())) {
+                                break;
                             }
                         }
                         Some(Ok(Message::Pong(_))) => {
@@ -578,6 +576,15 @@ impl ActorTask {
         // Cleanup
         self.is_closing.store(true, Ordering::SeqCst);
         ping_task.abort();
+
+        // Send close frame for graceful shutdown (unless client already closed)
+        // This prevents "Connection reset without closing handshake" errors
+        let close_frame = CloseFrame {
+            code: close_codes::GOING_AWAY.into(),
+            reason: "Connection ended".into(),
+        };
+        // Best-effort close frame - don't wait or error if it fails
+        let _ = timeout(Duration::from_secs(1), ws_sink.send(Message::Close(Some(close_frame)))).await;
 
         // Mark connection as disconnected (but retain state for resumption)
         self.store.disconnect_connection(&self.connection_id);

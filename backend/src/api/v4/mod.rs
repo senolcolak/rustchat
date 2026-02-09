@@ -21,6 +21,7 @@ pub mod commands;
 pub mod compliance;
 pub mod config_client;
 pub mod content_flagging;
+pub mod custom_profile;
 pub mod data_retention;
 pub mod dialogs;
 pub mod emoji;
@@ -78,6 +79,7 @@ pub fn router() -> Router<AppState> {
         .merge(content_flagging::router())
         .merge(usage::router())
         .merge(data_retention::router())
+        .merge(custom_profile::router())
         .merge(roles::router())
         .merge(cloud::router())
         .merge(jobs::router())
@@ -128,4 +130,14 @@ async fn not_implemented() -> impl IntoResponse {
         "This API route is not implemented.",
         "The requested Mattermost v4 endpoint is not available in this build.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v4_router_builds_without_overlaps() {
+        let _ = router();
+    }
 }
