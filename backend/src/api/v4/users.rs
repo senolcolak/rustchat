@@ -138,14 +138,6 @@ pub fn router() -> Router<AppState> {
         )
         .route("/users/usernames", post(get_users_by_usernames))
         .route("/users/email/{email}", get(get_user_by_email))
-        .route(
-            "/custom_profile_attributes/fields",
-            get(get_custom_profile_attributes),
-        )
-        .route(
-            "/users/{user_id}/custom_profile_attributes",
-            get(get_user_custom_profile_attributes),
-        )
         .route("/users/{user_id}/patch", put(patch_user))
         .route("/users/{user_id}/roles", put(update_user_roles))
         .route("/users/{user_id}/active", put(update_user_active))
@@ -1547,20 +1539,6 @@ async fn user_typing(
     state.ws_hub.broadcast(broadcast).await;
 
     Ok(Json(serde_json::json!({"status": "OK"})))
-}
-
-/// GET /custom_profile_attributes/fields - Custom profile attributes (stub)
-async fn get_custom_profile_attributes() -> ApiResult<Json<Vec<serde_json::Value>>> {
-    // MM Enterprise feature - return empty array for compatibility
-    Ok(Json(vec![]))
-}
-
-/// GET /users/{user_id}/custom_profile_attributes - Per-user custom profile attributes (stub)
-async fn get_user_custom_profile_attributes(
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    // MM Enterprise feature - return empty array for compatibility
-    Ok(Json(vec![]))
 }
 
 fn status_ok() -> Json<serde_json::Value> {

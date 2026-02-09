@@ -131,3 +131,13 @@ async fn not_implemented() -> impl IntoResponse {
         "The requested Mattermost v4 endpoint is not available in this build.",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v4_router_builds_without_overlaps() {
+        let _ = router();
+    }
+}
