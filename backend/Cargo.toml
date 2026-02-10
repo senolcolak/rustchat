@@ -77,6 +77,9 @@ sha1 = "0.10"
 
 # WebRTC for SFU
 webrtc = "0.12"
+
+# TLS/crypto provider (required for rustls 0.23+)
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rtp = "0.11"
 rtcp = "0.12"
 sdp = "0.6"
