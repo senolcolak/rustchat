@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::{SFU, VoiceEvent};
+use super::{VoiceEvent, SFU};
 use crate::config::CallsConfig;
 use tokio::sync::mpsc;
 

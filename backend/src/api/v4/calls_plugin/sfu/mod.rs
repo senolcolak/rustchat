@@ -20,12 +20,12 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 
 use crate::config::CallsConfig;
 
@@ -39,14 +39,8 @@ use tracks::TrackManager;
 
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
-    VoiceOn {
-        call_id: Uuid,
-        session_id: Uuid,
-    },
-    VoiceOff {
-        call_id: Uuid,
-        session_id: Uuid,
-    },
+    VoiceOn { call_id: Uuid, session_id: Uuid },
+    VoiceOff { call_id: Uuid, session_id: Uuid },
 }
 
 /// Represents a participant in the SFU
@@ -177,10 +171,19 @@ impl SFU {
         ));
 
         // Add tracks to peer connection
-        info!("Adding tracks to peer connection for session {}", session_id);
-        peer_connection.add_track(audio_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
-        peer_connection.add_track(video_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
-        peer_connection.add_track(screen_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await?;
+        info!(
+            "Adding tracks to peer connection for session {}",
+            session_id
+        );
+        peer_connection
+            .add_track(audio_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+        peer_connection
+            .add_track(video_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+        peer_connection
+            .add_track(screen_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
         info!("Tracks added successfully for session {}", session_id);
 
         // Store participant
@@ -312,15 +315,11 @@ impl SFU {
 
         // Get the final answer with ICE candidates
         info!(session_id = %session_id, "Getting final answer");
-        let final_answer = pc
-            .local_description()
-            .await
-            .ok_or("No local description")?;
+        let final_answer = pc.local_description().await.ok_or("No local description")?;
 
         info!(session_id = %session_id, "SFU handle_offer success");
         Ok(final_answer)
     }
-
 
     /// Handle ICE candidate from client
     pub async fn handle_ice_candidate(

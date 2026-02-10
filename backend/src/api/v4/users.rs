@@ -131,7 +131,10 @@ pub fn router() -> Router<AppState> {
         .route("/users/known", get(get_known_users))
         .route("/users/stats", get(get_user_stats))
         .route("/users/stats/filtered", post(get_user_stats_filtered))
-        .route("/users/group_channels", get(get_user_group_channels).post(get_profiles_in_group_channels))
+        .route(
+            "/users/group_channels",
+            get(get_user_group_channels).post(get_profiles_in_group_channels),
+        )
         .route(
             "/users/{user_id}/oauth/apps/authorized",
             get(get_authorized_oauth_apps),
@@ -559,8 +562,6 @@ async fn get_team_members_for_user(
 
     Ok(Json(mm_members))
 }
-
-
 
 async fn hydrate_direct_channel_display_name(
     state: &AppState,
@@ -1328,7 +1329,7 @@ async fn patch_me(
     body: Bytes,
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
-    
+
     // Update any provided fields
     sqlx::query(
         r#"
@@ -1426,7 +1427,7 @@ async fn get_user_image(
     // Try to fetch from S3
     let key = format!("avatars/{}.png", user_uuid);
     let data = state.s3_client.download_optional(&key).await?;
-    
+
     match data {
         Some(bytes) => {
             // Detect content type from magic bytes
@@ -1441,30 +1442,32 @@ async fn get_user_image(
             } else {
                 "image/png"
             };
-            
+
             Ok((
                 [
                     (axum::http::header::CONTENT_TYPE, content_type),
                     (axum::http::header::CACHE_CONTROL, "private, max-age=86400"),
                 ],
                 bytes,
-            ).into_response())
+            )
+                .into_response())
         }
         None => {
             // Return default 1x1 transparent PNG if no image uploaded
             const PNG_1X1: &[u8] = &[
-                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-                0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1,
-                13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0,
+                1, 0, 0, 5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
             ];
-            
+
             Ok((
                 [
                     (axum::http::header::CONTENT_TYPE, "image/png"),
                     (axum::http::header::CACHE_CONTROL, "private, max-age=86400"),
                 ],
                 PNG_1X1.to_vec(),
-            ).into_response())
+            )
+                .into_response())
         }
     }
 }
@@ -1679,7 +1682,15 @@ async fn get_profiles_in_group_channels(
     }
 
     // Query users for each channel the requesting user is a member of
-    let rows: Vec<(Uuid, Uuid, String, String, Option<String>, Option<String>, bool)> = sqlx::query_as(
+    let rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+    )> = sqlx::query_as(
         r#"
         SELECT 
             cm.channel_id,
@@ -1705,7 +1716,8 @@ async fn get_profiles_in_group_channels(
     .await?;
 
     // Group by channel_id
-    let mut result: std::collections::HashMap<String, Vec<mm::User>> = std::collections::HashMap::new();
+    let mut result: std::collections::HashMap<String, Vec<mm::User>> =
+        std::collections::HashMap::new();
     for (channel_id, user_id, username, email, display_name, _avatar_url, _is_active) in rows {
         let mm_user = mm::User {
             id: encode_mm_id(user_id),
@@ -1735,7 +1747,6 @@ async fn get_profiles_in_group_channels(
             .push(mm_user);
     }
 
-
     Ok(Json(result))
 }
 
@@ -1754,11 +1765,13 @@ async fn get_users_by_usernames(
     // Mattermost clients send a raw JSON array for this endpoint:
     // ["user1","user2"] (not an object wrapper). We also accept
     // {"usernames":[...]} for compatibility with custom clients.
-    let usernames = parse_body::<UsersByUsernamesRequest>(&headers, &body, "Invalid usernames body")
-        .map(|parsed| match parsed {
-            UsersByUsernamesRequest::Usernames(usernames) => usernames,
-            UsersByUsernamesRequest::Wrapped { usernames } => usernames,
-        })?;
+    let usernames =
+        parse_body::<UsersByUsernamesRequest>(&headers, &body, "Invalid usernames body").map(
+            |parsed| match parsed {
+                UsersByUsernamesRequest::Usernames(usernames) => usernames,
+                UsersByUsernamesRequest::Wrapped { usernames } => usernames,
+            },
+        )?;
     if usernames.is_empty() {
         return Ok(Json(vec![]));
     }

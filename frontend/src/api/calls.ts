@@ -48,6 +48,7 @@ export interface CallState {
     owner_id: string
     host_id: string
     thread_id?: string
+    screen_sharing_id?: string
     screen_sharing_session_id?: string
     recording?: CallJobState
     dismissed_notification?: Record<string, boolean>
@@ -56,7 +57,9 @@ export interface CallState {
 
 export interface CallSession {
     session_id: string
+    session_id_raw?: string
     user_id: string
+    user_id_raw?: string
     unmuted: boolean
     raised_hand: number
 }
@@ -115,10 +118,18 @@ interface CallStateWire {
     host_id_raw?: string
     participants?: string[]
     participants_raw?: string[]
-    sessions?: Record<string, CallSession>
+    sessions?: Record<string, {
+        session_id?: string
+        session_id_raw?: string
+        user_id?: string
+        user_id_raw?: string
+        unmuted?: boolean
+        raised_hand?: number
+    }>
     thread_id?: string
     screen_sharing_id?: string
     screen_sharing_session_id?: string
+    screen_sharing_session_id_raw?: string
 }
 
 interface ChannelStateWire {
@@ -167,6 +178,19 @@ function normalizeConfig(raw: CallsConfigWire): CallsConfig {
 
 function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
     if (raw.sessions && typeof raw.sessions === 'object') {
+        const sessions: Record<string, CallSession> = {}
+        for (const [key, value] of Object.entries(raw.sessions)) {
+            const sessionId = value.session_id || key
+            sessions[sessionId] = {
+                session_id: sessionId,
+                session_id_raw: value.session_id_raw,
+                user_id: value.user_id || '',
+                user_id_raw: value.user_id_raw,
+                unmuted: value.unmuted ?? false,
+                raised_hand: value.raised_hand ?? 0,
+            }
+        }
+
         return {
             id: raw.id_raw || raw.id || '',
             channel_id: channelId,
@@ -174,8 +198,9 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
             owner_id: raw.owner_id_raw || raw.owner_id || '',
             host_id: raw.host_id_raw || raw.host_id || raw.owner_id_raw || raw.owner_id || '',
             thread_id: raw.thread_id,
-            screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_id,
-            sessions: raw.sessions,
+            screen_sharing_id: raw.screen_sharing_id,
+            screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_session_id_raw,
+            sessions,
         }
     }
 
@@ -197,7 +222,8 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
         owner_id: raw.owner_id_raw || raw.owner_id || '',
         host_id: raw.host_id_raw || raw.host_id || raw.owner_id_raw || raw.owner_id || '',
         thread_id: raw.thread_id,
-        screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_id,
+        screen_sharing_id: raw.screen_sharing_id,
+        screen_sharing_session_id: raw.screen_sharing_session_id || raw.screen_sharing_session_id_raw,
         sessions,
     }
 }

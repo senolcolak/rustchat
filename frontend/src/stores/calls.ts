@@ -42,6 +42,38 @@ export const useCallsStore = defineStore('calls', () => {
         return activeCalls.value.get(channelId)
     })
 
+    function readEventChannelId(data: any): string | undefined {
+        return data?.channel_id || data?.channel_id_raw
+    }
+
+    function readEventUserId(data: any): string | undefined {
+        return data?.user_id || data?.user_id_raw
+    }
+
+    function readEventSessionId(data: any): string | undefined {
+        return data?.session_id || data?.session_id_raw
+    }
+
+    function findMySessionId(call: CallState): string {
+        const myUserId = authStore.user?.id
+        if (!myUserId) {
+            return ''
+        }
+
+        const selfSession = Object.values(call.sessions || {}).find(
+            (session) => session.user_id === myUserId
+        )
+        return selfSession?.session_id || ''
+    }
+
+    function syncSelfCallFlags(call: CallState) {
+        const mySessionId = findMySessionId(call)
+        const mySession = mySessionId ? call.sessions?.[mySessionId] : undefined
+        isMuted.value = mySession ? !mySession.unmuted : true
+        isHandRaised.value = !!mySession && mySession.raised_hand > 0
+        isScreenSharing.value = call.screen_sharing_id === authStore.user?.id
+    }
+
     // WebSocket Event Listeners for Call Events
     onEvent('custom_com.mattermost.calls_call_start', (data) => {
         console.log('Call started:', data)
@@ -51,8 +83,8 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_call_end', (data) => {
         console.log('Call ended:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
+        const eventChannelId = readEventChannelId(data)
+        if (eventChannelId && currentCall.value?.channelId === eventChannelId) {
             leaveCall()
         }
         if (eventChannelId) {
@@ -62,26 +94,25 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_user_joined', (data) => {
         console.log('User joined call:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
-            // Update current call sessions
+        const eventChannelId = readEventChannelId(data)
+        if (eventChannelId) {
             loadCallForChannel(eventChannelId)
         }
     })
 
     onEvent('custom_com.mattermost.calls_user_left', (data) => {
         console.log('User left call:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
+        const eventChannelId = readEventChannelId(data)
+        if (eventChannelId) {
             loadCallForChannel(eventChannelId)
         }
     })
 
     onEvent('custom_com.mattermost.calls_user_muted', (data) => {
         console.log('User muted:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
-            const userId = data.user_id_raw || data.user_id
+        const eventChannelId = readEventChannelId(data)
+        if (eventChannelId && currentCall.value?.channelId === eventChannelId) {
+            const userId = readEventUserId(data)
             if (userId === authStore.user?.id) {
                 isMuted.value = data.muted
                 // Update local tracks
@@ -98,17 +129,40 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_user_unmuted', (data) => {
         console.log('User unmuted:', data)
+        const eventChannelId = readEventChannelId(data)
+        if (!eventChannelId || currentCall.value?.channelId !== eventChannelId) {
+            return
+        }
+
+        const userId = readEventUserId(data)
+        if (userId === authStore.user?.id) {
+            isMuted.value = false
+            currentCall.value.localStream?.getAudioTracks().forEach(track => {
+                track.enabled = true
+            })
+        }
+        loadCallForChannel(eventChannelId)
     })
 
     onEvent('custom_com.mattermost.calls_raise_hand', (data) => {
         console.log('Hand raised:', data)
+        const eventChannelId = readEventChannelId(data)
+        if (!eventChannelId || currentCall.value?.channelId !== eventChannelId) {
+            return
+        }
+
+        const userId = readEventUserId(data)
+        if (userId === authStore.user?.id) {
+            isHandRaised.value = true
+        }
+        loadCallForChannel(eventChannelId)
     })
 
     onEvent('custom_com.mattermost.calls_lower_hand', (data) => {
         console.log('Hand lowered:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        if (currentCall.value?.channelId === eventChannelId) {
-            const userId = data.user_id_raw || data.user_id
+        const eventChannelId = readEventChannelId(data)
+        if (eventChannelId && currentCall.value?.channelId === eventChannelId) {
+            const userId = readEventUserId(data)
             if (userId === authStore.user?.id) {
                 isHandRaised.value = false
             }
@@ -117,14 +171,14 @@ export const useCallsStore = defineStore('calls', () => {
     })
 
     onEvent('custom_com.mattermost.calls_user_voice_on', (data) => {
-        const sessionId = data.session_id_raw || data.session_id
+        const sessionId = readEventSessionId(data)
         if (sessionId) {
             speakingParticipants.value.add(sessionId)
         }
     })
 
     onEvent('custom_com.mattermost.calls_user_voice_off', (data) => {
-        const sessionId = data.session_id_raw || data.session_id
+        const sessionId = readEventSessionId(data)
         if (sessionId) {
             speakingParticipants.value.delete(sessionId)
         }
@@ -132,7 +186,7 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_host_mute', (data) => {
         if (!currentCall.value) return
-        const sessionId = data.session_id_raw || data.session_id
+        const sessionId = readEventSessionId(data)
         if (sessionId === currentCall.value?.mySessionId) {
             isMuted.value = true
             const active = currentCall.value
@@ -147,7 +201,7 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_host_removed', (data) => {
         if (!currentCall.value) return
-        const sessionId = data.session_id_raw || data.session_id
+        const sessionId = readEventSessionId(data)
         if (sessionId === currentCall.value?.mySessionId) {
             leaveCall()
             toast.error('Removed from call', 'You have been removed from the call by the host')
@@ -155,16 +209,16 @@ export const useCallsStore = defineStore('calls', () => {
     })
 
     onEvent('custom_com.mattermost.calls_host_changed', (data) => {
-        const eventChannelId = data.channel_id_raw || data.channel_id
+        const eventChannelId = readEventChannelId(data)
         if (currentCall.value && currentCall.value.channelId === eventChannelId) {
-            currentCall.value.call.host_id = data.host_id_raw || data.host_id
+            currentCall.value.call.host_id = data.host_id || data.host_id_raw
         }
     })
 
     onEvent('custom_com.mattermost.calls_ringing', (data) => {
         if (isInCall.value) return
-        const eventChannelId = data.channel_id_raw || data.channel_id
-        const callerId = data.sender_id_raw || data.sender_id
+        const eventChannelId = readEventChannelId(data)
+        const callerId = data.sender_id || data.sender_id_raw
         if (eventChannelId && callerId) {
             setIncomingCall({ channelId: eventChannelId, callerId })
         }
@@ -172,17 +226,25 @@ export const useCallsStore = defineStore('calls', () => {
 
     onEvent('custom_com.mattermost.calls_screen_on', (data) => {
         console.log('Screen share on:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
+        const eventChannelId = readEventChannelId(data)
         if (currentCall.value && currentCall.value.channelId === eventChannelId) {
-            isScreenSharing.value = true
+            const userId = readEventUserId(data)
+            if (userId === authStore.user?.id) {
+                isScreenSharing.value = true
+            }
+            loadCallForChannel(eventChannelId)
         }
     })
 
     onEvent('custom_com.mattermost.calls_screen_off', (data) => {
         console.log('Screen share off:', data)
-        const eventChannelId = data.channel_id_raw || data.channel_id
+        const eventChannelId = readEventChannelId(data)
         if (currentCall.value && currentCall.value.channelId === eventChannelId) {
-            isScreenSharing.value = false
+            const userId = readEventUserId(data)
+            if (userId === authStore.user?.id) {
+                isScreenSharing.value = false
+            }
+            loadCallForChannel(eventChannelId)
         }
     })
 
@@ -190,7 +252,7 @@ export const useCallsStore = defineStore('calls', () => {
         const active = currentCall.value
         if (!active?.peerConnection) return
 
-        const eventChannelId = data.channel_id_raw || data.channel_id
+        const eventChannelId = readEventChannelId(data)
         if (eventChannelId !== active.channelId) return
 
         const signal = data.signal
@@ -263,6 +325,11 @@ export const useCallsStore = defineStore('calls', () => {
                 activeCalls.value.set(channelId, data.call)
                 if (currentCall.value?.channelId === channelId) {
                     currentCall.value.call = data.call
+                    const mySessionId = findMySessionId(data.call)
+                    if (mySessionId) {
+                        currentCall.value.mySessionId = mySessionId
+                    }
+                    syncSelfCallFlags(data.call)
                 }
             } else {
                 activeCalls.value.delete(channelId)
@@ -284,32 +351,26 @@ export const useCallsStore = defineStore('calls', () => {
 
             // Start the call on the server
             const { data: callData } = await callsApi.startCall(channelId)
+            const channelState = await loadCallForChannel(channelId)
+            if (!channelState?.call) {
+                throw new Error('Call started but state could not be loaded')
+            }
 
-            const selfId = authStore.user?.id || crypto.randomUUID()
-            const mySessionId = crypto.randomUUID()
+            const mySessionId = findMySessionId(channelState.call)
+            if (!mySessionId) {
+                throw new Error('Could not resolve your call session')
+            }
+
             currentCall.value = {
                 channelId,
-                call: {
-                    id: callData.id,
-                    channel_id: channelId,
-                    start_at: callData.start_at,
-                    owner_id: callData.owner_id,
-                    host_id: callData.owner_id,
-                    sessions: {
-                        [mySessionId]: {
-                            session_id: mySessionId,
-                            user_id: selfId,
-                            unmuted: false,
-                            raised_hand: 0,
-                        },
-                    }
-                },
+                call: channelState.call,
                 mySessionId,
                 peerConnection: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
             }
+            syncSelfCallFlags(channelState.call)
 
             // Initialize WebRTC
             const rtc = await initializeWebRTC(channelId, config.ICEServersConfigs)
@@ -348,25 +409,23 @@ export const useCallsStore = defineStore('calls', () => {
             // Join the call on the server
             await callsApi.joinCall(channelId)
 
-            const mySessionId = crypto.randomUUID()
+            const refreshedState = await loadCallForChannel(channelId)
+            const callState = refreshedState?.call || channelState.call
+            const mySessionId = findMySessionId(callState)
+            if (!mySessionId) {
+                throw new Error('Could not resolve your call session')
+            }
+
             currentCall.value = {
                 channelId,
-                call: channelState.call,
+                call: callState,
                 mySessionId,
                 peerConnection: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
             }
-
-            if (!currentCall.value.call.sessions[mySessionId]) {
-                currentCall.value.call.sessions[mySessionId] = {
-                    session_id: mySessionId,
-                    user_id: authStore.user?.id || mySessionId,
-                    unmuted: false,
-                    raised_hand: 0,
-                }
-            }
+            syncSelfCallFlags(callState)
 
             // Initialize WebRTC
             const rtc = await initializeWebRTC(channelId, config.ICEServersConfigs)
@@ -404,6 +463,7 @@ export const useCallsStore = defineStore('calls', () => {
             isHandRaised.value = false
             isScreenSharing.value = false
             isExpanded.value = false
+            speakingParticipants.value.clear()
 
         } catch (error) {
             console.error('Failed to leave call', error)
@@ -427,6 +487,7 @@ export const useCallsStore = defineStore('calls', () => {
             isHandRaised.value = false
             isScreenSharing.value = false
             isExpanded.value = false
+            speakingParticipants.value.clear()
 
         } catch (error) {
             console.error('Failed to end call', error)
@@ -512,6 +573,11 @@ export const useCallsStore = defineStore('calls', () => {
         if (currentCall.value?.localStream) {
             currentCall.value.localStream.getTracks().forEach(track => track.stop())
         }
+        if (currentCall.value?.screenStream) {
+            currentCall.value.screenStream.getTracks().forEach(track => track.stop())
+            currentCall.value.screenStream = null
+        }
+        currentCall.value?.remoteStreams.clear()
     }
 
     // Call controls
@@ -555,6 +621,22 @@ export const useCallsStore = defineStore('calls', () => {
         }
     }
 
+    function stopLocalScreenShare(pc: RTCPeerConnection) {
+        if (!currentCall.value?.screenStream) {
+            return
+        }
+
+        currentCall.value.screenStream.getTracks().forEach(track => {
+            track.onended = null
+            track.stop()
+            const sender = pc.getSenders().find(s => s.track === track)
+            if (sender) {
+                pc.removeTrack(sender)
+            }
+        })
+        currentCall.value.screenStream = null
+    }
+
     async function toggleScreenShare() {
         if (!currentCall.value || !currentCall.value.peerConnection) return
 
@@ -562,19 +644,12 @@ export const useCallsStore = defineStore('calls', () => {
         const pc = currentCall.value.peerConnection
 
         try {
-            if (isScreenSharing.value) {
+            if (currentCall.value.screenStream) {
                 // Stop screen sharing
-                if (currentCall.value.screenStream) {
-                    currentCall.value.screenStream.getTracks().forEach(track => {
-                        track.stop()
-                        const sender = pc.getSenders().find(s => s.track === track)
-                        if (sender) pc.removeTrack(sender)
-                    })
-                    currentCall.value.screenStream = null
-                }
-
+                stopLocalScreenShare(pc)
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
+                isScreenSharing.value = false
             } else {
                 // Start screen sharing
                 const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -583,17 +658,26 @@ export const useCallsStore = defineStore('calls', () => {
                 })
 
                 currentCall.value.screenStream = stream
+                const [videoTrack] = stream.getVideoTracks()
+                if (videoTrack) {
+                    videoTrack.onended = () => {
+                        if (currentCall.value?.screenStream) {
+                            void toggleScreenShare()
+                        }
+                    }
+                }
 
                 stream.getTracks().forEach(track => {
-                    // Set stream ID to contain "screen" so SFU can detect it
                     pc.addTrack(track, stream)
                 })
 
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
+                isScreenSharing.value = true
             }
         } catch (error) {
             console.error('Failed to toggle screen share', error)
+            stopLocalScreenShare(pc)
             isScreenSharing.value = false
         }
     }

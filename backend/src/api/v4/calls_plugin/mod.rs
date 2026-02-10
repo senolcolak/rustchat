@@ -195,10 +195,25 @@ struct CallStateResponse {
     host_id_raw: String,
     participants: Vec<String>,
     participants_raw: Vec<String>,
+    sessions: HashMap<String, CallSessionResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     screen_sharing_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    screen_sharing_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_sharing_session_id_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CallSessionResponse {
+    session_id: String,
+    session_id_raw: String,
+    user_id: String,
+    user_id_raw: String,
+    unmuted: bool,
+    raised_hand: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,7 +297,7 @@ async fn get_config(
     }
     let needs_turn = state.config.calls.turn_server_enabled;
 
-    Ok(Json(ConfigResponse { 
+    Ok(Json(ConfigResponse {
         ice_servers_configs: ice_servers,
         needs_turn_credentials: needs_turn,
     }))
@@ -309,14 +324,14 @@ async fn get_turn_credentials(
     let generator = if turn_config.username.is_empty() || turn_config.credential.is_empty() {
         TurnCredentialGenerator::with_rest_api(
             state.config.encryption_key.clone(),
-            state.config.calls.turn_ttl_minutes
+            state.config.calls.turn_ttl_minutes,
         )
     } else {
         TurnCredentialGenerator::with_static_credentials(turn_config)
     };
 
     let credentials = generator.generate_credentials(&auth.user_id.to_string());
-    
+
     Ok(Json(vec![IceServer {
         urls: vec![state.config.calls.turn_server_url.clone()],
         username: Some(credentials.username),
@@ -826,6 +841,28 @@ async fn get_call_state(
         .iter()
         .map(|p| p.user_id.to_string())
         .collect();
+    let sessions: HashMap<String, CallSessionResponse> = call_participants
+        .iter()
+        .map(|participant| {
+            let encoded_session_id = encode_mm_id(participant.session_id);
+            (
+                encoded_session_id.clone(),
+                CallSessionResponse {
+                    session_id: encoded_session_id,
+                    session_id_raw: participant.session_id.to_string(),
+                    user_id: encode_mm_id(participant.user_id),
+                    user_id_raw: participant.user_id.to_string(),
+                    unmuted: !participant.muted,
+                    raised_hand: if participant.hand_raised { 1 } else { 0 },
+                },
+            )
+        })
+        .collect();
+    let screen_sharing_session = call.screen_sharer.and_then(|screen_sharer| {
+        call_participants
+            .iter()
+            .find(|participant| participant.user_id == screen_sharer)
+    });
 
     Ok(Json(CallStateResponse {
         id: encode_mm_id(call.call_id),
@@ -839,9 +876,15 @@ async fn get_call_state(
         host_id_raw: call.host_id.to_string(),
         participants,
         participants_raw,
+        sessions,
         screen_sharing_id: call.screen_sharer.map(encode_mm_id),
+        screen_sharing_session_id: screen_sharing_session
+            .map(|participant| encode_mm_id(participant.session_id)),
+        screen_sharing_session_id_raw: screen_sharing_session
+            .map(|participant| participant.session_id.to_string()),
         thread_id: call.thread_id.map(encode_mm_id),
-    }).into_response())
+    })
+    .into_response())
 }
 
 /// POST /plugins/com.mattermost.calls/calls/{channel_id}/react
@@ -1131,17 +1174,23 @@ async fn host_mute(
 
     // Authorize: Only host can mute others
     if call.host_id != auth.user_id {
-        return Err(AppError::Forbidden("Only the host can mute other participants".to_string()));
+        return Err(AppError::Forbidden(
+            "Only the host can mute other participants".to_string(),
+        ));
     }
 
     // Find target user by session_id
-    let target_user_id = call.participants.values()
+    let target_user_id = call
+        .participants
+        .values()
         .find(|p| p.session_id == target_session_id)
         .map(|p| p.user_id)
         .ok_or_else(|| AppError::NotFound("Participant not found in call".to_string()))?;
 
     // Mute in state
-    call_manager.set_muted(call.call_id, target_user_id, true).await;
+    call_manager
+        .set_muted(call.call_id, target_user_id, true)
+        .await;
 
     // Send host_mute event to the target user
     broadcast_call_event(
@@ -1192,7 +1241,9 @@ async fn host_mute_others(
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
     if call.host_id != auth.user_id {
-        return Err(AppError::Forbidden("Only the host can mute other participants".to_string()));
+        return Err(AppError::Forbidden(
+            "Only the host can mute other participants".to_string(),
+        ));
     }
 
     for participant in call.participants.values() {
@@ -1200,7 +1251,9 @@ async fn host_mute_others(
             continue;
         }
 
-        call_manager.set_muted(call.call_id, participant.user_id, true).await;
+        call_manager
+            .set_muted(call.call_id, participant.user_id, true)
+            .await;
 
         // Signal each user
         broadcast_call_event(
@@ -1255,16 +1308,22 @@ async fn host_remove_user(
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
     if call.host_id != auth.user_id {
-        return Err(AppError::Forbidden("Only the host can remove participants".to_string()));
+        return Err(AppError::Forbidden(
+            "Only the host can remove participants".to_string(),
+        ));
     }
 
-    let target_user_id = call.participants.values()
+    let target_user_id = call
+        .participants
+        .values()
         .find(|p| p.session_id == target_session_id)
         .map(|p| p.user_id)
         .ok_or_else(|| AppError::NotFound("Participant not found in call".to_string()))?;
 
     if target_user_id == auth.user_id {
-        return Err(AppError::BadRequest("Host cannot remove themselves with this endpoint; use leave_call instead".to_string()));
+        return Err(AppError::BadRequest(
+            "Host cannot remove themselves with this endpoint; use leave_call instead".to_string(),
+        ));
     }
 
     // Signal host removal to target
@@ -1281,7 +1340,9 @@ async fn host_remove_user(
     .await;
 
     // Remove from state
-    call_manager.remove_participant(call.call_id, target_user_id).await;
+    call_manager
+        .remove_participant(call.call_id, target_user_id)
+        .await;
 
     // Remove from SFU
     if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
@@ -1327,16 +1388,22 @@ async fn host_lower_hand(
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
     if call.host_id != auth.user_id {
-        return Err(AppError::Forbidden("Only the host can lower hands".to_string()));
+        return Err(AppError::Forbidden(
+            "Only the host can lower hands".to_string(),
+        ));
     }
 
-    let target_user_id = call.participants.values()
+    let target_user_id = call
+        .participants
+        .values()
         .find(|p| p.session_id == target_session_id)
         .map(|p| p.user_id)
         .ok_or_else(|| AppError::NotFound("Participant not found in call".to_string()))?;
 
     // Lower hand in state
-    call_manager.set_hand_raised(call.call_id, target_user_id, false).await;
+    call_manager
+        .set_hand_raised(call.call_id, target_user_id, false)
+        .await;
 
     // Signal target user
     broadcast_call_event(
@@ -1393,12 +1460,16 @@ async fn host_make_moderator(
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
     if call.host_id != auth.user_id {
-        return Err(AppError::Forbidden("Only the host can transfer host status".to_string()));
+        return Err(AppError::Forbidden(
+            "Only the host can transfer host status".to_string(),
+        ));
     }
 
     // Verify new host is a participant
     if !call.participants.contains_key(&new_host_uuid) {
-        return Err(AppError::BadRequest("New host must be a participant in the call".to_string()));
+        return Err(AppError::BadRequest(
+            "New host must be a participant in the call".to_string(),
+        ));
     }
 
     // Transfer host in state
@@ -1434,7 +1505,9 @@ async fn ring_users(
 
     // Check if call exists
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager.get_call_by_channel(&channel_uuid).await
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
         .ok_or_else(|| AppError::NotFound("No active call to ring".to_string()))?;
 
     // Broadcast ringing event
@@ -2464,7 +2537,10 @@ pub async fn start_voice_event_listener(
     info!("Starting Calls Voice Event Listener");
     while let Some(event) = rx.recv().await {
         match event {
-            VoiceEvent::VoiceOn { call_id, session_id } => {
+            VoiceEvent::VoiceOn {
+                call_id,
+                session_id,
+            } => {
                 broadcast_call_event(
                     &state,
                     "custom_com.mattermost.calls_user_voice_on",
@@ -2476,7 +2552,10 @@ pub async fn start_voice_event_listener(
                 )
                 .await;
             }
-            VoiceEvent::VoiceOff { call_id, session_id } => {
+            VoiceEvent::VoiceOff {
+                call_id,
+                session_id,
+            } => {
                 broadcast_call_event(
                     &state,
                     "custom_com.mattermost.calls_user_voice_off",

@@ -176,8 +176,6 @@ fn parse_body<T: DeserializeOwned>(
     }
 }
 
-
-
 async fn resolve_direct_channel_display_name(
     state: &AppState,
     channel_id: Uuid,

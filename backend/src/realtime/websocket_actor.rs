@@ -584,7 +584,11 @@ impl ActorTask {
             reason: "Connection ended".into(),
         };
         // Best-effort close frame - don't wait or error if it fails
-        let _ = timeout(Duration::from_secs(1), ws_sink.send(Message::Close(Some(close_frame)))).await;
+        let _ = timeout(
+            Duration::from_secs(1),
+            ws_sink.send(Message::Close(Some(close_frame))),
+        )
+        .await;
 
         // Mark connection as disconnected (but retain state for resumption)
         self.store.disconnect_connection(&self.connection_id);

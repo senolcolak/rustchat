@@ -42,10 +42,20 @@ const screenShareStream = computed(() => {
     // If local user is sharing, use local screen stream
     if (activeCall.value.screenStream) return activeCall.value.screenStream
     
-    // Otherwise look for remote screen share track
-    // The SFU sends "screen-" prefixed stream IDs
+    // Prefer the stream that matches the call state's screen sharing session.
     const remoteStreams = Array.from(activeCall.value.remoteStreams.values())
-    return remoteStreams.find(s => s.id.includes('screen')) || null
+    const screenSessionId = activeCall.value.call.screen_sharing_session_id
+    if (screenSessionId) {
+        const matched = remoteStreams.find((stream) => {
+            if (!stream.getVideoTracks().length) return false
+            if (stream.id.includes(screenSessionId)) return true
+            return stream.getVideoTracks().some((track) => track.id.includes(screenSessionId))
+        })
+        if (matched) return matched
+    }
+
+    // Fallback: in this audio-call UI, any remote video stream is likely screen share.
+    return remoteStreams.find((stream) => stream.getVideoTracks().length > 0) || null
 })
 
 watchEffect(() => {
