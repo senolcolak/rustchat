@@ -310,21 +310,28 @@ impl SFU {
         pc.set_local_description(answer.clone()).await?;
 
         // Wait for ICE gathering to complete (or timeout)
-        info!(session_id = %session_id, "Waiting for ICE gathering");
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // We wait longer (2 seconds) to allow STUN/TURN candidates to be gathered
+        info!(session_id = %session_id, "Waiting for ICE gathering (2 seconds)");
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
         // Get the final answer with ICE candidates
         info!(session_id = %session_id, "Getting final answer");
         let final_answer = pc.local_description().await.ok_or("No local description")?;
+        
+        info!(
+            session_id = %session_id,
+            sdp_length = final_answer.sdp.len(),
+            "Answer SDP generated"
+        );
 
         info!(session_id = %session_id, "SFU handle_offer success");
         Ok(final_answer)
     }
 
     /// Handle ICE candidate from client
-    /// In an SFU architecture, we need to:
-    /// 1. Store the candidate for the sender's peer connection
-    /// 2. Forward the candidate to ALL other participants so they can add it to their peer connections
+    /// In an SFU architecture, each client only connects to the SFU, not to other clients.
+    /// The client's ICE candidate should only be added to the SFU's peer connection for that client.
+    /// The SFU generates its own candidates (via on_ice_candidate handler) and sends them to the client.
     pub async fn handle_ice_candidate(
         &self,
         session_id: Uuid,
@@ -334,79 +341,79 @@ impl SFU {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let candidate_init = Self::parse_client_ice_candidate(candidate.clone(), sdp_mid.clone(), sdp_mline_index)?;
 
-        // First, handle the candidate for the sender's own peer connection
-        {
-            let participants = self.participants.read().await;
-            let participant = participants
-                .get(&session_id)
-                .ok_or("Participant not found")?;
-
-            if participant
-                .peer_connection
-                .remote_description()
-                .await
-                .is_none()
-            {
-                // Remote description not set yet, queue the candidate
-                drop(participants);
-                self.pending_ice_candidates
-                    .write()
-                    .await
-                    .entry(session_id)
-                    .or_default()
-                    .push(candidate_init);
-            } else {
-                // Add candidate to sender's peer connection
-                participant
-                    .peer_connection
-                    .add_ice_candidate(candidate_init)
-                    .await?;
-            }
-        }
-
-        // Forward the ICE candidate to all OTHER participants
-        // In an SFU, each participant needs to know about each other's candidates
-        // to establish peer connections with the SFU
         let participants = self.participants.read().await;
-        for (other_session_id, other_participant) in participants.iter() {
-            if *other_session_id == session_id {
-                continue; // Skip the sender
-            }
+        let participant = participants
+            .get(&session_id)
+            .ok_or("Participant not found")?;
 
-            // Forward the candidate to this participant via signaling
-            let forwarded_candidate = SignalingMessage::IceCandidate {
-                candidate: candidate.clone(),
-                sdp_mid: sdp_mid.clone(),
-                sdp_mline_index,
-                username_fragment: None,
-            };
-
-            let _ = other_participant.signaling_tx.send(forwarded_candidate);
+        if participant
+            .peer_connection
+            .remote_description()
+            .await
+            .is_none()
+        {
+            // Remote description not set yet, queue the candidate
+            drop(participants);
+            self.pending_ice_candidates
+                .write()
+                .await
+                .entry(session_id)
+                .or_default()
+                .push(candidate_init);
+            info!(
+                session_id = %session_id,
+                candidate_len = candidate.len(),
+                "ICE candidate queued (remote description not set yet)"
+            );
+        } else {
+            // Add candidate to the SFU's peer connection for this client
+            participant
+                .peer_connection
+                .add_ice_candidate(candidate_init)
+                .await?;
+            info!(
+                session_id = %session_id,
+                candidate_len = candidate.len(),
+                "ICE candidate added to peer connection"
+            );
         }
-
-        info!(
-            session_id = %session_id,
-            candidate_len = candidate.len(),
-            "ICE candidate processed and forwarded to {} other participants",
-            participants.len().saturating_sub(1)
-        );
 
         Ok(())
     }
 
     /// Build ICE servers for the SFU's server-side PeerConnection.
     ///
-    /// **Important**: We intentionally do NOT add external STUN servers here.
-    /// STUN is for *clients* to discover their public IP; the SFU runs on known
-    /// infrastructure and only needs host candidates.  Adding STUN servers
-    /// that are unreachable from inside a Docker container (IPv6 not available,
-    /// DNS failures) causes the ICE agent to fail, which tears down the
-    /// PeerConnection's internal channels and makes renegotiation impossible.
+    /// In containerized/Docker environments, the SFU needs STUN servers to discover
+    /// its public IP address (srflx candidates). Without this, clients outside the
+    /// container network cannot connect to the SFU's internal host candidates.
     ///
-    /// If a TURN server is configured, we include it so the SFU can relay
-    /// media through it when direct connectivity is not possible.
+    /// We also add TURN servers as a fallback for relay when direct connectivity fails.
     fn build_ice_servers(&self) -> Vec<RTCIceServer> {
         let mut servers = vec![];
+
+        // Add STUN servers so the SFU can discover its public IP address
+        // This is critical in Docker/containerized environments where the container
+        // has internal IPs that are not reachable from outside
+        if !self.config.stun_servers.is_empty() {
+            for stun_url in &self.config.stun_servers {
+                if !stun_url.trim().is_empty() {
+                    servers.push(RTCIceServer {
+                        urls: vec![stun_url.clone()],
+                        ..Default::default()
+                    });
+                }
+            }
+        } else {
+            // Default STUN servers if none configured
+            servers.push(RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                ..Default::default()
+            });
+            servers.push(RTCIceServer {
+                urls: vec!["stun:stun1.l.google.com:19302".to_string()],
+                ..Default::default()
+            });
+        }
 
         // Add TURN server if enabled (needed for relay through NAT/firewall)
         if self.config.turn_server_enabled
@@ -421,6 +428,12 @@ impl SFU {
                 ..Default::default()
             });
         }
+
+        info!(
+            stun_count = servers.len().saturating_sub(if self.config.turn_server_enabled { 1 } else { 0 }),
+            turn_enabled = self.config.turn_server_enabled,
+            "ICE servers configured for SFU"
+        );
 
         servers
     }
@@ -650,17 +663,27 @@ impl SFU {
                 if let Some(candidate) = candidate {
                     // Send ICE candidate to client via signaling
                     let candidate_json = candidate.to_json().ok();
+                    let candidate_str = candidate_json
+                        .as_ref()
+                        .map(|j| j.candidate.clone())
+                        .unwrap_or_default();
+                    
+                    info!(
+                        candidate = %candidate_str.chars().take(80).collect::<String>(),
+                        candidate_len = candidate_str.len(),
+                        "SFU generated ICE candidate - sending to client"
+                    );
+                    
                     let _ = signaling_tx_ice.send(SignalingMessage::IceCandidate {
-                        candidate: candidate_json
-                            .as_ref()
-                            .map(|j| j.candidate.clone())
-                            .unwrap_or_default(),
+                        candidate: candidate_str,
                         sdp_mid: candidate_json.as_ref().and_then(|j| j.sdp_mid.clone()),
                         sdp_mline_index: candidate_json.as_ref().and_then(|j| j.sdp_mline_index),
                         username_fragment: candidate_json
                             .as_ref()
                             .and_then(|j| j.username_fragment.clone()),
                     });
+                } else {
+                    info!("ICE candidate gathering completed (null candidate received)");
                 }
 
                 Box::pin(async {})
