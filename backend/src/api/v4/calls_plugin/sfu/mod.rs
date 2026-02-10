@@ -230,6 +230,44 @@ impl SFU {
         Ok(())
     }
 
+    /// Recreate a participant's PeerConnection.
+    ///
+    /// This tears down the old (possibly dead) PeerConnection and builds
+    /// a fresh one while keeping the same session_id.  Returns the new
+    /// signaling receiver so the caller can spawn a new forwarder.
+    pub async fn recreate_participant(
+        &self,
+        user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<
+        (
+            Arc<RTCPeerConnection>,
+            mpsc::UnboundedReceiver<SignalingMessage>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        info!(session_id = %session_id, "Recreating participant PeerConnection");
+
+        // Close and remove the old participant if present
+        {
+            let mut participants = self.participants.write().await;
+            if let Some(old) = participants.remove(&session_id) {
+                let _ = old.peer_connection.close().await;
+            }
+        }
+        self.signaling.unregister_channel(session_id).await;
+        self.track_manager
+            .remove_participant_tracks(session_id)
+            .await;
+        self.pending_ice_candidates
+            .write()
+            .await
+            .remove(&session_id);
+
+        // Re-add with fresh PeerConnection (reuses add_participant logic)
+        self.add_participant(user_id, session_id).await
+    }
+
     /// Check if a participant session is present in this SFU.
     pub async fn has_participant(&self, session_id: Uuid) -> bool {
         self.participants.read().await.contains_key(&session_id)
@@ -242,33 +280,31 @@ impl SFU {
         offer: RTCSessionDescription,
     ) -> Result<RTCSessionDescription, Box<dyn std::error::Error + Send + Sync>> {
         info!(session_id = %session_id, "SFU handle_offer start");
-        let participants = self.participants.read().await;
 
-        let participant = participants
-            .get(&session_id)
-            .ok_or("Participant not found")?;
+        // Clone the Arc<PeerConnection> so we can release the lock before the
+        // 500ms ICE-gathering sleep.
+        let pc = {
+            let participants = self.participants.read().await;
+            let participant = participants
+                .get(&session_id)
+                .ok_or("Participant not found")?;
+            participant.peer_connection.clone()
+        }; // read lock released here
 
         // Set remote description (the offer)
         info!(session_id = %session_id, "Setting remote description");
-        participant
-            .peer_connection
-            .set_remote_description(offer)
-            .await?;
-        
+        pc.set_remote_description(offer).await?;
+
         info!(session_id = %session_id, "Flushing pending ICE candidates");
-        self.flush_pending_ice_candidates(session_id, &participant.peer_connection)
-            .await?;
+        self.flush_pending_ice_candidates(session_id, &pc).await?;
 
         // Create answer
         info!(session_id = %session_id, "Creating answer");
-        let answer = participant.peer_connection.create_answer(None).await?;
+        let answer = pc.create_answer(None).await?;
 
         // Set local description
         info!(session_id = %session_id, "Setting local description");
-        participant
-            .peer_connection
-            .set_local_description(answer.clone())
-            .await?;
+        pc.set_local_description(answer.clone()).await?;
 
         // Wait for ICE gathering to complete (or timeout)
         info!(session_id = %session_id, "Waiting for ICE gathering");
@@ -276,8 +312,7 @@ impl SFU {
 
         // Get the final answer with ICE candidates
         info!(session_id = %session_id, "Getting final answer");
-        let final_answer = participant
-            .peer_connection
+        let final_answer = pc
             .local_description()
             .await
             .ok_or("No local description")?;

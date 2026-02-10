@@ -1530,18 +1530,49 @@ async fn handle_offer(
         );
     }
 
-    // Parse the offer SDP
-    let offer = RTCSessionDescription::offer(payload.sdp)
+    // Parse the offer SDP (keep raw SDP for potential retry)
+    let sdp_raw = payload.sdp;
+    let offer = RTCSessionDescription::offer(sdp_raw.clone())
         .map_err(|e| AppError::BadRequest(format!("Invalid SDP offer: {}", e)))?;
 
-    // Handle the offer and get answer
-    let answer = sfu
-        .handle_offer(participant.session_id, offer)
-        .await
-        .map_err(|e| {
-            error!(session_id = %participant.session_id, error = %e, "sfu.handle_offer failed");
-            AppError::Internal(format!("Failed to handle offer: {}", e))
-        })?;
+    // Handle the offer and get answer.
+    // If it fails (e.g. dead PeerConnection), recreate the participant and retry once.
+    let answer = match sfu.handle_offer(participant.session_id, offer).await {
+        Ok(ans) => ans,
+        Err(first_err) => {
+            warn!(
+                session_id = %participant.session_id,
+                error = %first_err,
+                "sfu.handle_offer failed; recreating PeerConnection and retrying"
+            );
+
+            let (_, signaling_rx) = sfu
+                .recreate_participant(auth.user_id, participant.session_id)
+                .await
+                .map_err(|e| {
+                    error!(session_id = %participant.session_id, error = %e, "recreate_participant failed");
+                    AppError::Internal(format!("Failed to recreate participant: {}", e))
+                })?;
+
+            spawn_signaling_forwarder(
+                &state,
+                channel_uuid,
+                auth.user_id,
+                participant.session_id,
+                signaling_rx,
+            );
+
+            let retry_offer = RTCSessionDescription::offer(sdp_raw)
+                .map_err(|e| AppError::Internal(format!("Invalid SDP on retry: {}", e)))?;
+
+            sfu.handle_offer(participant.session_id, retry_offer)
+                .await
+                .map_err(|e| {
+                    error!(session_id = %participant.session_id, error = %e, "sfu.handle_offer retry also failed");
+                    AppError::Internal(format!("Failed to handle offer after retry: {}", e))
+                })?
+        }
+    };
     debug!(
         call_id = %call.call_id,
         user_id = %auth.user_id,
