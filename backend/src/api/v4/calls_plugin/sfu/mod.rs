@@ -236,6 +236,7 @@ impl SFU {
         session_id: Uuid,
         offer: RTCSessionDescription,
     ) -> Result<RTCSessionDescription, Box<dyn std::error::Error + Send + Sync>> {
+        info!(session_id = %session_id, "SFU handle_offer start");
         let participants = self.participants.read().await;
 
         let participant = participants
@@ -243,35 +244,43 @@ impl SFU {
             .ok_or("Participant not found")?;
 
         // Set remote description (the offer)
+        info!(session_id = %session_id, "Setting remote description");
         participant
             .peer_connection
             .set_remote_description(offer)
             .await?;
+        
+        info!(session_id = %session_id, "Flushing pending ICE candidates");
         self.flush_pending_ice_candidates(session_id, &participant.peer_connection)
             .await?;
 
         // Create answer
+        info!(session_id = %session_id, "Creating answer");
         let answer = participant.peer_connection.create_answer(None).await?;
 
         // Set local description
+        info!(session_id = %session_id, "Setting local description");
         participant
             .peer_connection
             .set_local_description(answer.clone())
             .await?;
 
         // Wait for ICE gathering to complete (or timeout)
-        // In production, you'd want to handle trickle ICE instead
+        info!(session_id = %session_id, "Waiting for ICE gathering");
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Get the final answer with ICE candidates
+        info!(session_id = %session_id, "Getting final answer");
         let final_answer = participant
             .peer_connection
             .local_description()
             .await
             .ok_or("No local description")?;
 
+        info!(session_id = %session_id, "SFU handle_offer success");
         Ok(final_answer)
     }
+
 
     /// Handle ICE candidate from client
     pub async fn handle_ice_candidate(
