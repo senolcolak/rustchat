@@ -296,6 +296,7 @@ struct EffectiveCallsConfig {
     turn_server_url: String,
     turn_server_username: String,
     turn_server_credential: String,
+    turn_static_auth_secret: String,
     stun_servers: Vec<String>,
 }
 
@@ -343,6 +344,11 @@ async fn load_effective_calls_config(state: &AppState) -> EffectiveCallsConfig {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| state.config.calls.turn_server_credential.clone()),
+                turn_static_auth_secret: obj
+                    .get("turn_static_auth_secret")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| state.config.calls.turn_static_auth_secret.clone()),
                 stun_servers: obj
                     .get("stun_servers")
                     .and_then(|v| v.as_array())
@@ -371,6 +377,7 @@ async fn load_effective_calls_config(state: &AppState) -> EffectiveCallsConfig {
         turn_server_url: state.config.calls.turn_server_url.clone(),
         turn_server_username: state.config.calls.turn_server_username.clone(),
         turn_server_credential: state.config.calls.turn_server_credential.clone(),
+        turn_static_auth_secret: state.config.calls.turn_static_auth_secret.clone(),
         stun_servers: state.config.calls.stun_servers.clone(),
     }
 }
@@ -436,12 +443,16 @@ async fn get_turn_credentials(
     };
 
     // If static credentials are provided (via admin console), use them directly.
-    // Otherwise, generate ephemeral HMAC-SHA1 credentials using the encryption key.
+    // Otherwise, generate ephemeral HMAC-SHA1 credentials using the best available secret.
     let generator = if turn_config.username.is_empty() || turn_config.credential.is_empty() {
-        TurnCredentialGenerator::with_rest_api(
-            state.config.encryption_key.clone(),
-            state.config.calls.turn_ttl_minutes,
-        )
+        // Prefer explicit TURN static auth secret; fallback to general encryption key
+        let secret = if !effective.turn_static_auth_secret.is_empty() {
+            effective.turn_static_auth_secret.clone()
+        } else {
+            state.config.encryption_key.clone()
+        };
+
+        TurnCredentialGenerator::with_rest_api(secret, state.config.calls.turn_ttl_minutes)
     } else {
         TurnCredentialGenerator::with_static_credentials(turn_config)
     };
@@ -697,10 +708,13 @@ async fn join_call(
     let call_manager = state.call_state_manager.as_ref();
 
     // Find active call in channel
-    let call = call_manager
-        .get_call_by_channel(&channel_uuid)
-        .await
-        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    let call = match call_manager.get_call_by_channel(&channel_uuid).await {
+        Some(c) => c,
+        None => call_manager
+            .get_call(channel_uuid)
+            .await
+            .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?,
+    };
 
     // Check if user already in call
     if call_manager
@@ -926,15 +940,21 @@ async fn get_call_state(
     let call = match call_manager.get_call_by_channel(&channel_uuid).await {
         Some(c) => c,
         None => {
-            // Return silent 404 to avoid noisy ERROR logs for a common client polling case
-            let body = crate::error::ErrorResponse {
-                error: crate::error::ErrorBody {
-                    code: "NOT_FOUND".to_string(),
-                    message: "No active call in this channel".to_string(),
-                    details: None,
-                },
-            };
-            return Ok((axum::http::StatusCode::NOT_FOUND, Json(body)).into_response());
+            // Try looking up by Call ID as a fallback if Channel ID lookup failed
+            match call_manager.get_call(channel_uuid).await {
+                Some(c) => c,
+                None => {
+                    // Return silent 404 to avoid noisy ERROR logs for a common client polling case
+                    let body = crate::error::ErrorResponse {
+                        error: crate::error::ErrorBody {
+                            code: "NOT_FOUND".to_string(),
+                            message: "No active call in this channel".to_string(),
+                            details: None,
+                        },
+                    };
+                    return Ok((axum::http::StatusCode::NOT_FOUND, Json(body)).into_response());
+                }
+            }
         }
     };
 
@@ -1686,10 +1706,13 @@ async fn handle_offer(
     let call_manager = state.call_state_manager.as_ref();
 
     // Find call
-    let call = call_manager
-        .get_call_by_channel(&channel_uuid)
-        .await
-        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    let call = match call_manager.get_call_by_channel(&channel_uuid).await {
+        Some(c) => c,
+        None => call_manager
+            .get_call(channel_uuid)
+            .await
+            .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?,
+    };
 
     // Get participant session_id
     let participant = call_manager
@@ -1820,15 +1843,21 @@ async fn handle_ice_candidate(
     let call_manager = state.call_state_manager.as_ref();
 
     // Find call
-    let Some(call) = call_manager.get_call_by_channel(&channel_uuid).await else {
-        warn!(
-            user_id = %auth.user_id,
-            channel_id = %channel_uuid,
-            "Ignoring ICE candidate: no active call in this channel"
-        );
-        return Ok(Json(StatusResponse {
-            status: "IGNORED".to_string(),
-        }));
+    let call = match call_manager.get_call_by_channel(&channel_uuid).await {
+        Some(c) => c,
+        None => match call_manager.get_call(channel_uuid).await {
+            Some(c) => c,
+            None => {
+                warn!(
+                    user_id = %auth.user_id,
+                    channel_id = %channel_uuid,
+                    "Ignoring ICE candidate: no active call in this channel"
+                );
+                return Ok(Json(StatusResponse {
+                    status: "IGNORED".to_string(),
+                }));
+            }
+        },
     };
 
     // Get participant session_id

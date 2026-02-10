@@ -117,9 +117,13 @@ pub struct CallsConfig {
     #[serde(default)]
     pub turn_server_credential: String,
 
-    /// TURN credentials TTL in minutes (for REST API style generation)
+    /// TURN credentials TTL in minutes
     #[serde(default = "default_turn_ttl")]
     pub turn_ttl_minutes: u64,
+
+    /// TURN static auth secret (for REST API style ephemeral credentials)
+    #[serde(default)]
+    pub turn_static_auth_secret: String,
 
     /// STUN server URLs
     #[serde(default = "default_stun_servers")]
@@ -142,6 +146,7 @@ impl Default for CallsConfig {
             turn_server_username: String::new(),
             turn_server_credential: String::new(),
             turn_ttl_minutes: default_turn_ttl(),
+            turn_static_auth_secret: String::new(),
             stun_servers: default_stun_servers(),
             state_backend: default_calls_state_backend(),
         }
