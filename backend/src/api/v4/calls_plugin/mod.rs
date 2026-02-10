@@ -1731,23 +1731,33 @@ async fn handle_offer(
     info!(call_id = %call.call_id, "SFU retrieved/created");
 
     // Ensure this participant is present in the SFU before handling signaling.
-    if !sfu.has_participant(participant.session_id).await {
+    // Also ensure the signaling forwarder is running to send ICE candidates to the client.
+    let signaling_rx = if !sfu.has_participant(participant.session_id).await {
         warn!(
             call_id = %call.call_id,
             user_id = %auth.user_id,
             session_id = %participant.session_id,
             "calls.offer participant missing in SFU; recovering by re-registering"
         );
-        let (_, signaling_rx) = sfu
+        let (_, rx) = sfu
             .add_participant(auth.user_id, participant.session_id)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to add participant to SFU: {}", e)))?;
+        Some(rx)
+    } else {
+        // Participant exists but we need to ensure signaling forwarder is running
+        // Get the signaling receiver for the existing participant
+        sfu.get_signaling_receiver(participant.session_id).await
+    };
+    
+    // Spawn signaling forwarder if we have a receiver (new participant or reconnection)
+    if let Some(rx) = signaling_rx {
         spawn_signaling_forwarder(
             &state,
             channel_uuid,
             auth.user_id,
             participant.session_id,
-            signaling_rx,
+            rx,
         );
     }
 

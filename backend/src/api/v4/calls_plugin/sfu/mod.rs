@@ -723,6 +723,35 @@ impl SFU {
         self.participants.read().await.len()
     }
 
+    /// Get a new signaling receiver for an existing participant.
+    /// This is used to spawn a signaling forwarder for HTTP-based clients
+    /// that need to receive ICE candidates via WebSocket.
+    pub async fn get_signaling_receiver(
+        &self,
+        session_id: Uuid,
+    ) -> Option<mpsc::UnboundedReceiver<SignalingMessage>> {
+        let participants = self.participants.read().await;
+        
+        if let Some(_participant) = participants.get(&session_id) {
+            // Create a new signaling channel
+            let (tx, rx) = mpsc::unbounded_channel();
+            
+            // Register the new channel with the signaling server
+            // Drop the read lock first to avoid deadlock
+            drop(participants);
+            self.signaling.register_channel(session_id, tx).await;
+            
+            info!(
+                session_id = %session_id,
+                "Created new signaling channel for existing participant"
+            );
+            
+            Some(rx)
+        } else {
+            None
+        }
+    }
+
     async fn flush_pending_ice_candidates(
         &self,
         session_id: Uuid,
