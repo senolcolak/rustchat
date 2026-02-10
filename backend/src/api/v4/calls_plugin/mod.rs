@@ -1535,7 +1535,6 @@ async fn handle_offer(
         .map_err(|e| AppError::BadRequest(format!("Invalid SDP offer: {}", e)))?;
 
     // Handle the offer and get answer
-    info!(session_id = %participant.session_id, "Calling sfu.handle_offer");
     let answer = sfu
         .handle_offer(participant.session_id, offer)
         .await
@@ -1543,7 +1542,6 @@ async fn handle_offer(
             error!(session_id = %participant.session_id, error = %e, "sfu.handle_offer failed");
             AppError::Internal(format!("Failed to handle offer: {}", e))
         })?;
-    info!(session_id = %participant.session_id, "sfu.handle_offer success");
     debug!(
         call_id = %call.call_id,
         user_id = %auth.user_id,

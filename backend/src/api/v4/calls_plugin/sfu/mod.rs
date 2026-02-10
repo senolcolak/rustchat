@@ -8,11 +8,12 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::info;
 use uuid::Uuid;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
+use webrtc::api::API;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -68,6 +69,7 @@ pub struct SFU {
     signaling: Arc<SignalingServer>,
     pending_ice_candidates: Arc<RwLock<HashMap<Uuid, Vec<RTCIceCandidateInit>>>>,
     voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+    webrtc_api: Arc<API>,
 }
 
 impl SFU {
@@ -82,6 +84,22 @@ impl SFU {
         let signaling = Arc::new(SignalingServer::new());
         let pending_ice_candidates = Arc::new(RwLock::new(HashMap::new()));
 
+        // Create media engine with codec support
+        let mut m = MediaEngine::default();
+        m.register_default_codecs()?;
+
+        // Create interceptor registry
+        let mut registry = Registry::new();
+        registry = register_default_interceptors(registry, &mut m)?;
+
+        // Create API
+        let webrtc_api = Arc::new(
+            APIBuilder::new()
+                .with_media_engine(m)
+                .with_interceptor_registry(registry)
+                .build(),
+        );
+
         Ok(Arc::new(Self {
             call_id,
             config,
@@ -90,6 +108,7 @@ impl SFU {
             signaling,
             pending_ice_candidates,
             voice_event_tx,
+            webrtc_api,
         }))
     }
 
@@ -105,20 +124,6 @@ impl SFU {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Create media engine with codec support
-        let mut m = MediaEngine::default();
-        m.register_default_codecs()?;
-
-        // Create interceptor registry
-        let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut m)?;
-
-        // Create API
-        let api = APIBuilder::new()
-            .with_media_engine(m)
-            .with_interceptor_registry(registry)
-            .build();
-
         // Create ICE servers configuration
         let ice_servers = self.build_ice_servers();
 
@@ -129,7 +134,7 @@ impl SFU {
         };
 
         // Create peer connection
-        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let peer_connection = Arc::new(self.webrtc_api.new_peer_connection(config).await?);
 
         // Create signaling channel
         let (signaling_tx, signaling_rx) = mpsc::unbounded_channel();
