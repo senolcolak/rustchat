@@ -288,8 +288,7 @@ impl Config {
             self.calls.turn_static_auth_secret = raw.trim().to_string();
         }
         if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_TTL_MINUTES") {
-            self.calls.turn_ttl_minutes =
-                parse_u64_env("RUSTCHAT_CALLS_TURN_TTL_MINUTES", &raw)?;
+            self.calls.turn_ttl_minutes = parse_u64_env("RUSTCHAT_CALLS_TURN_TTL_MINUTES", &raw)?;
         }
 
         Ok(())

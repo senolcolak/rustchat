@@ -6,6 +6,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, trace, warn};
@@ -70,6 +71,7 @@ pub struct SFU {
     pending_ice_candidates: Arc<RwLock<HashMap<Uuid, Vec<RTCIceCandidateInit>>>>,
     voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
     webrtc_api: Arc<API>,
+    webrtc_api_fallback: Arc<API>,
 }
 
 impl SFU {
@@ -85,6 +87,29 @@ impl SFU {
         let signaling = Arc::new(SignalingServer::new());
         let pending_ice_candidates = Arc::new(RwLock::new(HashMap::new()));
 
+        // Build primary API (with optional NAT 1:1 override) and fallback API (without NAT override).
+        let webrtc_api = Self::build_webrtc_api(call_id, &config, shared_udp_mux.clone(), true)?;
+        let webrtc_api_fallback = Self::build_webrtc_api(call_id, &config, shared_udp_mux, false)?;
+
+        Ok(Arc::new(Self {
+            call_id,
+            config,
+            participants,
+            track_manager,
+            signaling,
+            pending_ice_candidates,
+            voice_event_tx,
+            webrtc_api,
+            webrtc_api_fallback,
+        }))
+    }
+
+    fn build_webrtc_api(
+        call_id: Uuid,
+        config: &CallsConfig,
+        shared_udp_mux: Option<Arc<dyn UDPMux + Send + Sync>>,
+        use_nat_override: bool,
+    ) -> Result<Arc<API>, Box<dyn std::error::Error + Send + Sync>> {
         // Create media engine with codec support
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
@@ -105,41 +130,41 @@ impl SFU {
             );
         }
 
-        if let Some(ice_host_override) = config
-            .ice_host_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
-            setting_engine
-                .set_nat_1to1_ips(vec![ice_host_override.to_string()], RTCIceCandidateType::Host);
-            info!(
-                call_id = %call_id,
-                ice_host_override = %ice_host_override,
-                "SFU configured with ICE host override"
-            );
+        if use_nat_override {
+            if let Some(ice_host_override) = config
+                .ice_host_override
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if ice_host_override.parse::<IpAddr>().is_ok() {
+                    setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+                    setting_engine.set_nat_1to1_ips(
+                        vec![ice_host_override.to_string()],
+                        RTCIceCandidateType::Host,
+                    );
+                    info!(
+                        call_id = %call_id,
+                        ice_host_override = %ice_host_override,
+                        "SFU configured with ICE host override"
+                    );
+                } else {
+                    warn!(
+                        call_id = %call_id,
+                        ice_host_override = %ice_host_override,
+                        "Ignoring invalid RUSTCHAT_CALLS_ICE_HOST_OVERRIDE: expected raw IP address"
+                    );
+                }
+            }
         }
 
-        // Create API
-        let webrtc_api = Arc::new(
+        Ok(Arc::new(
             APIBuilder::new()
                 .with_setting_engine(setting_engine)
                 .with_media_engine(m)
                 .with_interceptor_registry(registry)
                 .build(),
-        );
-
-        Ok(Arc::new(Self {
-            call_id,
-            config,
-            participants,
-            track_manager,
-            signaling,
-            pending_ice_candidates,
-            voice_event_tx,
-            webrtc_api,
-        }))
+        ))
     }
 
     /// Add a new participant to the SFU
@@ -158,13 +183,36 @@ impl SFU {
         let ice_servers = self.build_ice_servers();
 
         // Create peer connection configuration
-        let config = RTCConfiguration {
+        let rtc_config = RTCConfiguration {
             ice_servers,
             ..Default::default()
         };
 
-        // Create peer connection
-        let peer_connection = Arc::new(self.webrtc_api.new_peer_connection(config).await?);
+        // Create peer connection (with fallback if NAT mapping is misconfigured).
+        let peer_connection = match self
+            .webrtc_api
+            .new_peer_connection(rtc_config.clone())
+            .await
+        {
+            Ok(pc) => Arc::new(pc),
+            Err(primary_err) => {
+                let err_text = primary_err.to_string();
+                if err_text.to_ascii_lowercase().contains("1:1 nat ip mapping") {
+                    warn!(
+                        session_id = %session_id,
+                        error = %err_text,
+                        "Primary WebRTC API failed due to NAT mapping; retrying with fallback API"
+                    );
+                    Arc::new(
+                        self.webrtc_api_fallback
+                            .new_peer_connection(rtc_config)
+                            .await?,
+                    )
+                } else {
+                    return Err(Box::new(primary_err));
+                }
+            }
+        };
 
         // Create signaling channel
         let (signaling_tx, signaling_rx) = mpsc::unbounded_channel();
@@ -354,7 +402,7 @@ impl SFU {
         // Get the final answer with ICE candidates
         info!(session_id = %session_id, "Getting final answer");
         let final_answer = pc.local_description().await.ok_or("No local description")?;
-        
+
         info!(
             session_id = %session_id,
             sdp_length = final_answer.sdp.len(),
@@ -376,7 +424,8 @@ impl SFU {
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let candidate_init = Self::parse_client_ice_candidate(candidate.clone(), sdp_mid.clone(), sdp_mline_index)?;
+        let candidate_init =
+            Self::parse_client_ice_candidate(candidate.clone(), sdp_mid.clone(), sdp_mline_index)?;
 
         let participants = self.participants.read().await;
         let participant = participants
@@ -467,7 +516,13 @@ impl SFU {
         }
 
         info!(
-            stun_count = servers.len().saturating_sub(if self.config.turn_server_enabled { 1 } else { 0 }),
+            stun_count = servers
+                .len()
+                .saturating_sub(if self.config.turn_server_enabled {
+                    1
+                } else {
+                    0
+                }),
             turn_enabled = self.config.turn_server_enabled,
             "ICE servers configured for SFU"
         );
@@ -555,7 +610,7 @@ impl SFU {
             .get(&sender_session_id)
             .map(|p| p.is_screen_sharing)
             .unwrap_or(false);
-        
+
         // Also check stream_id/track_label as fallback for older clients.
         // This is currently debug-oriented because forwarding for video now targets both tracks.
         let stream_id_raw = track.stream_id();
@@ -568,15 +623,16 @@ impl SFU {
         let track_label_contains_screen = track_id_lower.contains("screen")
             || track_id_lower.contains("display")
             || track_id_lower.contains("share");
-        
+
         // Determine if this is a screen share track
         // Priority: API state > stream_id detection > track_label detection
-        let is_screen_share = if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video {
-            sender_is_screen_sharing || stream_id_contains_screen || track_label_contains_screen
-        } else {
-            false
-        };
-            
+        let is_screen_share =
+            if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video {
+                sender_is_screen_sharing || stream_id_contains_screen || track_label_contains_screen
+            } else {
+                false
+            };
+
         info!(
             call_id = %call_id,
             sender_session_id = %sender_session_id,
@@ -754,13 +810,13 @@ impl SFU {
                         .as_ref()
                         .map(|j| j.candidate.clone())
                         .unwrap_or_default();
-                    
+
                     info!(
                         candidate = %candidate_str.chars().take(80).collect::<String>(),
                         candidate_len = candidate_str.len(),
                         "SFU generated ICE candidate - sending to client"
                     );
-                    
+
                     let _ = signaling_tx_ice.send(SignalingMessage::IceCandidate {
                         candidate: candidate_str,
                         sdp_mid: candidate_json.as_ref().and_then(|j| j.sdp_mid.clone()),
@@ -841,21 +897,21 @@ impl SFU {
         session_id: Uuid,
     ) -> Option<mpsc::UnboundedReceiver<SignalingMessage>> {
         let participants = self.participants.read().await;
-        
+
         if let Some(_participant) = participants.get(&session_id) {
             // Create a new signaling channel
             let (tx, rx) = mpsc::unbounded_channel();
-            
+
             // Register the new channel with the signaling server
             // Drop the read lock first to avoid deadlock
             drop(participants);
             self.signaling.register_channel(session_id, tx).await;
-            
+
             info!(
                 session_id = %session_id,
                 "Created new signaling channel for existing participant"
             );
-            
+
             Some(rx)
         } else {
             None

@@ -122,7 +122,18 @@ impl SFUManager {
         }
 
         let bind_addr = format!("0.0.0.0:{}", self.config.udp_port);
-        let udp_socket = UdpSocket::bind(&bind_addr).await?;
+        let udp_socket = match UdpSocket::bind(&bind_addr).await {
+            Ok(socket) => socket,
+            Err(err) => {
+                tracing::warn!(
+                    udp_port = self.config.udp_port,
+                    bind_addr = %bind_addr,
+                    error = %err,
+                    "Failed to initialize shared UDP mux; falling back to default ICE UDP behavior"
+                );
+                return Ok(None);
+            }
+        };
         let udp_mux: Arc<dyn UDPMux + Send + Sync> =
             UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
 

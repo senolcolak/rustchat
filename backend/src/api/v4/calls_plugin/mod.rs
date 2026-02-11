@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Read;
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -37,6 +38,8 @@ use turn::{TurnCredentialGenerator, TurnServerConfig};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const CALLS_SIGNAL_EVENT: &str = "custom_com.mattermost.calls_signal";
+const UNANSWERED_CALL_TIMEOUT_SECS: u64 = 20;
+const EMPTY_CALL_TIMEOUT_SECS: u64 = 10;
 
 /// Build the calls plugin router
 pub fn router() -> Router<AppState> {
@@ -156,10 +159,11 @@ async fn resolve_channel_id(state: &AppState, channel_id: &str) -> ApiResult<Uui
     // Check if it's a DM name
     if crate::models::channel::parse_direct_channel_name(channel_id).is_some() {
         // Look up channel by name
-        let channel_uuid: Option<Uuid> = sqlx::query_scalar("SELECT id FROM channels WHERE name = $1")
-            .bind(channel_id)
-            .fetch_optional(&state.db)
-            .await?;
+        let channel_uuid: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM channels WHERE name = $1")
+                .bind(channel_id)
+                .fetch_optional(&state.db)
+                .await?;
 
         if let Some(uuid) = channel_uuid {
             return Ok(uuid);
@@ -333,7 +337,9 @@ async fn load_effective_calls_config(state: &AppState) -> EffectiveCallsConfig {
                     .get("turn_server_url")
                     .and_then(|v| v.as_str())
                     .map(|s| ensure_protocol(s, "turn:"))
-                    .unwrap_or_else(|| ensure_protocol(&state.config.calls.turn_server_url, "turn:")),
+                    .unwrap_or_else(|| {
+                        ensure_protocol(&state.config.calls.turn_server_url, "turn:")
+                    }),
                 turn_server_username: obj
                     .get("turn_server_username")
                     .and_then(|v| v.as_str())
@@ -666,6 +672,10 @@ async fn start_call(
         None,
     )
     .await;
+
+    // Mattermost-compatible behavior: if nobody else joins, drop the call after a ring timeout.
+    schedule_unanswered_call_timeout(&state, call_id, channel_uuid);
+
     info!(
         call_id = %call_id,
         channel_id = %channel_uuid,
@@ -875,30 +885,15 @@ async fn leave_call(
     )
     .await;
 
-    // If no participants left, end the call
     let participants = call_manager.get_participants(call.call_id).await;
-    if participants.is_empty() {
-        call_manager.remove_call(call.call_id).await;
-
-        // Remove the SFU for this call
-        state.sfu_manager.remove_sfu(call.call_id).await;
-
-        // Broadcast call_end event
-        broadcast_call_event(
-            &state,
-            "custom_com.mattermost.calls_call_end",
-            &channel_uuid,
-            serde_json::json!({
-                "channel_id": channel_id,
-                "call_id": encode_mm_id(call.call_id),
-            }),
-            None,
-        )
-        .await;
+    if participants.len() <= 1 {
+        schedule_empty_call_timeout(&state, call.call_id, channel_uuid);
         info!(
             call_id = %call.call_id,
             channel_id = %channel_uuid,
-            "calls.leave_call ended call because no participants remain"
+            remaining_participants = participants.len(),
+            timeout_secs = EMPTY_CALL_TIMEOUT_SECS,
+            "calls.leave_call scheduled no-remote-participant timeout"
         );
     } else {
         info!(
@@ -1106,7 +1101,8 @@ async fn toggle_screen_share(
 
     // Update SFU screen sharing state for track forwarding
     if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
-        sfu.set_screen_sharing(participant.session_id, is_sharing).await;
+        sfu.set_screen_sharing(participant.session_id, is_sharing)
+            .await;
         info!(
             call_id = %call.call_id,
             session_id = %participant.session_id,
@@ -1523,6 +1519,11 @@ async fn host_remove_user(
     )
     .await;
 
+    let participants = call_manager.get_participants(call.call_id).await;
+    if participants.len() <= 1 {
+        schedule_empty_call_timeout(&state, call.call_id, channel_uuid);
+    }
+
     Ok(Json(StatusResponse {
         status: "OK".to_string(),
     }))
@@ -1760,7 +1761,7 @@ async fn handle_offer(
         // Get the signaling receiver for the existing participant
         sfu.get_signaling_receiver(participant.session_id).await
     };
-    
+
     // Spawn signaling forwarder if we have a receiver (new participant or reconnection)
     if let Some(rx) = signaling_rx {
         spawn_signaling_forwarder(
@@ -2086,6 +2087,7 @@ async fn handle_ws_join_call(
     }
 
     if created_call {
+        schedule_unanswered_call_timeout(state, call.call_id, channel_uuid);
         broadcast_call_event(
             state,
             "custom_com.mattermost.calls_call_start",
@@ -2158,13 +2160,13 @@ async fn handle_ws_sdp(
 ) -> Result<(), String> {
     let session_id = Uuid::parse_str(connection_id)
         .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    
+
     info!(
         user_id = %user_id,
         connection_id = connection_id,
         "calls.ws sdp received"
     );
-    
+
     let sdp = parse_ws_sdp_payload(data).map_err(|e| {
         error!(
             user_id = %user_id,
@@ -2174,7 +2176,7 @@ async fn handle_ws_sdp(
         );
         format!("Invalid SDP payload: {e}")
     })?;
-    
+
     let call = find_call_for_session(state, user_id, session_id)
         .await
         .ok_or_else(|| "No active call found for connection".to_string())?;
@@ -2198,13 +2200,13 @@ async fn handle_ws_sdp(
     }
 
     let offer = RTCSessionDescription::offer(sdp).map_err(|e| format!("Invalid offer SDP: {e}"))?;
-    
+
     info!(
         user_id = %user_id,
         session_id = %session_id,
         "Processing SDP offer"
     );
-    
+
     let answer = sfu
         .handle_offer(session_id, offer)
         .await
@@ -2239,24 +2241,23 @@ async fn handle_ws_ice(
 ) -> Result<(), String> {
     let session_id = Uuid::parse_str(connection_id)
         .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    
+
     debug!(
         user_id = %user_id,
         connection_id = connection_id,
         "calls.ws ice received"
     );
-    
-    let (candidate, sdp_mid, sdp_mline_index) =
-        parse_ws_ice_payload(data).map_err(|e| {
-            error!(
-                user_id = %user_id,
-                connection_id = connection_id,
-                error = %e,
-                "Failed to parse ICE payload"
-            );
-            format!("Invalid ICE payload: {e}")
-        })?;
-    
+
+    let (candidate, sdp_mid, sdp_mline_index) = parse_ws_ice_payload(data).map_err(|e| {
+        error!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            error = %e,
+            "Failed to parse ICE payload"
+        );
+        format!("Invalid ICE payload: {e}")
+    })?;
+
     let call = find_call_for_session(state, user_id, session_id)
         .await
         .ok_or_else(|| "No active call found for connection".to_string())?;
@@ -2324,21 +2325,8 @@ async fn handle_ws_leave_call(
     )
     .await;
 
-    if call_manager.get_participants(call.call_id).await.is_empty() {
-        call_manager.remove_call(call.call_id).await;
-        state.sfu_manager.remove_sfu(call.call_id).await;
-        broadcast_call_event(
-            state,
-            "custom_com.mattermost.calls_call_end",
-            &call.channel_id,
-            serde_json::json!({
-                "id": encode_mm_id(call.call_id),
-                "channelID": encode_mm_id(call.channel_id),
-                "call_id": encode_mm_id(call.call_id),
-            }),
-            None,
-        )
-        .await;
+    if call_manager.get_participants(call.call_id).await.len() <= 1 {
+        schedule_empty_call_timeout(state, call.call_id, call.channel_id);
     }
 
     Ok(())
@@ -2482,7 +2470,7 @@ fn parse_ws_sdp_payload(data: Option<&Value>) -> Result<String, String> {
 
     // Parse binary data (compressed)
     let bytes = parse_ws_binary_data(data_field)?;
-    
+
     // Try as uncompressed UTF-8 first
     if let Ok(text) = String::from_utf8(bytes.clone()) {
         if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
@@ -2504,7 +2492,9 @@ fn parse_ws_sdp_payload(data: Option<&Value>) -> Result<String, String> {
                 .ok_or_else(|| "missing sdp in decompressed data".to_string())?;
             Ok(sdp.to_string())
         }
-        Err(e) => Err(format!("zlib decode failed: {e}. Data may not be compressed."))
+        Err(e) => Err(format!(
+            "zlib decode failed: {e}. Data may not be compressed."
+        )),
     }
 }
 
@@ -2718,6 +2708,119 @@ fn spawn_signaling_forwarder(
             send_signaling_event(&state, channel_id, user_id, session_id, signal).await;
         }
     });
+}
+
+fn schedule_unanswered_call_timeout(state: &AppState, call_id: Uuid, channel_id: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        info!(
+            call_id = %call_id,
+            channel_id = %channel_id,
+            timeout_secs = UNANSWERED_CALL_TIMEOUT_SECS,
+            "calls.timeout scheduled unanswered-call timeout"
+        );
+        sleep(Duration::from_secs(UNANSWERED_CALL_TIMEOUT_SECS)).await;
+        end_call_if_still_unanswered(&state, call_id).await;
+    });
+}
+
+fn schedule_empty_call_timeout(state: &AppState, call_id: Uuid, channel_id: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        info!(
+            call_id = %call_id,
+            channel_id = %channel_id,
+            timeout_secs = EMPTY_CALL_TIMEOUT_SECS,
+            "calls.timeout scheduled empty-call timeout"
+        );
+        sleep(Duration::from_secs(EMPTY_CALL_TIMEOUT_SECS)).await;
+        end_call_if_still_empty(&state, call_id).await;
+    });
+}
+
+async fn end_call_if_still_unanswered(state: &AppState, call_id: Uuid) {
+    let Some(call) = state.call_state_manager.get_call(call_id).await else {
+        return;
+    };
+
+    let participant_count = call.participants.len();
+    if participant_count > 1 {
+        debug!(
+            call_id = %call_id,
+            participant_count = participant_count,
+            "calls.timeout unanswered-call timeout skipped"
+        );
+        return;
+    }
+
+    end_call(
+        state,
+        call.call_id,
+        call.channel_id,
+        "unanswered_timeout",
+        participant_count,
+    )
+    .await;
+}
+
+async fn end_call_if_still_empty(state: &AppState, call_id: Uuid) {
+    let Some(call) = state.call_state_manager.get_call(call_id).await else {
+        return;
+    };
+
+    let participant_count = call.participants.len();
+    if participant_count > 1 {
+        debug!(
+            call_id = %call_id,
+            participant_count = participant_count,
+            "calls.timeout no-remote-participant timeout skipped"
+        );
+        return;
+    }
+
+    end_call(
+        state,
+        call.call_id,
+        call.channel_id,
+        "no_remote_participant_timeout",
+        participant_count,
+    )
+    .await;
+}
+
+async fn end_call(
+    state: &AppState,
+    call_id: Uuid,
+    channel_id: Uuid,
+    reason: &'static str,
+    participant_count: usize,
+) {
+    state.call_state_manager.remove_call(call_id).await;
+    state.sfu_manager.remove_sfu(call_id).await;
+
+    let encoded_channel_id = encode_mm_id(channel_id);
+    let encoded_call_id = encode_mm_id(call_id);
+    broadcast_call_event(
+        state,
+        "custom_com.mattermost.calls_call_end",
+        &channel_id,
+        serde_json::json!({
+            "id": encoded_call_id,
+            "channelID": encoded_channel_id,
+            "call_id": encoded_call_id,
+            "channel_id": encoded_channel_id,
+        }),
+        None,
+    )
+    .await;
+
+    info!(
+        call_id = %call_id,
+        channel_id = %channel_id,
+        reason = reason,
+        participant_count = participant_count,
+        "calls.call ended"
+    );
 }
 
 async fn send_signaling_event(
