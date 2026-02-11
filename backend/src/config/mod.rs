@@ -2,6 +2,7 @@
 //!
 //! Supports loading configuration from environment variables and .env files.
 
+use anyhow::anyhow;
 use serde::Deserialize;
 
 /// Application configuration
@@ -223,6 +224,77 @@ fn default_s3_region() -> String {
 }
 
 impl Config {
+    fn apply_calls_env_overrides(&mut self) -> anyhow::Result<()> {
+        // Primary calls env vars used by local docker-compose.
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_ENABLED") {
+            self.calls.enabled = parse_bool_env("RUSTCHAT_CALLS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_UDP_PORT") {
+            self.calls.udp_port = parse_u16_env("RUSTCHAT_CALLS_UDP_PORT", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TCP_PORT") {
+            self.calls.tcp_port = parse_u16_env("RUSTCHAT_CALLS_TCP_PORT", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_ICE_HOST_OVERRIDE") {
+            let trimmed = raw.trim();
+            self.calls.ice_host_override = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_STATE_BACKEND") {
+            self.calls.state_backend = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_STUN_SERVERS") {
+            self.calls.stun_servers = parse_csv_list(&raw);
+        }
+
+        // Mattermost-compatible TURN env vars used by deployments.
+        if let Ok(raw) = std::env::var("TURN_SERVER_ENABLED") {
+            self.calls.turn_server_enabled = parse_bool_env("TURN_SERVER_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("TURN_SERVER_URL") {
+            self.calls.turn_server_url = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("TURN_SERVER_USERNAME") {
+            self.calls.turn_server_username = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("TURN_SERVER_CREDENTIAL") {
+            self.calls.turn_server_credential = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("TURN_SERVER_STATIC_AUTH_SECRET") {
+            self.calls.turn_static_auth_secret = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("TURN_SERVER_TTL_MINUTES") {
+            self.calls.turn_ttl_minutes = parse_u64_env("TURN_SERVER_TTL_MINUTES", &raw)?;
+        }
+
+        // Explicit RUSTCHAT_CALLS_* TURN vars, when present, take precedence.
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_SERVER_ENABLED") {
+            self.calls.turn_server_enabled =
+                parse_bool_env("RUSTCHAT_CALLS_TURN_SERVER_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_SERVER_URL") {
+            self.calls.turn_server_url = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_SERVER_USERNAME") {
+            self.calls.turn_server_username = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_SERVER_CREDENTIAL") {
+            self.calls.turn_server_credential = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_STATIC_AUTH_SECRET") {
+            self.calls.turn_static_auth_secret = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_CALLS_TURN_TTL_MINUTES") {
+            self.calls.turn_ttl_minutes =
+                parse_u64_env("RUSTCHAT_CALLS_TURN_TTL_MINUTES", &raw)?;
+        }
+
+        Ok(())
+    }
+
     /// Load configuration from environment variables
     pub fn load() -> anyhow::Result<Self> {
         let mut builder = config::Config::builder();
@@ -243,7 +315,8 @@ impl Config {
         );
 
         let config = builder.build()?;
-        let settings: Config = config.try_deserialize()?;
+        let mut settings: Config = config.try_deserialize()?;
+        settings.apply_calls_env_overrides()?;
         Ok(settings)
     }
 
@@ -253,6 +326,34 @@ impl Config {
             "prod" | "production"
         )
     }
+}
+
+fn parse_bool_env(name: &str, raw: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(anyhow!("invalid boolean for {}: {}", name, raw)),
+    }
+}
+
+fn parse_u16_env(name: &str, raw: &str) -> anyhow::Result<u16> {
+    raw.trim()
+        .parse::<u16>()
+        .map_err(|e| anyhow!("invalid u16 for {}: {} ({})", name, raw, e))
+}
+
+fn parse_u64_env(name: &str, raw: &str) -> anyhow::Result<u64> {
+    raw.trim()
+        .parse::<u64>()
+        .map_err(|e| anyhow!("invalid u64 for {}: {} ({})", name, raw, e))
+}
+
+fn parse_csv_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]

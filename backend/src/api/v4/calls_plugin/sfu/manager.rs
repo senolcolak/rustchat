@@ -5,8 +5,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
+use tracing::info;
 use uuid::Uuid;
+use webrtc::ice::udp_mux::{UDPMux, UDPMuxDefault, UDPMuxParams};
 
 use super::{VoiceEvent, SFU};
 use crate::config::CallsConfig;
@@ -20,6 +23,8 @@ pub struct SFUManager {
     config: CallsConfig,
     /// Voice events channel
     voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+    /// Shared UDP mux for ICE (single UDP port across all SFUs).
+    shared_udp_mux: Arc<RwLock<Option<Arc<dyn UDPMux + Send + Sync>>>>,
 }
 
 impl SFUManager {
@@ -32,6 +37,7 @@ impl SFUManager {
             sfus: Arc::new(RwLock::new(HashMap::new())),
             config,
             voice_event_tx,
+            shared_udp_mux: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -48,8 +54,16 @@ impl SFUManager {
             }
         }
 
+        let shared_udp_mux = self.get_or_create_shared_udp_mux().await?;
+
         // Create new SFU
-        let sfu = SFU::new(call_id, self.config.clone(), self.voice_event_tx.clone()).await?;
+        let sfu = SFU::new(
+            call_id,
+            self.config.clone(),
+            self.voice_event_tx.clone(),
+            shared_udp_mux,
+        )
+        .await?;
 
         // Store it
         self.sfus.write().await.insert(call_id, sfu.clone());
@@ -86,6 +100,41 @@ impl SFUManager {
     pub async fn cleanup_all(&self) {
         self.sfus.write().await.clear();
     }
+
+    async fn get_or_create_shared_udp_mux(
+        &self,
+    ) -> Result<Option<Arc<dyn UDPMux + Send + Sync>>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        if self.config.udp_port == 0 {
+            return Ok(None);
+        }
+
+        {
+            let guard = self.shared_udp_mux.read().await;
+            if let Some(mux) = guard.as_ref() {
+                return Ok(Some(mux.clone()));
+            }
+        }
+
+        let mut guard = self.shared_udp_mux.write().await;
+        if let Some(mux) = guard.as_ref() {
+            return Ok(Some(mux.clone()));
+        }
+
+        let bind_addr = format!("0.0.0.0:{}", self.config.udp_port);
+        let udp_socket = UdpSocket::bind(&bind_addr).await?;
+        let udp_mux: Arc<dyn UDPMux + Send + Sync> =
+            UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
+
+        info!(
+            udp_port = self.config.udp_port,
+            bind_addr = %bind_addr,
+            "Initialized shared UDP mux for SFU ICE traffic"
+        );
+
+        *guard = Some(udp_mux.clone());
+        Ok(Some(udp_mux))
+    }
 }
 
 impl Default for SFUManager {
@@ -96,6 +145,7 @@ impl Default for SFUManager {
             sfus: Arc::new(RwLock::new(HashMap::new())),
             config: CallsConfig::default(),
             voice_event_tx: tx,
+            shared_udp_mux: Arc::new(RwLock::new(None)),
         }
     }
 }

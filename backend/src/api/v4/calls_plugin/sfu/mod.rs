@@ -12,9 +12,14 @@ use tracing::{info, trace, warn};
 use uuid::Uuid;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::api::API;
+use webrtc::ice::mdns::MulticastDnsMode;
+use webrtc::ice::udp_mux::UDPMux;
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -73,6 +78,7 @@ impl SFU {
         call_id: Uuid,
         config: CallsConfig,
         voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+        shared_udp_mux: Option<Arc<dyn UDPMux + Send + Sync>>,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         let participants = Arc::new(RwLock::new(HashMap::new()));
         let track_manager = Arc::new(TrackManager::new());
@@ -87,9 +93,38 @@ impl SFU {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
 
+        // Configure ICE transport behavior for deployment networking.
+        let mut setting_engine = SettingEngine::default();
+
+        if let Some(udp_mux) = shared_udp_mux {
+            setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
+            info!(
+                call_id = %call_id,
+                udp_port = config.udp_port,
+                "SFU configured with shared UDP mux"
+            );
+        }
+
+        if let Some(ice_host_override) = config
+            .ice_host_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+            setting_engine
+                .set_nat_1to1_ips(vec![ice_host_override.to_string()], RTCIceCandidateType::Host);
+            info!(
+                call_id = %call_id,
+                ice_host_override = %ice_host_override,
+                "SFU configured with ICE host override"
+            );
+        }
+
         // Create API
         let webrtc_api = Arc::new(
             APIBuilder::new()
+                .with_setting_engine(setting_engine)
                 .with_media_engine(m)
                 .with_interceptor_registry(registry)
                 .build(),
