@@ -52,6 +52,7 @@ pub struct Participant {
     pub video_track: Option<Arc<TrackLocalStaticRTP>>,
     pub screen_track: Option<Arc<TrackLocalStaticRTP>>,
     pub signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+    pub is_screen_sharing: bool,
 }
 
 /// SFU manages all peer connections and routes media
@@ -195,6 +196,7 @@ impl SFU {
             video_track: Some(video_track),
             screen_track: Some(screen_track),
             signaling_tx: signaling_tx.clone(),
+            is_screen_sharing: false,
         };
 
         self.participants
@@ -511,10 +513,27 @@ impl SFU {
         let mut voice_on = false;
         let mut last_packet_at = tokio::time::Instant::now();
 
-        let is_screen_share = track.stream_id().to_lowercase().contains("screen")
-            || track.stream_id().to_lowercase().contains("display")
-            || track.id().to_lowercase().contains("screen")
+        // Check if sender is screen sharing - this is set via the /screen-share API endpoint
+        let sender_is_screen_sharing = participants
+            .read()
+            .await
+            .get(&sender_session_id)
+            .map(|p| p.is_screen_sharing)
+            .unwrap_or(false);
+        
+        // Also check stream_id/track_label as fallback for older clients
+        let stream_id_contains_screen = track.stream_id().to_lowercase().contains("screen")
+            || track.stream_id().to_lowercase().contains("display");
+        let track_label_contains_screen = track.id().to_lowercase().contains("screen")
             || track.id().to_lowercase().contains("display");
+        
+        // Determine if this is a screen share track
+        // Priority: API state > stream_id detection > track_label detection
+        let is_screen_share = if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video {
+            sender_is_screen_sharing || stream_id_contains_screen || track_label_contains_screen
+        } else {
+            false
+        };
             
         info!(
             call_id = %call_id,
@@ -522,6 +541,9 @@ impl SFU {
             track_id = %track.id(),
             track_kind = ?track.kind(),
             stream_id = %track.stream_id(),
+            sender_is_screen_sharing = sender_is_screen_sharing,
+            stream_id_contains_screen = stream_id_contains_screen,
+            track_label_contains_screen = track_label_contains_screen,
             is_screen_share = is_screen_share,
             "Starting track forwarding loop"
         );
@@ -749,6 +771,29 @@ impl SFU {
     /// Get participant count
     pub async fn get_participant_count(&self) -> usize {
         self.participants.read().await.len()
+    }
+
+    /// Set screen sharing state for a participant
+    pub async fn set_screen_sharing(&self, session_id: Uuid, is_sharing: bool) {
+        let mut participants = self.participants.write().await;
+        if let Some(participant) = participants.get_mut(&session_id) {
+            participant.is_screen_sharing = is_sharing;
+            info!(
+                session_id = %session_id,
+                is_sharing = is_sharing,
+                "Screen sharing state updated"
+            );
+        }
+    }
+
+    /// Get screen sharing state for a participant
+    pub async fn is_screen_sharing(&self, session_id: Uuid) -> bool {
+        self.participants
+            .read()
+            .await
+            .get(&session_id)
+            .map(|p| p.is_screen_sharing)
+            .unwrap_or(false)
     }
 
     /// Get a new signaling receiver for an existing participant.

@@ -1104,6 +1104,17 @@ async fn toggle_screen_share(
         .set_screen_sharing(call.call_id, auth.user_id, is_sharing)
         .await;
 
+    // Update SFU screen sharing state for track forwarding
+    if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
+        sfu.set_screen_sharing(participant.session_id, is_sharing).await;
+        info!(
+            call_id = %call.call_id,
+            session_id = %participant.session_id,
+            is_sharing = is_sharing,
+            "SFU screen sharing state updated"
+        );
+    }
+
     // Update global screen sharer
     if is_sharing {
         call_manager
