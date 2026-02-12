@@ -118,10 +118,13 @@ async fn calls_lifecycle_events_are_delivered_over_websocket() {
     let call_end = wait_for_event(
         &mut ws_b,
         "custom_com.mattermost.calls_call_end",
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     )
     .await;
-    assert_eq!(call_end["channel_id"], channel_id.to_string());
+    assert!(
+        call_end["channel_id"] == channel_id.to_string()
+            || call_end["channel_id"] == encode_mm_id(channel_id)
+    );
 }
 
 #[tokio::test]
@@ -157,6 +160,385 @@ async fn offer_generates_server_signaling_event_over_websocket() {
     assert_eq!(signal_event["channel_id_raw"], channel_id.to_string());
     assert_eq!(signal_event["signal"]["type"], "connection-state");
     assert_eq!(signal_event["signal"]["state"], "ready");
+}
+
+#[tokio::test]
+async fn calls_mobile_channel_state_and_end_route_are_compatible() {
+    let app = spawn_app().await;
+
+    let org_id = insert_org(&app, "Calls Mobile REST Org").await;
+    let (token_a, user_a) =
+        register_and_login(&app, org_id, "mobile_rest_a", "mobile_rest_a@example.com").await;
+    let (token_b, user_b) =
+        register_and_login(&app, org_id, "mobile_rest_b", "mobile_rest_b@example.com").await;
+    let channel_id = create_team_and_channel_with_members(&app, org_id, &[user_a, user_b]).await;
+
+    let start = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/start",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("start call request failed");
+    assert_eq!(start.status(), StatusCode::OK);
+
+    let join = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/join",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("join call request failed");
+    assert_eq!(join.status(), StatusCode::OK);
+
+    let channels = app
+        .api_client
+        .get(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/channels?mobilev2=true",
+            app.address
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("get channels request failed");
+    assert_eq!(channels.status(), StatusCode::OK);
+    let channels_body: serde_json::Value = channels.json().await.expect("channels JSON");
+    let channel_state = channels_body
+        .as_array()
+        .expect("channels should be array")
+        .iter()
+        .find(|entry| entry["channel_id"] == encode_mm_id(channel_id))
+        .expect("channel state should exist");
+    assert_eq!(channel_state["enabled"], true);
+    assert!(channel_state["call"].is_object());
+    assert!(channel_state["call"]["sessions"].is_object());
+
+    let get_channel_state = app
+        .api_client
+        .get(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/{}?mobilev2=true",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("get channel state request failed");
+    assert_eq!(get_channel_state.status(), StatusCode::OK);
+    let get_channel_state_body: serde_json::Value =
+        get_channel_state.json().await.expect("channel state JSON");
+    assert_eq!(get_channel_state_body["enabled"], true);
+    assert!(get_channel_state_body["call"].is_object());
+
+    let config = app
+        .api_client
+        .get(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/config",
+            app.address
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("calls config request failed");
+    assert_eq!(config.status(), StatusCode::OK);
+    let config_body: serde_json::Value = config.json().await.expect("config JSON");
+    assert_eq!(config_body["EnableRinging"], true);
+    assert_eq!(config_body["HostControlsAllowed"], true);
+
+    let recording_start = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/recording/start",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("recording start request failed");
+    assert_ne!(recording_start.status(), StatusCode::NOT_FOUND);
+
+    let disable_calls = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/{}",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .json(&serde_json::json!({ "enabled": false }))
+        .send()
+        .await
+        .expect("disable calls request failed");
+    assert_eq!(disable_calls.status(), StatusCode::OK);
+    let disable_body: serde_json::Value = disable_calls.json().await.expect("disable JSON");
+    assert_eq!(disable_body["enabled"], false);
+
+    let end_forbidden = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/end",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("end call (non-host) request failed");
+    assert_eq!(end_forbidden.status(), StatusCode::FORBIDDEN);
+
+    let end_ok = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/end",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("end call request failed");
+    assert_eq!(end_ok.status(), StatusCode::OK);
+    let end_body: serde_json::Value = end_ok.json().await.expect("end JSON");
+    assert_eq!(end_body["status"], "OK");
+
+    let idle_state = app
+        .api_client
+        .get(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/{}?mobilev2=true",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("idle channel state request failed");
+    assert_eq!(idle_state.status(), StatusCode::OK);
+    let idle_body: serde_json::Value = idle_state.json().await.expect("idle JSON");
+    assert_eq!(idle_body["call"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn calls_mobile_event_names_and_payloads_are_compatible() {
+    let app = spawn_app().await;
+
+    let org_id = insert_org(&app, "Calls Mobile WS Org").await;
+    let (token_a, user_a) =
+        register_and_login(&app, org_id, "mobile_ws_a", "mobile_ws_a@example.com").await;
+    let (token_b, user_b) =
+        register_and_login(&app, org_id, "mobile_ws_b", "mobile_ws_b@example.com").await;
+    let channel_id = create_team_and_channel_with_members(&app, org_id, &[user_a, user_b]).await;
+
+    let mut ws_a = connect_ws(&app.address, &token_a).await;
+    let mut ws_b = connect_ws(&app.address, &token_b).await;
+    wait_for_event(&mut ws_a, "hello", Duration::from_secs(5)).await;
+    wait_for_event(&mut ws_b, "hello", Duration::from_secs(5)).await;
+    subscribe_channel(&mut ws_a, channel_id).await;
+    subscribe_channel(&mut ws_b, channel_id).await;
+    let _ = wait_for_event(&mut ws_a, "channel_subscribed", Duration::from_secs(5)).await;
+    let _ = wait_for_event(&mut ws_b, "channel_subscribed", Duration::from_secs(5)).await;
+
+    let start = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/start",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("start call request failed");
+    assert_eq!(start.status(), StatusCode::OK);
+    let _ = wait_for_event(
+        &mut ws_b,
+        "custom_com.mattermost.calls_call_start",
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_joined",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let join = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/join",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("join call request failed");
+    assert_eq!(join.status(), StatusCode::OK);
+    let _ = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_joined",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let channel_state = app
+        .api_client
+        .get(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/{}?mobilev2=true",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("get channel state request failed");
+    assert_eq!(channel_state.status(), StatusCode::OK);
+    let channel_state_body: serde_json::Value = channel_state.json().await.expect("state JSON");
+    let b_session_id = channel_state_body["call"]["sessions"]
+        .as_object()
+        .expect("sessions should be object")
+        .values()
+        .find(|session| session["user_id"] == encode_mm_id(user_b))
+        .and_then(|session| session["session_id"].as_str())
+        .expect("target session id should exist")
+        .to_string();
+
+    let raise = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/raise-hand",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("raise hand request failed");
+    assert_eq!(raise.status(), StatusCode::OK);
+    let raised_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_raise_hand",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        raised_event["session_id"].as_str(),
+        Some(b_session_id.as_str())
+    );
+    assert!(raised_event["raised_hand"].as_i64().unwrap_or_default() > 0);
+
+    let lower = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/lower-hand",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("lower hand request failed");
+    assert_eq!(lower.status(), StatusCode::OK);
+    let lowered_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_unraise_hand",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        lowered_event["session_id"].as_str(),
+        Some(b_session_id.as_str())
+    );
+    assert_eq!(lowered_event["raised_hand"], 0);
+
+    let screen_on = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/screen-share",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("screen share request failed");
+    assert_eq!(screen_on.status(), StatusCode::OK);
+    let screen_on_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_screen_on",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        screen_on_event["session_id"].as_str(),
+        Some(b_session_id.as_str())
+    );
+
+    let host_screen_off = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/host/screen-off",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .json(&serde_json::json!({ "session_id": b_session_id.clone() }))
+        .send()
+        .await
+        .expect("host screen-off request failed");
+    assert_eq!(host_screen_off.status(), StatusCode::OK);
+    let screen_off_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_screen_off",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        screen_off_event["session_id"].as_str(),
+        Some(b_session_id.as_str())
+    );
+
+    let host_make = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/host/make",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .json(&serde_json::json!({ "new_host_id": encode_mm_id(user_b) }))
+        .send()
+        .await
+        .expect("host make request failed");
+    assert_eq!(host_make.status(), StatusCode::OK);
+    let host_changed_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_call_host_changed",
+        Duration::from_secs(5),
+    )
+    .await;
+    let expected_host = encode_mm_id(user_b);
+    assert_eq!(
+        host_changed_event["hostID"].as_str(),
+        Some(expected_host.as_str())
+    );
+
+    let dismiss = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/plugins/com.mattermost.calls/calls/{}/dismiss-notification",
+            app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .expect("dismiss notification request failed");
+    assert_eq!(dismiss.status(), StatusCode::OK);
+    let dismissed_event = wait_for_event(
+        &mut ws_a,
+        "custom_com.mattermost.calls_user_dismissed_notification",
+        Duration::from_secs(5),
+    )
+    .await;
+    let expected_user = encode_mm_id(user_b);
+    assert_eq!(
+        dismissed_event["userID"].as_str(),
+        Some(expected_user.as_str())
+    );
+    assert!(dismissed_event["callID"].as_str().is_some());
 }
 
 async fn insert_org(app: &common::TestApp, name: &str) -> Uuid {

@@ -10,6 +10,8 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,6 +42,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 const CALLS_SIGNAL_EVENT: &str = "custom_com.mattermost.calls_signal";
 const UNANSWERED_CALL_TIMEOUT_SECS: u64 = 20;
 const EMPTY_CALL_TIMEOUT_SECS: u64 = 10;
+static CHANNEL_CALLS_ENABLED: Lazy<DashMap<Uuid, bool>> = Lazy::new(DashMap::new);
 
 /// Build the calls plugin router
 pub fn router() -> Router<AppState> {
@@ -53,7 +56,7 @@ pub fn router() -> Router<AppState> {
         // /plugins/com.mattermost.calls/{channel_id}?mobilev2=true directly.
         .route(
             "/plugins/com.mattermost.calls/{channel_id}",
-            get(get_call_state),
+            get(get_channel_state_mobile).post(set_channel_calls_enabled),
         )
         // Call management endpoints
         .route(
@@ -67,6 +70,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/plugins/com.mattermost.calls/calls/{channel_id}/leave",
             post(leave_call),
+        )
+        .route(
+            "/plugins/com.mattermost.calls/calls/{channel_id}/end",
+            post(end_call_endpoint),
         )
         .route(
             "/plugins/com.mattermost.calls/calls/{channel_id}",
@@ -128,6 +135,10 @@ pub fn router() -> Router<AppState> {
             "/plugins/com.mattermost.calls/calls/{channel_id}/host/make",
             post(host_make_moderator),
         )
+        .route(
+            "/plugins/com.mattermost.calls/calls/{channel_id}/host/screen-off",
+            post(host_screen_off),
+        )
         // Notification endpoints
         .route(
             "/plugins/com.mattermost.calls/calls/{channel_id}/dismiss-notification",
@@ -140,6 +151,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/plugins/com.mattermost.calls/turn-credentials",
             get(get_turn_credentials),
+        )
+        .route(
+            "/plugins/com.mattermost.calls/calls/{channel_id}/recording/start",
+            post(start_recording),
+        )
+        .route(
+            "/plugins/com.mattermost.calls/calls/{channel_id}/recording/stop",
+            post(stop_recording),
         )
         // Slash commands
         .merge(commands::router())
@@ -187,6 +206,18 @@ struct ConfigResponse {
     ice_servers_configs: Vec<IceServer>,
     #[serde(rename = "NeedsTURNCredentials")]
     needs_turn_credentials: bool,
+    #[serde(rename = "DefaultEnabled")]
+    default_enabled: bool,
+    #[serde(rename = "AllowEnableCalls")]
+    allow_enable_calls: bool,
+    #[serde(rename = "GroupCallsAllowed")]
+    group_calls_allowed: bool,
+    #[serde(rename = "EnableRinging")]
+    enable_ringing: bool,
+    #[serde(rename = "HostControlsAllowed")]
+    host_controls_allowed: bool,
+    #[serde(rename = "EnableRecordings")]
+    enable_recordings: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +268,10 @@ struct CallStateResponse {
     screen_sharing_session_id_raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recording: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dismissed_notification: Option<HashMap<String, bool>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,6 +289,11 @@ struct CallSessionResponse {
 #[derive(Debug, Serialize)]
 struct StatusResponse {
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelEnableRequest {
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +466,12 @@ async fn get_config(
     Ok(Json(ConfigResponse {
         ice_servers_configs: ice_servers,
         needs_turn_credentials: effective.turn_server_enabled,
+        default_enabled: true,
+        allow_enable_calls: true,
+        group_calls_allowed: true,
+        enable_ringing: true,
+        host_controls_allowed: true,
+        enable_recordings: false,
     }))
 }
 
@@ -479,38 +525,37 @@ async fn get_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<Vec<CallChannelInfo>>> {
-    // Get call manager
     let call_manager = state.call_state_manager.as_ref();
-
-    // Get all active calls
     let active_calls = call_manager.get_all_calls().await;
+    let mut calls_by_channel: HashMap<Uuid, Option<CallState>> = active_calls
+        .into_iter()
+        .map(|call| (call.channel_id, Some(call)))
+        .collect();
 
-    // Build response with channels that have active calls
+    for entry in CHANNEL_CALLS_ENABLED.iter() {
+        let override_channel_id: Uuid = *entry.key();
+        calls_by_channel.entry(override_channel_id).or_insert(None);
+    }
+
     let mut channels = Vec::new();
-    for call in active_calls {
-        // Check if user is a member of this channel
+    for (channel_id, call) in calls_by_channel {
         let is_member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)",
         )
-        .bind(call.channel_id)
+        .bind(channel_id)
         .bind(auth.user_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or(false);
 
-        if is_member {
-            let participant_count = call_manager.get_participant_count(call.call_id).await;
-
-            channels.push(CallChannelInfo {
-                channel_id: encode_mm_id(call.channel_id),
-                channel_id_raw: call.channel_id.to_string(),
-                call_id: Some(encode_mm_id(call.call_id)),
-                call_id_raw: Some(call.call_id.to_string()),
-                enabled: true,
-                has_call: participant_count > 0,
-                participant_count: participant_count as i32,
-            });
+        if !is_member {
+            continue;
         }
+
+        channels.push(
+            build_call_channel_info(&state, channel_id, channel_calls_enabled(channel_id), call)
+                .await?,
+        );
     }
 
     Ok(Json(channels))
@@ -528,6 +573,203 @@ struct CallChannelInfo {
     enabled: bool,
     has_call: bool,
     participant_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call: Option<CallStateResponse>,
+}
+
+fn channel_calls_enabled(channel_id: Uuid) -> bool {
+    CHANNEL_CALLS_ENABLED
+        .get(&channel_id)
+        .map(|entry| *entry)
+        .unwrap_or(true)
+}
+
+async fn build_call_channel_info(
+    state: &AppState,
+    channel_uuid: Uuid,
+    enabled: bool,
+    call: Option<CallState>,
+) -> ApiResult<CallChannelInfo> {
+    let (call_id, call_id_raw, call_state, participant_count) = if let Some(call) = call {
+        let participant_count = call.participants.len() as i32;
+        let call_state = Some(
+            build_call_state_response(state, &call, encode_mm_id(channel_uuid), channel_uuid)
+                .await?,
+        );
+        (
+            Some(encode_mm_id(call.call_id)),
+            Some(call.call_id.to_string()),
+            call_state,
+            participant_count,
+        )
+    } else {
+        (None, None, None, 0)
+    };
+
+    Ok(CallChannelInfo {
+        channel_id: encode_mm_id(channel_uuid),
+        channel_id_raw: channel_uuid.to_string(),
+        call_id,
+        call_id_raw,
+        enabled,
+        has_call: call_state.is_some(),
+        participant_count,
+        call: call_state,
+    })
+}
+
+async fn build_call_state_response(
+    state: &AppState,
+    call: &CallState,
+    channel_id_for_response: String,
+    channel_uuid: Uuid,
+) -> ApiResult<CallStateResponse> {
+    let call_participants = state
+        .call_state_manager
+        .get_participants(call.call_id)
+        .await;
+
+    let user_ids: Vec<Uuid> = call_participants.iter().map(|p| p.user_id).collect();
+    let users_info: HashMap<Uuid, (String, String)> = if !user_ids.is_empty() {
+        sqlx::query("SELECT id, username, COALESCE(display_name, '') as display_name FROM users WHERE id = ANY($1)")
+            .bind(&user_ids)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                use sqlx::Row;
+                let id: Uuid = row.get(0);
+                let username: String = row.get(1);
+                let display_name: String = row.get(2);
+                (id, (username, display_name))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let participants: Vec<String> = call_participants
+        .iter()
+        .map(|p| encode_mm_id(p.user_id))
+        .collect();
+    let participants_raw: Vec<String> = call_participants
+        .iter()
+        .map(|p| p.user_id.to_string())
+        .collect();
+    let sessions: HashMap<String, CallSessionResponse> = call_participants
+        .iter()
+        .map(|participant| {
+            let raw_session_id = participant.session_id.to_string();
+            let (username, display_name) = users_info
+                .get(&participant.user_id)
+                .cloned()
+                .unwrap_or_else(|| (participant.user_id.to_string(), String::new()));
+
+            (
+                raw_session_id.clone(),
+                CallSessionResponse {
+                    session_id: raw_session_id,
+                    session_id_raw: participant.session_id.to_string(),
+                    user_id: encode_mm_id(participant.user_id),
+                    user_id_raw: participant.user_id.to_string(),
+                    username,
+                    display_name,
+                    unmuted: !participant.muted,
+                    raised_hand: if participant.hand_raised { 1 } else { 0 },
+                },
+            )
+        })
+        .collect();
+    let screen_sharing_session = call.screen_sharer.and_then(|screen_sharer| {
+        call_participants
+            .iter()
+            .find(|participant| participant.user_id == screen_sharer)
+    });
+
+    Ok(CallStateResponse {
+        id: encode_mm_id(call.call_id),
+        id_raw: call.call_id.to_string(),
+        channel_id: channel_id_for_response,
+        channel_id_raw: channel_uuid.to_string(),
+        start_at: call.started_at,
+        owner_id: encode_mm_id(call.owner_id),
+        owner_id_raw: call.owner_id.to_string(),
+        host_id: encode_mm_id(call.host_id),
+        host_id_raw: call.host_id.to_string(),
+        participants,
+        participants_raw,
+        sessions,
+        screen_sharing_id: call.screen_sharer.map(encode_mm_id),
+        screen_sharing_id_raw: call.screen_sharer.map(|id| id.to_string()),
+        screen_sharing_session_id: screen_sharing_session
+            .map(|participant| participant.session_id.to_string()),
+        screen_sharing_session_id_raw: screen_sharing_session
+            .map(|participant| participant.session_id.to_string()),
+        thread_id: call.thread_id.map(encode_mm_id),
+        recording: None,
+        dismissed_notification: Some(HashMap::new()),
+    })
+}
+
+/// GET /plugins/com.mattermost.calls/{channel_id}
+/// Returns mobile-compatible channel call state envelope.
+async fn get_channel_state_mobile(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<CallChannelInfo>> {
+    let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+
+    let call = state
+        .call_state_manager
+        .get_call_by_channel(&channel_uuid)
+        .await;
+    let payload = build_call_channel_info(
+        &state,
+        channel_uuid,
+        channel_calls_enabled(channel_uuid),
+        call,
+    )
+    .await?;
+    Ok(Json(payload))
+}
+
+/// POST /plugins/com.mattermost.calls/{channel_id}
+/// Enable or disable calls in a channel.
+async fn set_channel_calls_enabled(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(payload): Json<ChannelEnableRequest>,
+) -> ApiResult<Json<CallChannelInfo>> {
+    let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+
+    CHANNEL_CALLS_ENABLED.insert(channel_uuid, payload.enabled);
+
+    broadcast_call_event(
+        &state,
+        if payload.enabled {
+            "custom_com.mattermost.calls_channel_enable_voice"
+        } else {
+            "custom_com.mattermost.calls_channel_disable_voice"
+        },
+        &channel_uuid,
+        serde_json::json!({
+            "enabled": payload.enabled,
+        }),
+        None,
+    )
+    .await;
+
+    let call = state
+        .call_state_manager
+        .get_call_by_channel(&channel_uuid)
+        .await;
+    let response = build_call_channel_info(&state, channel_uuid, payload.enabled, call).await?;
+    Ok(Json(response))
 }
 
 /// POST /plugins/com.mattermost.calls/calls/{channel_id}/start
@@ -546,6 +788,11 @@ async fn start_call(
 
     // Check channel permissions
     check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+    if !channel_calls_enabled(channel_uuid) {
+        return Err(AppError::Forbidden(
+            "Calls are disabled in this channel".to_string(),
+        ));
+    }
 
     // Get or initialize call state manager
     let call_manager = state.call_state_manager.as_ref();
@@ -647,11 +894,15 @@ async fn start_call(
         "custom_com.mattermost.calls_call_start",
         &channel_uuid,
         serde_json::json!({
+            "id": encode_mm_id(call_id),
             "channel_id": channel_id,
+            "channelID": encode_mm_id(channel_uuid),
             "user_id": encode_mm_id(auth.user_id),
             "call_id": encode_mm_id(call_id),
             "start_at": now,
             "owner_id": encode_mm_id(auth.user_id),
+            "host_id": encode_mm_id(auth.user_id),
+            "thread_id": call.thread_id.map(encode_mm_id),
         }),
         Some(auth.user_id), // Exclude sender
     )
@@ -713,6 +964,11 @@ async fn join_call(
 
     // Check channel permissions
     check_channel_permission(&state, auth.user_id, channel_uuid).await?;
+    if !channel_calls_enabled(channel_uuid) {
+        return Err(AppError::Forbidden(
+            "Calls are disabled in this channel".to_string(),
+        ));
+    }
 
     // Get call manager
     let call_manager = state.call_state_manager.as_ref();
@@ -909,6 +1165,164 @@ async fn leave_call(
     }))
 }
 
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/end
+/// End a call (host only).
+async fn end_call_endpoint(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_or_call_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let call_manager = state.call_state_manager.as_ref();
+
+    let call = match call_manager
+        .get_call_by_channel(&channel_or_call_uuid)
+        .await
+    {
+        Some(c) => c,
+        None => match call_manager.get_call(channel_or_call_uuid).await {
+            Some(c) => c,
+            None => {
+                return Ok(Json(StatusResponse {
+                    status: "OK".to_string(),
+                }));
+            }
+        },
+    };
+
+    check_channel_permission(&state, auth.user_id, call.channel_id).await?;
+
+    if call.host_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Only the host can end this call".to_string(),
+        ));
+    }
+
+    end_call(
+        &state,
+        call.call_id,
+        call.channel_id,
+        "ended_by_host",
+        call.participants.len(),
+    )
+    .await;
+
+    Ok(Json(StatusResponse {
+        status: "OK".to_string(),
+    }))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/recording/start
+async fn start_recording(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_or_call_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let call = match state
+        .call_state_manager
+        .get_call_by_channel(&channel_or_call_uuid)
+        .await
+    {
+        Some(c) => Some(c),
+        None => {
+            state
+                .call_state_manager
+                .get_call(channel_or_call_uuid)
+                .await
+        }
+    };
+    if let Some(call) = call {
+        check_channel_permission(&state, auth.user_id, call.channel_id).await?;
+    }
+    Err(AppError::BadRequest(
+        "Call recording is not supported by this server".to_string(),
+    ))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/recording/stop
+async fn stop_recording(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_or_call_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let call = match state
+        .call_state_manager
+        .get_call_by_channel(&channel_or_call_uuid)
+        .await
+    {
+        Some(c) => Some(c),
+        None => {
+            state
+                .call_state_manager
+                .get_call(channel_or_call_uuid)
+                .await
+        }
+    };
+    if let Some(call) = call {
+        check_channel_permission(&state, auth.user_id, call.channel_id).await?;
+    }
+    Err(AppError::BadRequest(
+        "Call recording is not supported by this server".to_string(),
+    ))
+}
+
+/// POST /plugins/com.mattermost.calls/calls/{channel_id}/host/screen-off
+async fn host_screen_off(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
+    Json(payload): Json<HostControlRequest>,
+) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let target_session_id = parse_mm_or_uuid(&payload.session_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid session_id".to_string()))?;
+
+    let call_manager = state.call_state_manager.as_ref();
+    let call = call_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+
+    if call.host_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Only the host can stop screen sharing".to_string(),
+        ));
+    }
+
+    let target_user_id = call
+        .participants
+        .values()
+        .find(|p| p.session_id == target_session_id)
+        .map(|p| p.user_id)
+        .ok_or_else(|| AppError::NotFound("Participant not found in call".to_string()))?;
+
+    call_manager
+        .set_screen_sharing(call.call_id, target_user_id, false)
+        .await;
+    if call.screen_sharer == Some(target_user_id) {
+        call_manager.set_screen_sharer(call.call_id, None).await;
+    }
+
+    if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
+        sfu.set_screen_sharing(target_session_id, false).await;
+    }
+
+    broadcast_screen_share_event(
+        &state,
+        channel_uuid,
+        target_user_id,
+        target_session_id,
+        false,
+    )
+    .await;
+
+    Ok(Json(StatusResponse {
+        status: "OK".to_string(),
+    }))
+}
+
 /// GET /plugins/com.mattermost.calls/calls/{channel_id}
 /// Get current call state
 async fn get_call_state(
@@ -952,92 +1366,10 @@ async fn get_call_state(
             }
         }
     };
-
-    let call_participants = call_manager.get_participants(call.call_id).await;
-
-    // Fetch user info for all participants to provide names in the UI
-    let user_ids: Vec<Uuid> = call_participants.iter().map(|p| p.user_id).collect();
-    let users_info: HashMap<Uuid, (String, String)> = if !user_ids.is_empty() {
-        sqlx::query(
-            "SELECT id, username, COALESCE(display_name, '') as display_name FROM users WHERE id = ANY($1)"
-        )
-        .bind(&user_ids)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|row| {
-            use sqlx::Row;
-            let id: Uuid = row.get(0);
-            let username: String = row.get(1);
-            let display_name: String = row.get(2);
-            (id, (username, display_name))
-        })
-        .collect()
-    } else {
-        HashMap::new()
-    };
-
-    let participants: Vec<String> = call_participants
-        .iter()
-        .map(|p| encode_mm_id(p.user_id))
-        .collect();
-    let participants_raw: Vec<String> = call_participants
-        .iter()
-        .map(|p| p.user_id.to_string())
-        .collect();
-    let sessions: HashMap<String, CallSessionResponse> = call_participants
-        .iter()
-        .map(|participant| {
-            let encoded_session_id = encode_mm_id(participant.session_id);
-            let (username, display_name) = users_info
-                .get(&participant.user_id)
-                .cloned()
-                .unwrap_or_else(|| (participant.user_id.to_string(), String::new()));
-
-            (
-                encoded_session_id.clone(),
-                CallSessionResponse {
-                    session_id: encoded_session_id,
-                    session_id_raw: participant.session_id.to_string(),
-                    user_id: encode_mm_id(participant.user_id),
-                    user_id_raw: participant.user_id.to_string(),
-                    username,
-                    display_name,
-                    unmuted: !participant.muted,
-                    raised_hand: if participant.hand_raised { 1 } else { 0 },
-                },
-            )
-        })
-        .collect();
-    let screen_sharing_session = call.screen_sharer.and_then(|screen_sharer| {
-        call_participants
-            .iter()
-            .find(|participant| participant.user_id == screen_sharer)
-    });
-
-    Ok(Json(CallStateResponse {
-        id: encode_mm_id(call.call_id),
-        id_raw: call.call_id.to_string(),
-        channel_id: channel_id.clone(),
-        channel_id_raw: channel_uuid.to_string(),
-        start_at: call.started_at,
-        owner_id: encode_mm_id(call.owner_id),
-        owner_id_raw: call.owner_id.to_string(),
-        host_id: encode_mm_id(call.host_id),
-        host_id_raw: call.host_id.to_string(),
-        participants,
-        participants_raw,
-        sessions,
-        screen_sharing_id: call.screen_sharer.map(encode_mm_id),
-        screen_sharing_id_raw: call.screen_sharer.map(|id| id.to_string()),
-        screen_sharing_session_id: screen_sharing_session
-            .map(|participant| encode_mm_id(participant.session_id)),
-        screen_sharing_session_id_raw: screen_sharing_session
-            .map(|participant| participant.session_id.to_string()),
-        thread_id: call.thread_id.map(encode_mm_id),
-    })
-    .into_response())
+    Ok(
+        Json(build_call_state_response(&state, &call, channel_id.clone(), channel_uuid).await?)
+            .into_response(),
+    )
 }
 
 /// POST /plugins/com.mattermost.calls/calls/{channel_id}/react
@@ -1120,22 +1452,12 @@ async fn toggle_screen_share(
         call_manager.set_screen_sharer(call.call_id, None).await;
     }
 
-    // Broadcast event
-    let event_name = if is_sharing {
-        "custom_com.mattermost.calls_screen_on"
-    } else {
-        "custom_com.mattermost.calls_screen_off"
-    };
-
-    broadcast_call_event(
+    broadcast_screen_share_event(
         &state,
-        event_name,
-        &channel_uuid,
-        serde_json::json!({
-            "channel_id": channel_id,
-            "user_id": encode_mm_id(auth.user_id),
-        }),
-        None,
+        channel_uuid,
+        auth.user_id,
+        participant.session_id,
+        is_sharing,
     )
     .await;
 
@@ -1246,22 +1568,22 @@ async fn raise_hand(
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
+    let participant = call_manager
+        .get_participant(call.call_id, auth.user_id)
+        .await
+        .ok_or_else(|| AppError::Forbidden("You are not in this call".to_string()))?;
+
     // Set hand raised
     call_manager
         .set_hand_raised(call.call_id, auth.user_id, true)
         .await;
 
-    // Broadcast raise_hand event
-    broadcast_call_event(
+    broadcast_raise_hand_event(
         &state,
-        "custom_com.mattermost.calls_raise_hand",
-        &channel_uuid,
-        serde_json::json!({
-            "channel_id": channel_id,
-            "user_id": encode_mm_id(auth.user_id),
-            "raised": true,
-        }),
-        None,
+        channel_uuid,
+        auth.user_id,
+        participant.session_id,
+        true,
     )
     .await;
 
@@ -1288,22 +1610,22 @@ async fn lower_hand(
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
 
+    let participant = call_manager
+        .get_participant(call.call_id, auth.user_id)
+        .await
+        .ok_or_else(|| AppError::Forbidden("You are not in this call".to_string()))?;
+
     // Set hand lowered
     call_manager
         .set_hand_raised(call.call_id, auth.user_id, false)
         .await;
 
-    // Broadcast lower_hand event
-    broadcast_call_event(
+    broadcast_raise_hand_event(
         &state,
-        "custom_com.mattermost.calls_lower_hand",
-        &channel_uuid,
-        serde_json::json!({
-            "channel_id": channel_id,
-            "user_id": encode_mm_id(auth.user_id),
-            "raised": false,
-        }),
-        None,
+        channel_uuid,
+        auth.user_id,
+        participant.session_id,
+        false,
     )
     .await;
 
@@ -1419,7 +1741,7 @@ async fn host_mute_others(
             &channel_uuid,
             serde_json::json!({
                 "channel_id": channel_id,
-                "session_id": encode_mm_id(participant.session_id),
+                "session_id": participant.session_id.to_string(),
             }),
             Some(participant.user_id),
         )
@@ -1580,17 +1902,26 @@ async fn host_lower_hand(
     )
     .await;
 
-    // Broadcast global event
+    let payload_json = serde_json::json!({
+        "channel_id": channel_id,
+        "user_id": encode_mm_id(target_user_id),
+        "raised_hand": 0,
+        "session_id": payload.session_id,
+    });
     broadcast_call_event(
         &state,
-        "custom_com.mattermost.calls_user_lower_hand", // Mattermost uses this or similar
+        "custom_com.mattermost.calls_user_unraise_hand",
         &channel_uuid,
-        serde_json::json!({
-            "channel_id": channel_id,
-            "user_id": encode_mm_id(target_user_id),
-            "raised": false,
-            "session_id": payload.session_id,
-        }),
+        payload_json.clone(),
+        None,
+    )
+    .await;
+    // Legacy alias kept for compatibility with existing rustchat consumers.
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_lower_hand",
+        &channel_uuid,
+        payload_json,
         None,
     )
     .await;
@@ -1634,15 +1965,25 @@ async fn host_make_moderator(
     // Transfer host in state
     call_manager.set_host(call.call_id, new_host_uuid).await;
 
-    // Broadcast host_changed
+    let event_payload = serde_json::json!({
+        "channel_id": channel_id,
+        "hostID": payload.new_host_id,
+        "host_id": payload.new_host_id,
+    });
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_call_host_changed",
+        &channel_uuid,
+        event_payload.clone(),
+        None,
+    )
+    .await;
+    // Legacy alias kept for compatibility with existing rustchat consumers.
     broadcast_call_event(
         &state,
         "custom_com.mattermost.calls_host_changed",
         &channel_uuid,
-        serde_json::json!({
-            "channel_id": channel_id,
-            "host_id": payload.new_host_id,
-        }),
+        event_payload,
         None,
     )
     .await;
@@ -1689,10 +2030,34 @@ async fn ring_users(
 /// POST /plugins/com.mattermost.calls/calls/{channel_id}/dismiss-notification
 /// Dismiss incoming call ringing notification
 async fn dismiss_notification(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_channel_id): Path<String>,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(channel_id): Path<String>,
 ) -> ApiResult<Json<StatusResponse>> {
+    let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let call = state
+        .call_state_manager
+        .get_call_by_channel(&channel_uuid)
+        .await;
+    let call_id = call
+        .as_ref()
+        .map(|c| encode_mm_id(c.call_id))
+        .unwrap_or_default();
+
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_user_dismissed_notification",
+        &channel_uuid,
+        serde_json::json!({
+            "userID": encode_mm_id(auth.user_id),
+            "user_id": encode_mm_id(auth.user_id),
+            "callID": call_id,
+            "call_id": call_id,
+        }),
+        None,
+    )
+    .await;
+
     Ok(Json(StatusResponse {
         status: "OK".to_string(),
     }))
@@ -1948,6 +2313,92 @@ async fn handle_ice_candidate(
 
 // ============ Helper Functions ============
 
+async fn broadcast_screen_share_event(
+    state: &AppState,
+    channel_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    is_on: bool,
+) {
+    let payload = serde_json::json!({
+        "user_id": encode_mm_id(user_id),
+        "session_id": session_id.to_string(),
+    });
+
+    broadcast_call_event(
+        state,
+        if is_on {
+            "custom_com.mattermost.calls_user_screen_on"
+        } else {
+            "custom_com.mattermost.calls_user_screen_off"
+        },
+        &channel_id,
+        payload.clone(),
+        None,
+    )
+    .await;
+
+    // Legacy aliases kept for compatibility with existing rustchat consumers.
+    broadcast_call_event(
+        state,
+        if is_on {
+            "custom_com.mattermost.calls_screen_on"
+        } else {
+            "custom_com.mattermost.calls_screen_off"
+        },
+        &channel_id,
+        payload,
+        None,
+    )
+    .await;
+}
+
+async fn broadcast_raise_hand_event(
+    state: &AppState,
+    channel_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    raised: bool,
+) {
+    let raised_hand = if raised {
+        Utc::now().timestamp_millis()
+    } else {
+        0
+    };
+    let payload = serde_json::json!({
+        "user_id": encode_mm_id(user_id),
+        "session_id": session_id.to_string(),
+        "raised_hand": raised_hand,
+    });
+
+    broadcast_call_event(
+        state,
+        if raised {
+            "custom_com.mattermost.calls_user_raise_hand"
+        } else {
+            "custom_com.mattermost.calls_user_unraise_hand"
+        },
+        &channel_id,
+        payload.clone(),
+        None,
+    )
+    .await;
+
+    // Legacy aliases kept for compatibility with existing rustchat consumers.
+    broadcast_call_event(
+        state,
+        if raised {
+            "custom_com.mattermost.calls_raise_hand"
+        } else {
+            "custom_com.mattermost.calls_lower_hand"
+        },
+        &channel_id,
+        payload,
+        None,
+    )
+    .await;
+}
+
 /// Handle websocket actions used by Mattermost mobile calls.
 /// Returns `true` when the action is recognized and handled.
 pub async fn handle_ws_action(
@@ -2019,6 +2470,9 @@ async fn handle_ws_join_call(
     check_channel_permission(state, user_id, channel_uuid)
         .await
         .map_err(|e| e.to_string())?;
+    if !channel_calls_enabled(channel_uuid) {
+        return Err("Calls are disabled in this channel".to_string());
+    }
 
     let call_manager = state.call_state_manager.as_ref();
     let now = Utc::now().timestamp_millis();
@@ -2889,12 +3343,15 @@ pub async fn start_voice_event_listener(
                 call_id,
                 session_id,
             } => {
+                let Some(call) = state.call_state_manager.get_call(call_id).await else {
+                    continue;
+                };
                 broadcast_call_event(
                     &state,
                     "custom_com.mattermost.calls_user_voice_on",
-                    &call_id,
+                    &call.channel_id,
                     serde_json::json!({
-                        "session_id": encode_mm_id(session_id),
+                        "session_id": session_id.to_string(),
                     }),
                     None,
                 )
@@ -2904,12 +3361,15 @@ pub async fn start_voice_event_listener(
                 call_id,
                 session_id,
             } => {
+                let Some(call) = state.call_state_manager.get_call(call_id).await else {
+                    continue;
+                };
                 broadcast_call_event(
                     &state,
                     "custom_com.mattermost.calls_user_voice_off",
-                    &call_id,
+                    &call.channel_id,
                     serde_json::json!({
-                        "session_id": encode_mm_id(session_id),
+                        "session_id": session_id.to_string(),
                     }),
                     None,
                 )
