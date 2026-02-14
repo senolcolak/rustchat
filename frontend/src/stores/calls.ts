@@ -10,6 +10,7 @@ export interface CurrentCall {
     call: CallState
     mySessionId: string
     peerConnection: RTCPeerConnection | null
+    screenSender: RTCRtpSender | null
     localStream: MediaStream | null
     screenStream: MediaStream | null
     remoteStreams: Map<string, MediaStream>
@@ -372,6 +373,7 @@ export const useCallsStore = defineStore('calls', () => {
                 call: channelState.call,
                 mySessionId,
                 peerConnection: null,
+                screenSender: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
@@ -427,6 +429,7 @@ export const useCallsStore = defineStore('calls', () => {
                 call: callState,
                 mySessionId,
                 peerConnection: null,
+                screenSender: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
@@ -576,6 +579,9 @@ export const useCallsStore = defineStore('calls', () => {
         if (currentCall.value?.peerConnection) {
             currentCall.value.peerConnection.close()
         }
+        if (currentCall.value) {
+            currentCall.value.screenSender = null
+        }
         if (currentCall.value?.localStream) {
             currentCall.value.localStream.getTracks().forEach(track => track.stop())
         }
@@ -627,7 +633,7 @@ export const useCallsStore = defineStore('calls', () => {
         }
     }
 
-    function stopLocalScreenShare(pc: RTCPeerConnection) {
+    async function stopLocalScreenShare() {
         if (!currentCall.value?.screenStream) {
             return
         }
@@ -635,12 +641,13 @@ export const useCallsStore = defineStore('calls', () => {
         currentCall.value.screenStream.getTracks().forEach(track => {
             track.onended = null
             track.stop()
-            const sender = pc.getSenders().find(s => s.track === track)
-            if (sender) {
-                pc.removeTrack(sender)
-            }
         })
         currentCall.value.screenStream = null
+
+        const sender = currentCall.value.screenSender
+        if (sender) {
+            await sender.replaceTrack(null)
+        }
     }
 
     async function toggleScreenShare() {
@@ -652,7 +659,7 @@ export const useCallsStore = defineStore('calls', () => {
         try {
             if (currentCall.value.screenStream) {
                 // Stop screen sharing
-                stopLocalScreenShare(pc)
+                await stopLocalScreenShare()
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
                 isScreenSharing.value = false
@@ -666,16 +673,19 @@ export const useCallsStore = defineStore('calls', () => {
                 currentCall.value.screenStream = stream
                 const [videoTrack] = stream.getVideoTracks()
                 if (videoTrack) {
+                    videoTrack.contentHint = 'detail'
                     videoTrack.onended = () => {
                         if (currentCall.value?.screenStream) {
                             void toggleScreenShare()
                         }
                     }
-                }
 
-                stream.getTracks().forEach(track => {
-                    pc.addTrack(track, stream)
-                })
+                    if (currentCall.value.screenSender) {
+                        await currentCall.value.screenSender.replaceTrack(videoTrack)
+                    } else {
+                        currentCall.value.screenSender = pc.addTrack(videoTrack, stream)
+                    }
+                }
 
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
@@ -683,7 +693,7 @@ export const useCallsStore = defineStore('calls', () => {
             }
         } catch (error) {
             console.error('Failed to toggle screen share', error)
-            stopLocalScreenShare(pc)
+            await stopLocalScreenShare()
             isScreenSharing.value = false
         }
     }
