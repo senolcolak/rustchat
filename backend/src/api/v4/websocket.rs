@@ -809,30 +809,34 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
 
     match env.event.as_str() {
         "posted" | "thread_reply_created" => {
-            if let Ok(post_resp) =
+            let mm_post = if let Ok(post_resp) =
                 serde_json::from_value::<crate::models::post::PostResponse>(env.data.clone())
             {
-                let mm_post: mm::Post = post_resp.into();
-                let post_json = serde_json::to_string(&mm_post).unwrap_or_default();
-
-                let data = json!({
-                    "post": post_json,
-                    "channel_display_name": "",
-                    "channel_name": "",
-                    "channel_type": "O",
-                    "sender_name": mm_post.user_id,
-                    "team_id": ""
-                });
-
-                Some(mm::WebSocketMessage {
-                    seq,
-                    event: "posted".to_string(),
-                    data,
-                    broadcast: map_broadcast(env.broadcast.as_ref()),
-                })
+                let mapped: mm::Post = post_resp.into();
+                mapped
+            } else if let Ok(post) = serde_json::from_value::<mm::Post>(env.data.clone()) {
+                post
             } else {
-                None
-            }
+                return None;
+            };
+
+            let post_json = serde_json::to_string(&mm_post).unwrap_or_default();
+
+            let data = json!({
+                "post": post_json,
+                "channel_display_name": "",
+                "channel_name": "",
+                "channel_type": "O",
+                "sender_name": mm_post.user_id,
+                "team_id": ""
+            });
+
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "posted".to_string(),
+                data,
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
         }
         "typing" | "typing_start" => {
             if let Ok(typing) =
@@ -1055,6 +1059,7 @@ fn map_broadcast(b_opt: Option<&crate::realtime::WsBroadcast>) -> mm::Broadcast 
 mod tests {
     use super::map_envelope_to_mm;
     use super::parse_authentication_challenge;
+    use crate::mattermost_compat::models as mm;
     use crate::realtime::{WsBroadcast, WsEnvelope};
     use uuid::Uuid;
 
@@ -1105,5 +1110,49 @@ mod tests {
         let mapped = map_envelope_to_mm(&env).expect("custom event should map");
         assert_eq!(mapped.event, "custom_com.mattermost.calls_signal");
         assert_eq!(mapped.data["signal"]["type"], "answer");
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_posted_from_mm_post_payload() {
+        let channel_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "posted".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "id": "post123",
+                "create_at": 1739500000000i64,
+                "update_at": 1739500000000i64,
+                "delete_at": 0,
+                "edit_at": 0,
+                "user_id": "user123",
+                "channel_id": "channel123",
+                "root_id": "root123",
+                "original_id": "",
+                "message": "hello from mm payload",
+                "type": "",
+                "props": {},
+                "hashtags": "",
+                "file_ids": [],
+                "pending_post_id": ""
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("posted event should map");
+        assert_eq!(mapped.event, "posted");
+        let post_json = mapped.data["post"]
+            .as_str()
+            .expect("mapped post payload should be a JSON string");
+        let post: mm::Post = serde_json::from_str(post_json).expect("post JSON should deserialize");
+        assert_eq!(post.id, "post123");
+        assert_eq!(post.root_id, "root123");
+        assert_eq!(post.message, "hello from mm payload");
     }
 }

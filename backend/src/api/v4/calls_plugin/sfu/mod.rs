@@ -74,6 +74,14 @@ pub struct SFU {
     webrtc_api_fallback: Arc<API>,
 }
 
+fn media_stream_id(session_id: Uuid) -> String {
+    format!("stream-{session_id}")
+}
+
+fn screen_stream_id(session_id: Uuid) -> String {
+    format!("screen-stream-{session_id}")
+}
+
 impl SFU {
     fn resolve_ice_host_override(ice_host_override: &str) -> Option<IpAddr> {
         if let Ok(ip) = ice_host_override.parse::<IpAddr>() {
@@ -251,7 +259,7 @@ impl SFU {
                 ..Default::default()
             },
             format!("audio-{}", session_id),
-            format!("stream-{}", session_id),
+            media_stream_id(session_id),
         ));
 
         let video_track = Arc::new(TrackLocalStaticRTP::new(
@@ -260,7 +268,7 @@ impl SFU {
                 ..Default::default()
             },
             format!("video-{}", session_id),
-            format!("stream-{}", session_id),
+            media_stream_id(session_id),
         ));
 
         let screen_track = Arc::new(TrackLocalStaticRTP::new(
@@ -269,7 +277,7 @@ impl SFU {
                 ..Default::default()
             },
             format!("screen-{}", session_id),
-            format!("stream-{}", session_id),
+            screen_stream_id(session_id),
         ));
 
         // Add tracks to peer connection
@@ -1003,7 +1011,8 @@ impl Drop for SFU {
 
 #[cfg(test)]
 mod tests {
-    use super::SFU;
+    use super::{media_stream_id, screen_stream_id, SFU};
+    use uuid::Uuid;
 
     #[test]
     fn parses_browser_json_ice_candidate() {
@@ -1034,5 +1043,11 @@ mod tests {
         );
         assert_eq!(parsed.sdp_mid.as_deref(), Some("audio"));
         assert_eq!(parsed.sdp_mline_index, Some(1));
+    }
+
+    #[test]
+    fn screen_stream_id_is_distinct_from_media_stream_id() {
+        let session_id = Uuid::new_v4();
+        assert_ne!(media_stream_id(session_id), screen_stream_id(session_id));
     }
 }

@@ -27,31 +27,57 @@ export interface Message {
     seq: number | string
 }
 
+function toIsoTimestamp(value: unknown): string {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return new Date(value).toISOString()
+    }
+    if (typeof value === 'string' && value.length > 0) {
+        return value
+    }
+    return new Date().toISOString()
+}
+
+function toOptionalIsoTimestamp(value: unknown): string | undefined {
+    if (value === null || value === undefined || value === '') {
+        return undefined
+    }
+    return toIsoTimestamp(value)
+}
+
 function postToMessage(post: Post): Message {
+    const rawPost = post as Post & {
+        root_id?: string
+        create_at?: string | number
+        update_at?: string | number
+        pending_post_id?: string
+        last_reply_at?: string | number | null
+    }
+    const rootId = (rawPost.root_post_id ?? rawPost.root_id) || undefined
+
     return {
-        id: post.id,
-        channelId: post.channel_id,
-        userId: post.user_id,
-        username: post.username || 'Unknown',
-        avatarUrl: post.avatar_url,
-        email: post.email,
-        content: post.message,
-        timestamp: post.created_at,
-        reactions: post.reactions?.map((r: any) => ({
+        id: rawPost.id,
+        channelId: rawPost.channel_id,
+        userId: rawPost.user_id,
+        username: rawPost.username || 'Unknown',
+        avatarUrl: rawPost.avatar_url,
+        email: rawPost.email,
+        content: rawPost.message,
+        timestamp: toIsoTimestamp(rawPost.created_at ?? rawPost.create_at),
+        reactions: rawPost.reactions?.map((r: any) => ({
             emoji: r.emoji,
             count: r.count,
             users: r.users.map((u: any) => u.toString())
         })) || [],
-        rootId: post.root_post_id,
-        threadCount: post.reply_count || 0,
-        lastReplyAt: post.last_reply_at,
-        files: post.files || [],
-        isPinned: post.is_pinned,
-        isSaved: post.is_saved || false,
+        rootId,
+        threadCount: rawPost.reply_count || 0,
+        lastReplyAt: toOptionalIsoTimestamp(rawPost.last_reply_at),
+        files: rawPost.files || [],
+        isPinned: Boolean(rawPost.is_pinned),
+        isSaved: rawPost.is_saved || false,
         status: 'delivered',
-        clientMsgId: (post as any).client_msg_id,
-        props: post.props,
-        seq: post.seq,
+        clientMsgId: rawPost.client_msg_id ?? rawPost.pending_post_id,
+        props: rawPost.props,
+        seq: rawPost.seq ?? 0,
     }
 }
 

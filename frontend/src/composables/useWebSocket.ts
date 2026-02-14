@@ -34,6 +34,62 @@ const maxReconnectAttempts = 10
 const subscriptions = ref<Set<string>>(new Set())
 const listeners = ref<Record<string, Set<(data: any) => void>>>({})
 
+function normalizeWsTimestamp(value: unknown, fallback: string): string {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return new Date(value).toISOString()
+    }
+    if (typeof value === 'string' && value.length > 0) {
+        return value
+    }
+    return fallback
+}
+
+function extractWsPostPayload(data: any): Record<string, any> | null {
+    if (!data || typeof data !== 'object') {
+        return null
+    }
+
+    if ('post' in data) {
+        const wrappedPost = (data as Record<string, any>).post
+        if (typeof wrappedPost === 'string') {
+            try {
+                const parsed = JSON.parse(wrappedPost)
+                return parsed && typeof parsed === 'object' ? parsed : null
+            } catch {
+                return null
+            }
+        }
+        if (wrappedPost && typeof wrappedPost === 'object') {
+            return wrappedPost as Record<string, any>
+        }
+        return null
+    }
+
+    return data as Record<string, any>
+}
+
+function normalizeWsPost(data: any): Post | null {
+    const rawPost = extractWsPostPayload(data)
+    if (!rawPost || typeof rawPost.id !== 'string') {
+        return null
+    }
+
+    const fallbackTimestamp = new Date().toISOString()
+    const createdAt = normalizeWsTimestamp(rawPost.created_at ?? rawPost.create_at, fallbackTimestamp)
+    const updatedAt = normalizeWsTimestamp(rawPost.updated_at ?? rawPost.update_at, createdAt)
+    const rootPostId = rawPost.root_post_id ?? rawPost.root_id
+
+    return {
+        ...rawPost,
+        root_post_id: rootPostId,
+        created_at: createdAt,
+        updated_at: updatedAt,
+        client_msg_id: rawPost.client_msg_id ?? rawPost.pending_post_id,
+        is_pinned: typeof rawPost.is_pinned === 'boolean' ? rawPost.is_pinned : false,
+        seq: rawPost.seq ?? 0,
+    } as Post
+}
+
 export function useWebSocket() {
     const authStore = useAuthStore()
     const messageStore = useMessageStore()
@@ -130,10 +186,11 @@ export function useWebSocket() {
                 console.log('WebSocket hello received', envelope.data)
                 break
 
+            case 'posted':
             case 'message_created':
             case 'post_created': // Fallback
             case 'thread_reply_created': {
-                const post = envelope.data as Post
+                const post = normalizeWsPost(envelope.data)
                 if (!post) {
                     break
                 }

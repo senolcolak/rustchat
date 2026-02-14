@@ -2219,6 +2219,29 @@ async fn ring_users(
         .await
         .ok_or_else(|| AppError::NotFound("No active call to ring".to_string()))?;
 
+    let thread_id = ensure_call_thread_id(&state, &call).await;
+
+    // Mattermost-mobile compatibility: stock mobile clients trigger incoming call UX
+    // from calls_call_start and do not handle calls_ringing directly.
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_call_start",
+        &channel_uuid,
+        serde_json::json!({
+            "id": encode_mm_id(call.call_id),
+            "channelID": encode_mm_id(channel_uuid),
+            "start_at": call.started_at,
+            "owner_id": encode_mm_id(call.owner_id),
+            "host_id": encode_mm_id(call.host_id),
+            "thread_id": thread_id.map(encode_mm_id),
+            "call_id": encode_mm_id(call.call_id),
+            "channel_id": encode_mm_id(channel_uuid),
+            "user_id": encode_mm_id(call.owner_id),
+        }),
+        Some(auth.user_id),
+    )
+    .await;
+
     broadcast_ringing_event(&state, channel_uuid, call.call_id, auth.user_id, None).await;
 
     Ok(Json(StatusResponse {
