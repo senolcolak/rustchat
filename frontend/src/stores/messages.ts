@@ -174,6 +174,10 @@ export const useMessageStore = defineStore('messages', () => {
     }
 
     function handleNewMessage(post: Post) {
+        if (!post) {
+            return
+        }
+
         const message = postToMessage(post)
 
         if (message.rootId) {

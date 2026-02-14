@@ -134,6 +134,9 @@ export function useWebSocket() {
             case 'post_created': // Fallback
             case 'thread_reply_created': {
                 const post = envelope.data as Post
+                if (!post) {
+                    break
+                }
                 // If it's a thread reply, logic might slightly differ (handled by store)
                 messageStore.handleNewMessage(post)
 
