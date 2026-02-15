@@ -10,7 +10,6 @@ use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
 use crate::error::ApiResult;
 use crate::mattermost_compat::models as mm;
-use crate::models::server_config::EmailConfig;
 
 pub async fn get_audits(
     State(state): State<AppState>,

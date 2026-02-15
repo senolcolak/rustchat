@@ -174,17 +174,6 @@ impl WsEnvelope {
         }
     }
 
-    pub fn hello(user_id: Uuid) -> Self {
-        Self {
-            msg_type: "event".to_string(),
-            event: "hello".to_string(),
-            seq: None,
-            channel_id: None,
-            data: serde_json::json!({ "user_id": user_id }),
-            broadcast: None,
-        }
-    }
-
     pub fn pong(seq: Option<u64>) -> Self {
         Self {
             msg_type: "response".to_string(),
