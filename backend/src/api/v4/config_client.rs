@@ -332,6 +332,9 @@ fn legacy_config(site: &SiteConfig, auth: &AuthConfig, diagnostic_id: &str) -> s
     insert(&mut map, "DefaultEnabled", "true");
     insert(&mut map, "EnableRinging", "true");
     
+    // Enable push notifications
+    insert(&mut map, "EnablePushNotifications", "true");
+    
     // Add PluginSettings for calls plugin (required by mobile app)
     map.insert(
         "PluginSettings".to_string(),
