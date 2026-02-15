@@ -94,6 +94,12 @@ pub async fn send_push_notification(
                 info!("Push notification sent successfully via push proxy");
                 return Ok(());
             }
+            Err(PushNotificationError::InvalidToken) => {
+                // Invalid token - don't try direct FCM, propagate error immediately
+                // so the caller can delete the invalid device
+                warn!("Push proxy reported invalid token, not falling back to direct FCM");
+                return Err(PushNotificationError::InvalidToken);
+            }
             Err(PushNotificationError::NotConfigured) => {
                 // Proxy not configured, fall through to direct FCM
                 info!("Push proxy not available, falling back to direct FCM");
