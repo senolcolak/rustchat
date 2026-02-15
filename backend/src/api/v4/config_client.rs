@@ -334,6 +334,8 @@ fn legacy_config(site: &SiteConfig, auth: &AuthConfig, diagnostic_id: &str) -> s
     
     // Enable push notifications
     insert(&mut map, "EnablePushNotifications", "true");
+    insert(&mut map, "PushNotificationServer", "https://push.mattermost.com");  // Dummy value, actual push goes through our proxy
+    insert(&mut map, "PushNotificationContents", "full");  // full, generic, or id
     
     // Add PluginSettings for calls plugin (required by mobile app)
     map.insert(
