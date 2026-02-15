@@ -40,6 +40,8 @@ pub async fn get_audits(
 #[derive(Debug, Deserialize)]
 pub struct TestEmailRequest {
     pub email: Option<String>,
+    #[serde(rename = "to")]
+    pub to_email: Option<String>,
 }
 
 pub async fn test_email_config(
@@ -81,11 +83,10 @@ pub async fn test_email_config(
         })));
     }
 
-    // Determine test recipient
-    let test_email = payload.email.unwrap_or_else(|| {
-        // Get user's email from auth
-        auth.email.clone()
-    });
+    // Determine test recipient (use 'to' field or 'email' field, fallback to user's email)
+    let test_email = payload.to_email
+        .or(payload.email)
+        .unwrap_or_else(|| auth.email.clone());
 
     // Send test email using the email service
     match crate::services::email::send_email(

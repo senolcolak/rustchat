@@ -1328,6 +1328,9 @@ async fn delete_admin_channel(
 pub struct TestEmailRequest {
     /// Email address to send test to (defaults to admin's email)
     pub email: Option<String>,
+    /// Alternative field name used by frontend
+    #[serde(rename = "to")]
+    pub to_email: Option<String>,
 }
 
 async fn test_email_config(
@@ -1371,11 +1374,10 @@ async fn test_email_config(
         })));
     }
 
-    // Determine test recipient
-    let test_email = payload.email.unwrap_or_else(|| {
-        // Get admin's email from database
-        auth.email.clone()
-    });
+    // Determine test recipient (use 'to' field or 'email' field, fallback to admin's email)
+    let test_email = payload.to_email
+        .or(payload.email)
+        .unwrap_or_else(|| auth.email.clone());
 
     // First test the connection
     match crate::services::email::test_smtp_connection(&config).await {
