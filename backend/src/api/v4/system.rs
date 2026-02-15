@@ -257,7 +257,11 @@ async fn get_config(
             "SMTPServer": config.email.0.smtp_host,
             "SMTPPort": config.email.0.smtp_port.to_string(),
             "SMTPUsername": config.email.0.smtp_username,
-            "ConnectionSecurity": if config.email.0.smtp_tls { "TLS" } else { "" },
+            "ConnectionSecurity": match config.email.0.smtp_security.as_str() {
+                "tls" => "TLS",
+                "starttls" => "STARTTLS",
+                _ => "",
+            },
             "PasswordResetSalt": "",
             "EnablePasswordReset": config.authentication.0.password_enable_forgot_link,
         },
