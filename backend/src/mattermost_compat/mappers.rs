@@ -25,7 +25,7 @@ impl From<User> for mm::User {
             auth_service: "".to_string(),
             roles: map_system_role(&user.role),
             locale: "en".to_string(),
-            notify_props: json!({ "email": "true", "push": "mention" }),
+            notify_props: user.notify_props.clone(),
             props: json!({}),
             last_password_update: 0,
             last_picture_update: 0,
