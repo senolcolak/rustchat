@@ -101,6 +101,8 @@ pub fn router() -> Router<AppState> {
             "/admin/plugins/calls",
             get(get_calls_plugin_config).put(update_calls_plugin_config),
         )
+        // Email testing
+        .route("/admin/email/test", post(test_email_config))
 }
 
 /// Check if user is admin
@@ -1317,4 +1319,106 @@ async fn delete_admin_channel(
         .await?;
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+
+// ============ Email Testing ============
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TestEmailRequest {
+    /// Email address to send test to (defaults to admin's email)
+    pub email: Option<String>,
+}
+
+async fn test_email_config(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(payload): Json<TestEmailRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&auth)?;
+
+    // Get email config
+    let config = sqlx::query_as::<_, (sqlx::types::Json<crate::models::server_config::EmailConfig>,)>(
+        "SELECT email FROM server_config WHERE id = 'default'"
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| row.0 .0)
+    .unwrap_or_default();
+
+    // Check if email notifications are enabled
+    if !config.send_email_notifications {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "error": "Email notifications are disabled. Enable them in System Console > Notifications > Email."
+        })));
+    }
+
+    // Check if SMTP is configured
+    if config.smtp_host.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "error": "SMTP server not configured. Configure it in System Console > Notifications > Email."
+        })));
+    }
+
+    if config.from_address.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "error": "From address not configured. Set it in System Console > Notifications > Email."
+        })));
+    }
+
+    // Determine test recipient
+    let test_email = payload.email.unwrap_or_else(|| {
+        // Get admin's email from database
+        auth.email.clone()
+    });
+
+    // First test the connection
+    match crate::services::email::test_smtp_connection(&config).await {
+        Ok(_) => {
+            tracing::info!("SMTP connection test successful");
+        }
+        Err(e) => {
+            return Ok(Json(serde_json::json!({
+                "status": "error",
+                "error": format!("SMTP connection failed: {}", e),
+                "details": "Check your SMTP host, port, username, and password."
+            })));
+        }
+    }
+
+    // Send test email
+    match crate::services::email::send_email(
+        &config,
+        &test_email,
+        "RustChat Test Email",
+        &format!(
+            "This is a test email from RustChat.\n\nIf you received this, your email configuration is working correctly!\n\nConfiguration used:\n- SMTP Server: {}:{}\n- Security: {}\n- From: {}\n",
+            config.smtp_host,
+            config.smtp_port,
+            config.smtp_security,
+            config.from_address
+        ),
+    ).await {
+        Ok(_) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "message": format!("Test email sent successfully to {}", test_email),
+            "config": {
+                "smtp_host": config.smtp_host,
+                "smtp_port": config.smtp_port,
+                "smtp_security": config.smtp_security,
+                "from_address": config.from_address,
+                "from_name": config.from_name,
+            }
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "status": "error",
+            "error": format!("Failed to send test email: {}", e),
+            "details": "Check your SMTP configuration and ensure the server allows sending."
+        }))),
+    }
 }

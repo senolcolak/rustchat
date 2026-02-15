@@ -2,7 +2,7 @@ use crate::api::AppState;
 use crate::error::ApiResult;
 use crate::mattermost_compat::models as mm;
 use crate::mattermost_compat::{id::encode_mm_id, MM_VERSION};
-use crate::models::server_config::{AuthConfig, SiteConfig};
+use crate::models::server_config::{AuthConfig, EmailConfig, SiteConfig};
 use axum::{
     extract::{Query, State},
     response::IntoResponse,
@@ -41,21 +41,21 @@ pub async fn get_client_config(
         ));
     }
 
-    let (site, auth) = sqlx::query_as::<
+    let (site, auth, email) = sqlx::query_as::<
         _,
-        (sqlx::types::Json<SiteConfig>, sqlx::types::Json<AuthConfig>),
-    >("SELECT site, authentication FROM server_config WHERE id = 'default'")
+        (sqlx::types::Json<SiteConfig>, sqlx::types::Json<AuthConfig>, sqlx::types::Json<EmailConfig>),
+    >("SELECT site, authentication, email FROM server_config WHERE id = 'default'")
     .fetch_optional(&state.db)
     .await
     .ok()
     .flatten()
-    .map(|row| (row.0 .0, row.1 .0))
-    .unwrap_or_else(|| (SiteConfig::default(), AuthConfig::default()));
+    .map(|row| (row.0 .0, row.1 .0, row.2 .0))
+    .unwrap_or_else(|| (SiteConfig::default(), AuthConfig::default(), EmailConfig::default()));
 
     let diagnostic_id = diagnostic_id(&site);
     Ok((
         axum::http::StatusCode::OK,
-        Json(legacy_config(&site, &auth, &diagnostic_id)),
+        Json(legacy_config(&site, &auth, &email, &diagnostic_id)),
     ))
 }
 
@@ -80,7 +80,7 @@ pub async fn get_client_license(
     Ok(Json(body))
 }
 
-fn legacy_config(site: &SiteConfig, auth: &AuthConfig, diagnostic_id: &str) -> serde_json::Value {
+fn legacy_config(site: &SiteConfig, auth: &AuthConfig, email: &EmailConfig, diagnostic_id: &str) -> serde_json::Value {
     use serde_json::{json, Map, Value};
 
     let mut map = Map::new();
@@ -332,10 +332,16 @@ fn legacy_config(site: &SiteConfig, auth: &AuthConfig, diagnostic_id: &str) -> s
     insert(&mut map, "DefaultEnabled", "true");
     insert(&mut map, "EnableRinging", "true");
     
-    // Enable push notifications
-    insert(&mut map, "EnablePushNotifications", "true");
+    // Push notifications settings
+    insert(&mut map, "SendPushNotifications", bool_str(site.send_push_notifications));
+    insert(&mut map, "EnablePushNotifications", bool_str(site.send_push_notifications));
     insert(&mut map, "PushNotificationServer", "https://push.mattermost.com");  // Dummy value, actual push goes through our proxy
     insert(&mut map, "PushNotificationContents", "full");  // full, generic, or id
+    
+    // Email notifications settings
+    insert(&mut map, "SendEmailNotifications", bool_str(email.send_email_notifications));
+    insert(&mut map, "EnableEmailBatching", bool_str(email.enable_email_batching));
+    insert(&mut map, "EmailNotificationContentsType", &email.email_notification_content);
     
     // Add PluginSettings for calls plugin (required by mobile app)
     map.insert(
