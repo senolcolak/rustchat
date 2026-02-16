@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue'
 import { format, formatDistanceToNow } from 'date-fns'
-import { Smile, MessageSquare, MoreHorizontal, Pencil, Trash2, Pin, X, Check, Bookmark, ArrowRight, Video } from 'lucide-vue-next'
+import { Smile, MessageSquare, MoreHorizontal, Pencil, Trash2, Pin, X, Check, Bookmark, ArrowRight, Video, Phone, PhoneOff } from 'lucide-vue-next'
 import type { Message } from '../../stores/messages'
 import { useMessageStore } from '../../stores/messages'
 import { useAuthStore } from '../../stores/auth'
@@ -47,8 +47,12 @@ const editInputRef = ref<HTMLTextAreaElement | null>(null)
 const saving = ref(false)
 
 const isOwnMessage = computed(() => authStore.user?.id === props.message.userId)
-const isSystemMessage = computed(() => props.message.props?.type === 'system_join_leave')
+const isSystemMessage = computed(() => {
+    const type = props.message.props?.type
+    return type === 'system_join_leave' || type === 'system_purpose' || type === 'system_header'
+})
 const isVideoCall = computed(() => props.message.props?.type === 'video_call')
+const isCallsProtocol = computed(() => props.message.props?.type === 'custom_com.mattermost.calls')
 
 function joinCall() {
     if (!props.message.props) return
@@ -246,8 +250,47 @@ async function toggleReaction(emoji: string) {
                 <div class="w-10 h-10 bg-green-100 dark:bg-green-900/30 rounded-full flex items-center justify-center">
                     <Video class="w-5 h-5 text-green-600 dark:text-green-400" />
                 </div>
-                <div>
+        <div>
                     <div class="font-semibold text-gray-900 dark:text-gray-100">Video Call</div>
+                    <div class="text-[13px] text-gray-500 dark:text-gray-400">
+                        {{ message.props?.status === 'ended' ? 'Call ended' : 'Ongoing call' }}
+                    </div>
+                </div>
+            </div>
+            <button 
+                v-if="message.props?.status !== 'ended'"
+                @click="joinCall"
+                class="w-full bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
+            >
+                <Video class="w-4 h-4" />
+                Join Call
+            </button>
+            <div v-else class="text-xs font-medium text-gray-400 dark:text-gray-500 flex items-center gap-1.5 px-1">
+                <span>Call ended</span>
+                <span>•</span>
+                <span>{{ message.props?.duration_text || 'Just now' }}</span>
+            </div>
+        </div>
+    </div>
+  </div>
+
+  <!-- mattermost calls plugin messages -->
+  <div v-else-if="isCallsProtocol" class="flex items-center px-5 py-1.5 -mx-5 hover:bg-surface-dim dark:hover:bg-gray-800/40 transition-standard group">
+    <div class="flex items-center text-[13px] text-gray-500 dark:text-gray-400 w-full">
+        <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mr-3 shrink-0">
+            <Phone class="w-4 h-4 text-blue-600 dark:text-blue-400" v-if="!message.props?.end_at" />
+            <PhoneOff class="w-4 h-4 text-gray-400" v-else />
+        </div>
+        <div class="flex-1">
+            <span class="font-semibold text-gray-700 dark:text-gray-200">{{ message.username }}</span>
+            <span class="mx-1">{{ message.props?.end_at ? 'ended the call' : 'started a call' }}</span>
+            <span v-if="message.props?.duration" class="opacity-70">({{ Math.floor(message.props.duration / 1000 / 60) }}m {{ Math.floor((message.props.duration / 1000) % 60) }}s)</span>
+        </div>
+        <span class="ml-2 text-[10px] text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">
+            {{ format(new Date(message.timestamp), 'h:mm a') }}
+        </span>
+    </div>
+  </div>
                     <div class="text-xs text-gray-500">MiroTalk Meeting</div>
                 </div>
             </div>
@@ -348,24 +391,24 @@ async function toggleReaction(emoji: string) {
         </div>
       </div>
 
-      <div v-else class="relative group/content flex items-start">
+      <div v-else class="relative group/content block">
         <div 
           class="text-text-1 text-base mt-0.5 whitespace-pre-wrap leading-base max-w-[90%] break-words selection:bg-brand/20"
           :class="{ 'bg-yellow-50/50 dark:bg-yellow-900/10 -mx-2 px-2 py-1 rounded': isMentioned }"
           v-html="formattedContent"
         ></div>
 
-        <!-- Reactions (Middle Alignment) -->
-        <div v-if="message.reactions && message.reactions.length > 0 && !isEditing" class="flex items-center ml-4 mt-1 space-x-1 flex-wrap">
+        <!-- Reactions (Bottom Alignment) -->
+        <div v-if="message.reactions && message.reactions.length > 0 && !isEditing" class="flex items-center mt-2 space-x-1.5 flex-wrap">
           <div 
             v-for="reaction in message.reactions" 
             :key="reaction.emoji"
             @click="toggleReaction(reaction.emoji)"
-            class="bg-blue-50/50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 hover:border-blue-300 rounded-full px-1.5 py-0.5 text-[11px] cursor-pointer flex items-center space-x-1 transition-colors select-none"
-            :class="{ 'bg-blue-100 dark:bg-blue-800 border-blue-300 dark:border-blue-600': reaction.users.includes(authStore.user?.id || '') }"
+            class="bg-blue-50/80 dark:bg-blue-900/40 border border-blue-100/50 dark:border-blue-800/50 hover:border-blue-300 dark:hover:border-blue-600 rounded-lg px-2 py-0.5 text-[11px] cursor-pointer flex items-center space-x-1.5 transition-all select-none hover:scale-105 active:scale-95"
+            :class="{ 'bg-brand/10 dark:bg-brand/20 border-brand/50 dark:border-brand/40 shadow-sm': reaction.users.includes(authStore.user?.id || '') }"
           >
-            <span>{{ reaction.emoji }}</span>
-            <span class="font-semibold text-blue-600 dark:text-blue-400">{{ reaction.count }}</span>
+            <span class="text-sm">{{ reaction.emoji }}</span>
+            <span class="font-bold text-blue-600 dark:text-blue-400" :class="{ 'text-brand dark:text-brand': reaction.users.includes(authStore.user?.id || '') }">{{ reaction.count }}</span>
           </div>
         </div>
       </div>

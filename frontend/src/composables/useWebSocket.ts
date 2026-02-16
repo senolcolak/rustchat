@@ -248,6 +248,7 @@ export function useWebSocket() {
                 break
 
             case 'user_typing':
+            case 'typing': // Compatibility with some mobile clients
                 if (envelope.data) {
                     presenceStore.addTypingUser(
                         envelope.data.user_id,
