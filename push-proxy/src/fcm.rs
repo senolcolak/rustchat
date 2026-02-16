@@ -97,20 +97,31 @@ impl FcmClient {
 
     fn build_fcm_message(&self, payload: PushPayload) -> serde_json::Value {
         let is_call = payload.data.sub_type.as_deref() == Some("calls");
-        
-        let mut android_config = serde_json::json!({
-            "notification": {
-                "click_action": "TOP_STORY_ACTIVITY"
-            }
-        });
 
-        // High priority for calls
-        if is_call {
-            android_config["priority"] = serde_json::json!("high");
-            android_config["ttl"] = serde_json::json!("0s");
-            android_config["notification"]["channel_id"] = serde_json::json!("calls");
-            android_config["notification"]["sound"] = serde_json::json!("ringtone");
-        }
+        // Android config — use the mobile app's existing notification channel IDs:
+        // "channel_01" = High Importance (IMPORTANCE_HIGH, plays sound)
+        // "channel_02" = Min Importance (IMPORTANCE_MIN, silent)
+        // NOTE: Previously this used "calls" as channel_id, but that channel does NOT
+        // exist in the mobile app, causing Android to fall back to a silent notification.
+        let android_config = if is_call {
+            serde_json::json!({
+                "priority": "high",
+                "ttl": "0s",
+                "notification": {
+                    "channel_id": "channel_01",
+                    "sound": "default",
+                    "click_action": "TOP_STORY_ACTIVITY"
+                }
+            })
+        } else {
+            serde_json::json!({
+                "priority": "normal",
+                "notification": {
+                    "channel_id": "channel_01",
+                    "click_action": "TOP_STORY_ACTIVITY"
+                }
+            })
+        };
 
         // Build APNS config for iOS
         let mut apns_headers = serde_json::Map::new();

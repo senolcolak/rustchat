@@ -632,10 +632,12 @@ fn build_fcm_message(notification: &PushNotification) -> FcmMessage {
         Some(FcmAndroidConfig {
             priority: "high".to_string(),
             notification: FcmAndroidNotification {
-                channel_id: "calls".to_string(),
+                // Use the mobile app's existing "channel_01" (High Importance, IMPORTANCE_HIGH)
+                // NOTE: Previously used "calls" which does NOT exist in the mobile app,
+                // causing Android to fall back to a silent notification on locked screens.
+                channel_id: "channel_01".to_string(),
                 sound: if is_call_notification { 
-                    // For calls, use the default ringtone
-                    "ringtone".to_string() 
+                    "default".to_string() 
                 } else { 
                     notification.sound.clone().unwrap_or_else(|| "default".to_string()) 
                 },
@@ -646,7 +648,7 @@ fn build_fcm_message(notification: &PushNotification) -> FcmMessage {
         Some(FcmAndroidConfig {
             priority: "normal".to_string(),
             notification: FcmAndroidNotification {
-                channel_id: "messages".to_string(),
+                channel_id: "channel_01".to_string(),
                 sound: notification.sound.clone().unwrap_or_else(|| "default".to_string()),
                 priority: "default".to_string(),
             },
