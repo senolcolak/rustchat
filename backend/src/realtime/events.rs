@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use crate::mattermost_compat::id::parse_mm_or_uuid;
 
 /// WebSocket event envelope
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,7 @@ impl EventType {
 pub struct ClientEnvelope {
     pub event: String,
     pub data: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid_compat")]
     pub channel_id: Option<Uuid>,
     pub seq: Option<u64>,
     pub client_msg_id: Option<String>,
@@ -115,7 +117,21 @@ pub struct ClientEnvelope {
 // Helper to deserialize specific command data
 #[derive(Debug, Deserialize)]
 pub struct TypingCommandData {
+    #[serde(default, deserialize_with = "deserialize_optional_uuid_compat")]
     pub thread_root_id: Option<Uuid>,
+}
+
+fn deserialize_optional_uuid_compat<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(id) => parse_mm_or_uuid(&id).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid uuid/mattermost id: {}", id))
+        }).map(Some),
+    }
 }
 
 #[derive(Debug, Deserialize)]

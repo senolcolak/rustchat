@@ -606,35 +606,87 @@ async fn handle_client_value_message(
                 );
             }
         }
-    } else if action == "user_typing" {
-        if let Some(data) = value.get("data") {
-            if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
-                if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
-                    let broadcast = WsEnvelope::event(
-                        crate::realtime::EventType::UserTyping,
-                        crate::realtime::TypingEvent {
-                            user_id,
-                            display_name: username.to_string(),
-                            thread_root_id: data
-                                .get("parent_id")
-                                .and_then(|v| v.as_str())
-                                .and_then(parse_mm_or_uuid),
-                        },
-                        Some(channel_id),
-                    )
-                    .with_broadcast(WsBroadcast {
-                        channel_id: Some(channel_id),
-                        team_id: None,
-                        user_id: None,
-                        exclude_user_id: Some(user_id),
-                    });
-                    state.ws_hub.broadcast(broadcast).await;
-                }
-            }
+    } else if matches!(action, "user_typing" | "typing" | "typing_start") {
+        let channel_id = extract_typing_channel_id(value);
+        if let Some(channel_id) = channel_id {
+            let broadcast = WsEnvelope::event(
+                crate::realtime::EventType::UserTyping,
+                crate::realtime::TypingEvent {
+                    user_id,
+                    display_name: username.to_string(),
+                    thread_root_id: extract_typing_thread_root_id(value),
+                },
+                Some(channel_id),
+            )
+            .with_broadcast(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            });
+            state.ws_hub.broadcast(broadcast).await;
+        }
+    } else if matches!(action, "user_typing_stop" | "stop_typing" | "typing_stop") {
+        let channel_id = extract_typing_channel_id(value);
+        if let Some(channel_id) = channel_id {
+            let broadcast = WsEnvelope::event(
+                crate::realtime::EventType::UserTypingStop,
+                crate::realtime::TypingEvent {
+                    user_id,
+                    display_name: username.to_string(),
+                    thread_root_id: extract_typing_thread_root_id(value),
+                },
+                Some(channel_id),
+            )
+            .with_broadcast(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            });
+            state.ws_hub.broadcast(broadcast).await;
         }
     } else {
         trace!(action = %action, "Unknown action received");
     }
+}
+
+fn extract_typing_channel_id(value: &serde_json::Value) -> Option<Uuid> {
+    value
+        .get("data")
+        .and_then(|v| v.get("channel_id"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_mm_or_uuid)
+        .or_else(|| {
+            value
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+}
+
+fn extract_typing_thread_root_id(value: &serde_json::Value) -> Option<Uuid> {
+    let data = value.get("data");
+    data.and_then(|v| v.get("parent_id"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_mm_or_uuid)
+        .or_else(|| {
+            data.and_then(|v| v.get("thread_root_id"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+        .or_else(|| {
+            value
+                .get("parent_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+        .or_else(|| {
+            value
+                .get("thread_root_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
 }
 
 fn decode_msgpack_value(bytes: &[u8]) -> Option<serde_json::Value> {

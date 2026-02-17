@@ -34,6 +34,7 @@ const attachedFiles = ref<{
 const mentionQuery = ref('')
 
 let lastTypingEmit = 0
+const TYPING_ACTIVITY_INTERVAL_MS = 2000
 
 // Slash command handling
 async function handleSlashCommand(command: string, args: string[]): Promise<boolean> {
@@ -171,7 +172,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 function handleInput() {
     const now = Date.now()
-    if (now - lastTypingEmit > 3000) {
+    if (content.value.trim().length > 0 && now - lastTypingEmit > TYPING_ACTIVITY_INTERVAL_MS) {
         lastTypingEmit = now
         emit('typing')
     }

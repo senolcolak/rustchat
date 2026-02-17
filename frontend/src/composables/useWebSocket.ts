@@ -39,6 +39,7 @@ const reconnectAttempts = ref(0)
 const maxReconnectAttempts = 10
 const subscriptions = ref<Set<string>>(new Set())
 const listeners = ref<Record<string, Set<(data: any) => void>>>({})
+let actionSeq = 1
 
 function normalizeWsTimestamp(value: unknown, fallback: string): string {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -434,6 +435,16 @@ export function useWebSocket() {
         }
     }
 
+    function sendAction(action: string, data: Record<string, unknown>) {
+        if (ws.value && connected.value) {
+            ws.value.send(JSON.stringify({
+                action,
+                seq: actionSeq++,
+                data,
+            }))
+        }
+    }
+
     function subscribe(channelId: string) {
         if (!subscriptions.value.has(channelId)) {
             subscriptions.value.add(channelId)
@@ -459,20 +470,17 @@ export function useWebSocket() {
     }
 
     function sendTyping(channelId: string, threadRootId?: string) {
-        send({
-            type: 'command',
-            event: 'typing_start',
+        // Match Mattermost web/mobile typing command format.
+        sendAction('user_typing', {
             channel_id: channelId,
-            data: { thread_root_id: threadRootId }
+            parent_id: threadRootId,
         })
     }
 
     function sendStopTyping(channelId: string, threadRootId?: string) {
-        send({
-            type: 'command',
-            event: 'typing_stop',
+        sendAction('user_typing_stop', {
             channel_id: channelId,
-            data: { thread_root_id: threadRootId }
+            parent_id: threadRootId,
         })
     }
 
