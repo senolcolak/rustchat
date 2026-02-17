@@ -116,6 +116,47 @@ function normalizeWsEnvelope(envelope: WsEnvelope): WsEnvelope {
     }
 }
 
+function normalizeWsReactionPayload(data: any): Record<string, any> | null {
+    if (!data || typeof data !== 'object') {
+        return null
+    }
+
+    let rawReaction: unknown = data
+    if ('reaction' in data) {
+        rawReaction = (data as Record<string, unknown>).reaction
+    }
+
+    if (typeof rawReaction === 'string') {
+        try {
+            rawReaction = JSON.parse(rawReaction)
+        } catch {
+            return null
+        }
+    }
+
+    if (!rawReaction || typeof rawReaction !== 'object') {
+        return null
+    }
+
+    const normalized = normalizeIdsDeep(rawReaction) as Record<string, any>
+    const emojiName = typeof normalized.emoji_name === 'string'
+        ? normalized.emoji_name
+        : typeof normalized.emoji === 'string'
+            ? normalized.emoji
+            : undefined
+
+    if (!emojiName) {
+        return null
+    }
+
+    return {
+        ...normalized,
+        post_id: normalizeEntityId(normalized.post_id) ?? normalized.post_id,
+        user_id: normalizeEntityId(normalized.user_id) ?? normalized.user_id,
+        emoji_name: emojiName,
+    }
+}
+
 export function useWebSocket() {
     const authStore = useAuthStore()
     const messageStore = useMessageStore()
@@ -270,11 +311,21 @@ export function useWebSocket() {
                 break
 
             case 'reaction_added':
-                messageStore.handleReactionAdded(envelope.data)
+                {
+                    const reaction = normalizeWsReactionPayload(envelope.data)
+                    if (reaction) {
+                        messageStore.handleReactionAdded(reaction)
+                    }
+                }
                 break
 
             case 'reaction_removed':
-                messageStore.handleReactionRemoved(envelope.data)
+                {
+                    const reaction = normalizeWsReactionPayload(envelope.data)
+                    if (reaction) {
+                        messageStore.handleReactionRemoved(reaction)
+                    }
+                }
                 break
 
             case 'user_typing':

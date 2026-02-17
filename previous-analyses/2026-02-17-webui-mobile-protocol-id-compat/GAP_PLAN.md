@@ -26,6 +26,13 @@
 - Verification test: `npm --prefix frontend run build` passed.
 - Status: Completed
 
+- Rustchat target path: `frontend/src/composables/useWebSocket.ts`
+- Required behavior: Parse Mattermost websocket reaction events where payload is wrapped as `data.reaction` JSON string/object.
+- Current gap: WebUI expected flat `{post_id,user_id,emoji_name}` and ignored wrapped reaction payload.
+- Planned change: Added `normalizeWsReactionPayload` to parse/unwrap, normalize IDs, and feed store handlers.
+- Verification test: `npm --prefix frontend run build` passed.
+- Status: Completed
+
 Compatibility checklist snapshot:
 - API Contract: Completed for ID-format compatibility layer at WebUI boundary
 - Realtime Contract: Completed for websocket ID normalization path and endpoint parity (`/api/v4/websocket`)
