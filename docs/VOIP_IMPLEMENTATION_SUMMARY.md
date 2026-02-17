@@ -143,35 +143,36 @@ RUSTCHAT_PUSH_PROXY_URL=http://push-proxy:3000
 }
 ```
 
-### Android FCM Payload
+### Android FCM Payload (Data-Only)
+
+**CRITICAL:** For VoIP ringing to work on Android, we use **data-only messages** (no `notification` field). This ensures:
+- The app receives the message in `FirebaseMessagingService.onMessageReceived()`
+- The app can wake up and show a full-screen incoming call UI
+- System notification tray is NOT shown automatically
 
 ```json
 {
   "message": {
     "token": "fcm-token",
-    "notification": {
-      "title": "Incoming call from John Doe",
-      "body": "Tap to answer"
-    },
     "data": {
       "type": "call",
       "channel_id": "channel-uuid",
       "post_id": "post-uuid",
       "sender_name": "John Doe",
-      "server_url": "https://rustchat.com"
+      "server_url": "https://rustchat.com",
+      "title": "Incoming call from John Doe",
+      "body": "Tap to answer"
     },
     "android": {
       "priority": "high",
       "ttl": "0s",
-      "notification": {
-        "channel_id": "channel_01",
-        "sound": "default"
-      },
       "direct_boot_ok": true
     }
   }
 }
 ```
+
+**Note:** The absence of the `notification` field is intentional and required for proper VoIP behavior.
 
 ## Mobile Integration Requirements
 

@@ -161,20 +161,23 @@ impl FcmClient {
         });
 
         // Build the message
-        // For call notifications on Android, we prioritize data payload
+        // For call notifications on Android, we MUST use data-only messages (no "notification" field)
+        // This allows the app to receive the message in onMessageReceived() even when in background/killed
+        // and display a full-screen incoming call UI. If we include "notification", Android will just
+        // show a system tray notification and the app won't wake up to show the call UI.
         let message = if is_call {
             serde_json::json!({
                 "token": payload.token,
-                "notification": {
-                    "title": payload.title,
-                    "body": payload.body
-                },
+                // NO "notification" field - this is critical for VoIP ringing!
                 "data": {
                     "type": "call",
                     "channel_id": payload.data.channel_id,
                     "post_id": payload.data.post_id,
                     "sender_name": payload.data.sender_name.unwrap_or_default(),
                     "server_url": payload.data.server_url.unwrap_or_default(),
+                    // Include title/body in data for the app to use
+                    "title": payload.title,
+                    "body": payload.body,
                 },
                 "android": android_config,
                 "apns": apns_config

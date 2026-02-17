@@ -8,11 +8,10 @@ This guide explains how to deploy the RustChat Push Proxy using Docker Compose.
 # 1. Copy and configure environment variables
 cp .env.example .env
 
-# 2. Place your certificates in the secrets directory
+# 2. Place your keys in the secrets directory
 mkdir -p secrets/
 cp /path/to/firebase-key.json secrets/
-cp /path/to/voip-cert.pem secrets/
-cp /path/to/voip-key.pem secrets/
+cp /path/to/AuthKey_KEYID.p8 secrets/apns-key.p8
 
 # 3. Build and start the service
 docker-compose up -d push-proxy
@@ -26,9 +25,9 @@ docker-compose up -d push-proxy
 |----------|----------|---------|-------------|
 | `FIREBASE_PROJECT_ID` | Yes* | - | Firebase project ID for Android pushes |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | - | Path to Firebase service account JSON |
-| `APNS_CERT_PATH` | Yes† | - | Path to APNS VoIP certificate |
-| `APNS_KEY_PATH` | No | - | Path to APNS private key (if separate) |
-| `APNS_CERT_PASSWORD` | No | - | Password for encrypted certificate |
+| `APNS_KEY_PATH` | Yes† | - | Path to APNS auth key (.p8 file) |
+| `APNS_KEY_ID` | Yes† | - | APNS Key ID from Apple Developer Portal |
+| `APNS_TEAM_ID` | Yes† | - | Apple Team ID from Developer Portal |
 | `APNS_BUNDLE_ID` | Yes† | - | iOS app bundle identifier |
 | `APNS_USE_PRODUCTION` | No | `false` | Use production APNS servers |
 | `RUSTCHAT_PUSH_PORT` | No | `3000` | HTTP server port |
@@ -54,9 +53,10 @@ services:
       - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
       
-      # APNS (iOS VoIP)
-      - APNS_CERT_PATH=/secrets/voip-cert.pem
-      - APNS_KEY_PATH=/secrets/voip-key.pem
+      # APNS (iOS VoIP) - JWT-based authentication
+      - APNS_KEY_PATH=/secrets/apns-key.p8
+      - APNS_KEY_ID=${APNS_KEY_ID}
+      - APNS_TEAM_ID=${APNS_TEAM_ID}
       - APNS_BUNDLE_ID=${APNS_BUNDLE_ID}
       - APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
       
@@ -65,8 +65,7 @@ services:
       - RUST_LOG=push_proxy=info,tower_http=warn
     volumes:
       - ./secrets/firebase-key.json:/secrets/firebase-key.json:ro
-      - ./secrets/voip-cert.pem:/secrets/voip-cert.pem:ro
-      - ./secrets/voip-key.pem:/secrets/voip-key.pem:ro
+      - ./secrets/apns-key.p8:/secrets/apns-key.p8:ro
     networks:
       - rustchat-network
     healthcheck:
@@ -81,9 +80,9 @@ networks:
     external: true
 ```
 
-## Certificate Setup
+## Certificate/Key Setup
 
-### Firebase Service Account
+### Firebase Service Account (Android)
 
 1. Go to [Firebase Console](https://console.firebase.google.com/)
 2. Select your project
@@ -92,23 +91,17 @@ networks:
 5. Click "Generate new private key"
 6. Save the JSON file as `secrets/firebase-key.json`
 
-### APNS VoIP Certificate
+### APNS Auth Key (iOS VoIP)
 
 1. Go to [Apple Developer Portal](https://developer.apple.com/)
-2. Certificates, Identifiers & Profiles
-3. Create a new certificate → VoIP Services Certificate
-4. Select your App ID and continue
-5. Upload a Certificate Signing Request (CSR)
-6. Download the certificate (`.cer` file)
-7. Convert to PEM format:
-
-```bash
-# Convert .cer to .pem
-openssl x509 -in voip-cert.cer -inform DER -out voip-cert.pem -outform PEM
-
-# If you have a .p12 file
-openssl pkcs12 -in voip-cert.p12 -out voip-cert.pem -nodes -clcerts
-```
+2. Navigate to Keys → Add Key
+3. Create a new key:
+   - Name: "Push Notifications Key"
+   - Enable: "Apple Push Notifications service (APNs)"
+   - Click Continue → Register → Download
+4. Note the Key ID (shown next to the key name)
+5. Find your Team ID in Membership → Team ID
+6. Save the `.p8` file as `secrets/apns-key.p8`
 
 ## Production Deployment
 
@@ -171,12 +164,17 @@ services:
           cpus: '0.25'
           memory: 128M
     environment:
+      # Firebase (Android)
       - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
-      - APNS_CERT_PATH=/secrets/voip-cert.pem
-      - APNS_KEY_PATH=/secrets/voip-key.pem
+      
+      # APNS (iOS VoIP) - JWT-based
+      - APNS_KEY_PATH=/secrets/apns-key.p8
+      - APNS_KEY_ID=${APNS_KEY_ID}
+      - APNS_TEAM_ID=${APNS_TEAM_ID}
       - APNS_BUNDLE_ID=${APNS_BUNDLE_ID}
       - APNS_USE_PRODUCTION=true
+      
       - RUSTCHAT_PUSH_PORT=3000
       - RUST_LOG=push_proxy=warn
     volumes:
@@ -193,26 +191,6 @@ services:
 networks:
   rustchat:
     external: true
-```
-
-### 4. Monitoring
-
-Add health checks and monitoring:
-
-```yaml
-  prometheus:
-    image: prom/prometheus:latest
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3001:3000"
-    volumes:
-      - grafana-storage:/var/lib/grafana
 ```
 
 ## Troubleshooting
@@ -283,16 +261,17 @@ curl -X POST http://localhost:3000/send \
 |-------|-------|----------|
 | `FIREBASE_PROJECT_ID must be set` | Missing env var | Set FIREBASE_PROJECT_ID or disable FCM |
 | `Failed to get OAuth token` | Invalid service account key | Check firebase-key.json file |
-| `APNS not configured` | Missing APNS_CERT_PATH | Set APNS_CERT_PATH or disable APNS |
+| `APNS not configured` | Missing APNS_KEY_ID | Set APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID |
+| `JWT error` | Invalid APNS key file | Check .p8 file format and path |
 | `Token unregistered` | Device uninstalled app | Token should be removed from server |
 | `Invalid token` | Wrong token format | Check token format for platform |
 
 ## Security Best Practices
 
-1. **Certificate Storage:**
+1. **Key Storage:**
    ```bash
    chmod 600 secrets/*.json
-   chmod 600 secrets/*.pem
+   chmod 600 secrets/*.p8
    chown -R root:root secrets/
    ```
 
@@ -302,9 +281,9 @@ curl -X POST http://localhost:3000/send \
    - Place behind reverse proxy with SSL
 
 3. **Secret Rotation:**
-   - Rotate Firebase keys every 90 days
-   - Renew APNS certificates annually
-   - Monitor certificate expiration
+   - Firebase keys: Rotate every 90 days
+   - APNS Auth Keys: Can be revoked/replaced anytime
+   - Monitor key usage in Apple Developer Portal
 
 ## Scaling
 
@@ -326,8 +305,7 @@ Consider using a message queue (Redis/RabbitMQ) for push notification queuing in
 
 Backup these files:
 - `secrets/firebase-key.json`
-- `secrets/voip-cert.pem`
-- `secrets/voip-key.pem`
+- `secrets/apns-key.p8`
 - `.env` configuration
 
 Store backups in encrypted storage separate from the server.

@@ -166,16 +166,37 @@ async fn init_fcm_client() -> anyhow::Result<Option<FcmClient>> {
 
 /// Initialize APNS client if VoIP credentials are available
 async fn init_apns_client() -> anyhow::Result<Option<ApnsClient>> {
-    let cert_path = match std::env::var("APNS_CERT_PATH") {
+    let key_path = match std::env::var("APNS_KEY_PATH") {
         Ok(path) => std::path::PathBuf::from(path),
         Err(_) => {
-            info!("APNS_CERT_PATH not set, APNS support disabled");
+            info!("APNS_KEY_PATH not set, APNS support disabled");
             return Ok(None);
         }
     };
 
-    let bundle_id = std::env::var("APNS_BUNDLE_ID")
-        .expect("APNS_BUNDLE_ID must be set when using APNS");
+    let key_id = match std::env::var("APNS_KEY_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            info!("APNS_KEY_ID not set, APNS support disabled");
+            return Ok(None);
+        }
+    };
+
+    let team_id = match std::env::var("APNS_TEAM_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            info!("APNS_TEAM_ID not set, APNS support disabled");
+            return Ok(None);
+        }
+    };
+
+    let bundle_id = match std::env::var("APNS_BUNDLE_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            info!("APNS_BUNDLE_ID not set, APNS support disabled");
+            return Ok(None);
+        }
+    };
 
     let use_production = std::env::var("APNS_USE_PRODUCTION")
         .ok()
@@ -188,24 +209,19 @@ async fn init_apns_client() -> anyhow::Result<Option<ApnsClient>> {
         ApnsServer::Development
     };
 
-    let key_path = std::env::var("APNS_KEY_PATH")
-        .ok()
-        .map(std::path::PathBuf::from);
-
-    let cert_password = std::env::var("APNS_CERT_PASSWORD").ok();
-
     info!(
         bundle_id = %bundle_id,
+        key_id = %key_id,
         server = ?server,
         "Initializing APNS client for VoIP pushes"
     );
 
     let config = ApnsConfig {
-        cert_path,
         key_path,
-        cert_password,
-        server,
+        key_id,
+        team_id,
         bundle_id,
+        server,
     };
 
     let client = ApnsClient::new(config).await?;

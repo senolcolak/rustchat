@@ -146,10 +146,10 @@ services:
       # Firebase (Android)
       - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
-      # APNS (iOS VoIP)
-      - APNS_CERT_PATH=${APNS_CERT_PATH:-/secrets/voip-cert.pem}
-      - APNS_KEY_PATH=${APNS_KEY_PATH:-/secrets/voip-key.pem}
-      - APNS_CERT_PASSWORD=${APNS_CERT_PASSWORD:-}
+      # APNS (iOS VoIP) - JWT-based authentication
+      - APNS_KEY_PATH=/secrets/apns-key.p8
+      - APNS_KEY_ID=${APNS_KEY_ID:-}
+      - APNS_TEAM_ID=${APNS_TEAM_ID:-}
       - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-}
       - APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
       # General
@@ -158,9 +158,8 @@ services:
     volumes:
       # Firebase credentials
       - ${FIREBASE_KEY_PATH:-./secrets/firebase-key.json}:/secrets/firebase-key.json:ro
-      # APNS certificates (mount only if files exist)
-      - ${APNS_CERT_PATH:-./secrets/voip-cert.pem}:/secrets/voip-cert.pem:ro
-      - ${APNS_KEY_PATH:-./secrets/voip-key.pem}:/secrets/voip-key.pem:ro
+      # APNS Auth Key (JWT-based)
+      - ${APNS_KEY_PATH:-./secrets/apns-key.p8}:/secrets/apns-key.p8:ro
     expose:
       - "3000"
     healthcheck:
