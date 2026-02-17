@@ -504,6 +504,44 @@ export const useCallsStore = defineStore('calls', () => {
         }
     }
 
+    function shouldUseSimulcast(): boolean {
+        return callsConfig.value?.EnableSimulcast === true
+    }
+
+    function stripSimulcastFromSdp(sdp: string): string {
+        if (!sdp) return sdp
+
+        const lines = sdp.split(/\r\n|\n/)
+        const filtered = lines.filter((line) => {
+            const lower = line.toLowerCase()
+            if (lower.startsWith('a=simulcast:')) return false
+            if (lower.startsWith('a=rid:')) return false
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id')) return false
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id')) return false
+            return true
+        })
+
+        return `${filtered.join('\r\n')}\r\n`
+    }
+
+    function prepareOfferSdp(sdp: string): string {
+        if (shouldUseSimulcast()) {
+            return sdp
+        }
+
+        return stripSimulcastFromSdp(sdp)
+    }
+
+    async function createAndSendOffer(channelId: string, pc: RTCPeerConnection) {
+        const offer = await pc.createOffer()
+        const sdp = prepareOfferSdp(offer.sdp || '')
+        await pc.setLocalDescription({
+            type: 'offer',
+            sdp
+        })
+        return callsApi.sendOffer(channelId, sdp)
+    }
+
     // WebRTC
     async function initializeWebRTC(channelId: string, iceServers: RTCIceServer[]) {
         try {
@@ -552,11 +590,7 @@ export const useCallsStore = defineStore('calls', () => {
                 }
             }
 
-            // Create and send offer
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-
-            const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
+            const { data: answer } = await createAndSendOffer(channelId, pc)
 
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription({
@@ -699,10 +733,7 @@ export const useCallsStore = defineStore('calls', () => {
     }
 
     async function renegotiate(channelId: string, pc: RTCPeerConnection) {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-
-        const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
+        const { data: answer } = await createAndSendOffer(channelId, pc)
         await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'answer',
             sdp: answer.sdp
