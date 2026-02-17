@@ -754,6 +754,7 @@ pub async fn execute_command_internal(
                 file_ids: vec![],
                 props: Some(props),
                 root_post_id: None,
+                client_msg_id: None,
             };
 
             let _ = crate::services::posts::create_post(
@@ -942,6 +943,7 @@ pub async fn execute_command_internal(
                 file_ids: vec![],
                 props: Some(serde_json::json!({"from_command": "/me"})),
                 root_post_id: None,
+                client_msg_id: None,
             };
 
             let _ = crate::services::posts::create_post(

@@ -50,6 +50,7 @@ pub async fn execute_incoming_webhook(
         root_post_id: None,
         file_ids: vec![],
         props: Some(serde_json::Value::Object(props)),
+        client_msg_id: None,
     };
 
     posts::create_post(state, poster_id, hook.channel_id, input, None).await?;
