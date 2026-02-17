@@ -95,6 +95,8 @@ async fn update_my_status(
     if let Some(ref p) = payload.presence {
         builder.push(", presence = ");
         builder.push_bind(p);
+        builder.push(", presence_manual = ");
+        builder.push_bind(crate::api::websocket_core::status_is_manual(p));
     }
 
     if payload.text.is_some() || payload.emoji.is_some() {

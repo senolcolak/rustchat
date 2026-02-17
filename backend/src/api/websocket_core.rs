@@ -11,8 +11,7 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::auth::validate_token;
 use crate::realtime::{
-    ClientEnvelope, EventType, TypingCommandData, TypingEvent, WsBroadcast,
-    WsEnvelope,
+    ClientEnvelope, EventType, TypingCommandData, TypingEvent, WsBroadcast, WsEnvelope,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -161,12 +160,15 @@ pub async fn persist_presence_and_broadcast(
     let now = Utc::now();
 
     // Update user presence and last activity in database
-    let _ = sqlx::query("UPDATE users SET presence = $1, last_login_at = $2 WHERE id = $3")
-        .bind(status)
-        .bind(now)
-        .bind(user_id)
-        .execute(&state.db)
-        .await;
+    let _ = sqlx::query(
+        "UPDATE users SET presence = $1, presence_manual = $2, last_login_at = $3 WHERE id = $4",
+    )
+    .bind(status)
+    .bind(manual)
+    .bind(now)
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
 
     state.ws_hub.set_presence(user_id, status.to_string()).await;
 
@@ -183,13 +185,13 @@ pub async fn persist_presence_and_broadcast(
     );
     // No .with_broadcast(...) filter means it broadcasts to ALL connected users
     // which is necessary for everyone else to see this user's status change.
-    
+
     tracing::debug!(
         user_id = %user_id,
         status = %status,
         "Broadcasting status change event"
     );
-    
+
     state.ws_hub.broadcast(evt).await;
 }
 
@@ -315,7 +317,8 @@ pub async fn handle_client_envelope(
         }
         "presence" => {
             if let Some(status) = envelope.data.get("status").and_then(|v| v.as_str()) {
-                persist_presence_and_broadcast(state, user_id, status, true).await;
+                persist_presence_and_broadcast(state, user_id, status, status_is_manual(status))
+                    .await;
             }
         }
         "ping" => {
@@ -329,6 +332,10 @@ pub async fn handle_client_envelope(
             }
         }
     }
+}
+
+pub fn status_is_manual(status: &str) -> bool {
+    !status.eq_ignore_ascii_case("online")
 }
 
 async fn send_direct(state: &AppState, user_id: Uuid, envelope: WsEnvelope) {
