@@ -143,15 +143,28 @@ services:
     container_name: rustchat-push-proxy
     restart: always
     environment:
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/firebase/service-account.json
+      # Firebase (Android)
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
+      # APNS (iOS VoIP)
+      - APNS_CERT_PATH=${APNS_CERT_PATH:-/secrets/voip-cert.pem}
+      - APNS_KEY_PATH=${APNS_KEY_PATH:-/secrets/voip-key.pem}
+      - APNS_CERT_PASSWORD=${APNS_CERT_PASSWORD:-}
+      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-}
+      - APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
+      # General
+      - RUSTCHAT_PUSH_PORT=3000
       - RUST_LOG=push_proxy=info,tower_http=info
     volumes:
-      - ${FIREBASE_KEY_PATH:-./secrets/firebase-key.json}:/etc/firebase/service-account.json:ro
+      # Firebase credentials
+      - ${FIREBASE_KEY_PATH:-./secrets/firebase-key.json}:/secrets/firebase-key.json:ro
+      # APNS certificates (mount only if files exist)
+      - ${APNS_CERT_PATH:-./secrets/voip-cert.pem}:/secrets/voip-cert.pem:ro
+      - ${APNS_KEY_PATH:-./secrets/voip-key.pem}:/secrets/voip-key.pem:ro
     expose:
       - "3000"
     healthcheck:
-      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:3000/send 2>&1 | grep -q 'Method Not Allowed' || exit 0" ]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health 2>&1 | grep -q 'ok' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

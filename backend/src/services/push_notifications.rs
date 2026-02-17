@@ -37,6 +37,23 @@ pub struct PushNotification {
     pub badge: Option<i32>,
     /// Category for iOS
     pub category: Option<String>,
+    /// Notification type (message, call)
+    pub notification_type: NotificationType,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum NotificationType {
+    Message,
+    Call,
+}
+
+impl NotificationType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotificationType::Message => "message",
+            NotificationType::Call => "call",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -60,6 +77,11 @@ struct PushProxyPayload {
     token: String,
     title: String,
     body: String,
+    /// Platform: "android" or "ios"
+    platform: String,
+    /// Notification type: "message" or "call"
+    #[serde(rename = "type")]
+    notification_type: String,
     data: PushProxyData,
 }
 
@@ -86,6 +108,9 @@ struct PushProxyData {
     /// Server URL so the mobile app knows which server to navigate to
     #[serde(skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
+    /// Call UUID for VoIP pushes (required for iOS CallKit)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call_uuid: Option<String>,
 }
 
 /// Send push notification to a specific device
@@ -198,10 +223,19 @@ async fn send_via_push_proxy(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Generate call UUID for VoIP pushes (required for iOS CallKit)
+    let call_uuid = if notification_type == "call" || sub_type.as_deref() == Some("calls") {
+        Some(uuid::Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+
     let payload = PushProxyPayload {
         token: notification.device_token.clone(),
         title: notification.title.clone(),
         body: notification.body.clone(),
+        platform: notification.platform.clone(),
+        notification_type: notification.notification_type.as_str().to_string(),
         data: PushProxyData {
             channel_id,
             post_id,
@@ -212,6 +246,7 @@ async fn send_via_push_proxy(
             sender_name,
             is_crt_enabled,
             server_url,
+            call_uuid,
         },
     };
 
@@ -330,6 +365,13 @@ pub async fn send_push_to_user(
     let mut sent_count = 0;
 
     for device in &devices {
+        // Determine notification type from data payload
+        let notification_type = data
+            .get("sub_type")
+            .and_then(|v| v.as_str())
+            .map(|s| if s == "calls" { NotificationType::Call } else { NotificationType::Message })
+            .unwrap_or(NotificationType::Message);
+
         let notification = PushNotification {
             device_token: device.token.clone(),
             platform: device.platform.clone(),
@@ -340,6 +382,7 @@ pub async fn send_push_to_user(
             sound: Some("default".to_string()),
             badge: None,
             category: None,
+            notification_type,
         };
 
         match send_push_notification(state, notification).await {
@@ -611,8 +654,7 @@ async fn get_fcm_config(state: &AppState) -> Option<FcmConfig> {
 /// Build FCM message from notification
 fn build_fcm_message(notification: &PushNotification) -> FcmMessage {
     let is_high_priority = matches!(notification.priority, PushPriority::High);
-    let is_call_notification =
-        notification.data.get("sub_type").and_then(|v| v.as_str()) == Some("calls");
+    let is_call_notification = matches!(notification.notification_type, NotificationType::Call);
 
     let mut data_map = HashMap::new();
     if let serde_json::Value::Object(map) = &notification.data {
@@ -806,6 +848,7 @@ mod tests {
             sound: Some("default".to_string()),
             badge: Some(1),
             category: None,
+            notification_type: NotificationType::Message,
         };
 
         let fcm_message = build_fcm_message(&notification);

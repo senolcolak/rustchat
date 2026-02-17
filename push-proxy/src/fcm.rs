@@ -1,7 +1,12 @@
+//! Firebase Cloud Messaging (FCM) for Android pushes
+//!
+//! Handles sending push notifications to Android devices via FCM HTTP v1 API.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+/// Push notification payload from RustChat backend
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PushPayload {
     pub token: String,
@@ -10,10 +15,12 @@ pub struct PushPayload {
     pub data: PushData,
 }
 
+/// Data payload sent to mobile clients
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PushData {
     pub channel_id: String,
     pub post_id: String,
+    #[serde(rename = "type")]
     pub r#type: String, // "message", "clear", "session"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_type: Option<String>, // "calls" for call notifications
@@ -41,6 +48,7 @@ pub enum FcmError {
     Internal(String),
 }
 
+/// FCM HTTP v1 API client
 pub struct FcmClient {
     client: reqwest::Client,
     project_id: String,
@@ -50,6 +58,7 @@ pub struct FcmClient {
 }
 
 impl FcmClient {
+    /// Create a new FCM client
     pub async fn new(project_id: String, key_path: PathBuf) -> Result<Self, anyhow::Error> {
         let secret = yup_oauth2::read_service_account_key(key_path).await?;
         let auth = yup_oauth2::ServiceAccountAuthenticator::builder(secret)
@@ -63,8 +72,8 @@ impl FcmClient {
         })
     }
 
+    /// Send a push notification via FCM
     pub async fn send(&self, payload: PushPayload) -> Result<(), FcmError> {
-        // Use type-aware token call to resolve inference issues
         let token = self
             .authenticator
             .token(&["https://www.googleapis.com/auth/cloud-platform"])
@@ -95,14 +104,15 @@ impl FcmClient {
         Ok(())
     }
 
+    /// Build FCM message with proper Android and APNS configuration
     fn build_fcm_message(&self, payload: PushPayload) -> serde_json::Value {
         let is_call = payload.data.sub_type.as_deref() == Some("calls");
 
         // Android config — use the mobile app's existing notification channel IDs:
         // "channel_01" = High Importance (IMPORTANCE_HIGH, plays sound)
         // "channel_02" = Min Importance (IMPORTANCE_MIN, silent)
-        // NOTE: Previously this used "calls" as channel_id, but that channel does NOT
-        // exist in the mobile app, causing Android to fall back to a silent notification.
+        // For VoIP/call notifications, we use data-only messages on Android to allow
+        // the app to show a full-screen incoming call UI
         let android_config = if is_call {
             serde_json::json!({
                 "priority": "high",
@@ -111,7 +121,9 @@ impl FcmClient {
                     "channel_id": "channel_01",
                     "sound": "default",
                     "click_action": "TOP_STORY_ACTIVITY"
-                }
+                },
+                // Data-only notification for background call handling
+                "direct_boot_ok": true
             })
         } else {
             serde_json::json!({
@@ -123,7 +135,7 @@ impl FcmClient {
             })
         };
 
-        // Build APNS config for iOS
+        // Build APNS config for iOS (used as fallback when APNS client is not configured)
         let mut apns_headers = serde_json::Map::new();
         apns_headers.insert("apns-priority".to_string(), if is_call { 
             serde_json::json!("10") 
@@ -148,8 +160,27 @@ impl FcmClient {
             }
         });
 
-        serde_json::json!({
-            "message": {
+        // Build the message
+        // For call notifications on Android, we prioritize data payload
+        let message = if is_call {
+            serde_json::json!({
+                "token": payload.token,
+                "notification": {
+                    "title": payload.title,
+                    "body": payload.body
+                },
+                "data": {
+                    "type": "call",
+                    "channel_id": payload.data.channel_id,
+                    "post_id": payload.data.post_id,
+                    "sender_name": payload.data.sender_name.unwrap_or_default(),
+                    "server_url": payload.data.server_url.unwrap_or_default(),
+                },
+                "android": android_config,
+                "apns": apns_config
+            })
+        } else {
+            serde_json::json!({
                 "token": payload.token,
                 "notification": {
                     "title": payload.title,
@@ -158,7 +189,9 @@ impl FcmClient {
                 "data": payload.data,
                 "android": android_config,
                 "apns": apns_config
-            }
-        })
+            })
+        };
+
+        serde_json::json!({ "message": message })
     }
 }
