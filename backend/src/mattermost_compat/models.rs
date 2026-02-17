@@ -101,6 +101,8 @@ pub struct TeamMember {
     pub scheme_guest: bool,
     pub scheme_user: bool,
     pub scheme_admin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

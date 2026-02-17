@@ -530,6 +530,7 @@ async fn my_team_members(
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "team_admin",
+            presence: None,
         })
         .collect();
 
@@ -557,6 +558,7 @@ async fn get_team_members_for_user(
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "team_admin",
+            presence: None,
         })
         .collect();
 
