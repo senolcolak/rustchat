@@ -10,3 +10,4 @@
 - Implemented direction:
   - Persisted `presence_manual` and wired status endpoints/events so lifecycle transitions are explicit.
   - Kept disconnect/reconnect lifecycle as non-manual offline/online transitions to match requested mobile behavior.
+  - Added server-side disconnect grace (`server_config.site.mobile_presence_disconnect_grace_seconds`, default 300s) to avoid immediate offline flips when mobile websocket disconnects briefly in background.

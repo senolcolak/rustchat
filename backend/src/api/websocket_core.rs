@@ -6,6 +6,7 @@
 
 use axum::http::HeaderMap;
 use chrono::Utc;
+use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
 use crate::api::AppState;
@@ -53,6 +54,23 @@ pub async fn get_max_simultaneous_connections(state: &AppState) -> usize {
     match value.and_then(|val| val.parse::<i64>().ok()) {
         Some(max) if max > 0 => max as usize,
         _ => 5,
+    }
+}
+
+pub async fn get_presence_offline_grace_seconds(state: &AppState) -> u64 {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT site->>'mobile_presence_disconnect_grace_seconds' FROM server_config WHERE id = 'default'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    match value.and_then(|val| val.parse::<i64>().ok()) {
+        Some(seconds) if seconds >= 0 => seconds as u64,
+        // Default to 5 minutes so mobile background socket churn does not
+        // immediately force offline presence.
+        _ => 300,
     }
 }
 
@@ -148,7 +166,19 @@ pub async fn set_offline_if_last_connection(state: &AppState, user_id: Uuid) {
     if state.ws_hub.user_connection_count(user_id).await > 0 {
         return;
     }
-    persist_presence_and_broadcast(state, user_id, "offline", false).await;
+    let grace_seconds = get_presence_offline_grace_seconds(state).await;
+    if grace_seconds == 0 {
+        persist_presence_and_broadcast(state, user_id, "offline", false).await;
+        return;
+    }
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(grace_seconds)).await;
+        if state.ws_hub.user_connection_count(user_id).await == 0 {
+            persist_presence_and_broadcast(&state, user_id, "offline", false).await;
+        }
+    });
 }
 
 pub async fn persist_presence_and_broadcast(

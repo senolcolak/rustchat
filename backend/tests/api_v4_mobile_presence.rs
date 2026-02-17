@@ -16,6 +16,7 @@ type WsClient =
 #[tokio::test]
 async fn mobile_presence_lifecycle_resets_manual_status_on_disconnect() {
     let app = spawn_app().await;
+    configure_presence_grace_seconds(&app, 1).await;
 
     let org_id = insert_org(&app, "Presence Lifecycle Org").await;
     let (token, user_id) =
@@ -60,6 +61,77 @@ async fn mobile_presence_lifecycle_resets_manual_status_on_disconnect() {
     assert_eq!(online_status["manual"], false);
 
     let _ = ws_reconnected.close(None).await;
+}
+
+#[tokio::test]
+async fn mobile_background_disconnect_does_not_flip_offline_within_grace_window() {
+    let app = spawn_app().await;
+    configure_presence_grace_seconds(&app, 20).await;
+
+    let org_id = insert_org(&app, "Presence Grace Org").await;
+    let (token, user_id) = register_and_login(
+        &app,
+        org_id,
+        "presence_grace_user",
+        "presence_grace_user@example.com",
+    )
+    .await;
+
+    let mut ws = connect_ws_v4(&app.address, &token).await;
+    let _ = wait_for_event(&mut ws, "hello", Duration::from_secs(5)).await;
+
+    let set_dnd = app
+        .api_client
+        .put(format!("{}/api/v4/users/me/status", app.address))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "user_id": encode_mm_id(user_id),
+            "status": "dnd"
+        }))
+        .send()
+        .await
+        .expect("status update should succeed");
+    assert_eq!(set_dnd.status(), StatusCode::OK);
+
+    ws.close(None)
+        .await
+        .expect("websocket close frame should be sent");
+    drop(ws);
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let status_during_grace = poll_my_status(&app, &token, Duration::from_secs(3)).await;
+    assert_eq!(status_during_grace["status"], "dnd");
+    assert_eq!(status_during_grace["manual"], true);
+
+    let mut ws_reconnected = connect_ws_v4(&app.address, &token).await;
+    let _ = wait_for_event(&mut ws_reconnected, "hello", Duration::from_secs(5)).await;
+
+    let online_status =
+        wait_for_status(&app, &token, "online", false, Duration::from_secs(8)).await;
+    assert_eq!(online_status["status"], "online");
+    assert_eq!(online_status["manual"], false);
+
+    let _ = ws_reconnected.close(None).await;
+}
+
+async fn configure_presence_grace_seconds(app: &common::TestApp, seconds: i32) {
+    sqlx::query(
+        r#"
+        UPDATE server_config
+        SET site = jsonb_set(
+            COALESCE(site, '{}'::jsonb),
+            '{mobile_presence_disconnect_grace_seconds}',
+            to_jsonb($1::int),
+            true
+        )
+        WHERE id = 'default'
+        "#,
+    )
+    .bind(seconds)
+    .execute(&app.db_pool)
+    .await
+    .expect("failed to update presence grace seconds");
 }
 
 async fn poll_my_status(app: &common::TestApp, token: &str, within: Duration) -> serde_json::Value {

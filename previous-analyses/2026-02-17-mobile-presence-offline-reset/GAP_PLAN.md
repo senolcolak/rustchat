@@ -26,3 +26,18 @@
   - `cargo test --test api_v4_mobile_presence -- --nocapture`
   - Result: test logic compiles, but execution blocked in this environment due missing local Postgres (`Connection refused` from `tests/common/mod.rs`).
 - Status: Implemented with environment-blocked execution.
+
+## Gap 4: Background websocket churn flips users offline too quickly
+- Required behavior: short mobile background intervals should not immediately force offline presence.
+- Upstream evidence:
+  - Mobile app schedules websocket close after 15 seconds in background (`../mattermost-mobile/app/managers/websocket_manager.ts:23`, `:281-287`).
+  - Server marks users offline when websocket is gone (`../mattermost/server/channels/app/platform/web_hub.go:629`).
+- Rustchat mitigation:
+  - Added configurable disconnect grace lookup in `backend/src/api/websocket_core.rs` (`get_presence_offline_grace_seconds`).
+  - Updated `set_offline_if_last_connection` to delay offline write and re-check active connection count before applying offline.
+  - Config key: `server_config.site.mobile_presence_disconnect_grace_seconds` (default `300`, `0` keeps immediate offline behavior).
+- Verification run:
+  - `cargo test --test api_v4_mobile_presence --no-run` -> passed.
+  - `cargo test --test api_v4_mobile_presence -- --nocapture` -> blocked by missing local Postgres in this environment.
+- Remaining risk:
+  - This does not keep a real websocket alive in background; it only prevents immediate offline status flips during short background intervals.
