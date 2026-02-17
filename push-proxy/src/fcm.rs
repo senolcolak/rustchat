@@ -34,6 +34,9 @@ pub struct PushData {
     pub is_crt_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    /// Call UUID for VoIP pushes (iOS CallKit)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_uuid: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,11 +77,15 @@ impl FcmClient {
 
     /// Send a push notification via FCM
     pub async fn send(&self, payload: PushPayload) -> Result<(), FcmError> {
+        info!(token_prefix = %&payload.token[..20.min(payload.token.len())], "Getting OAuth token for FCM");
+        
         let token = self
             .authenticator
             .token(&["https://www.googleapis.com/auth/cloud-platform"])
             .await
             .map_err(|e| FcmError::Internal(format!("Failed to get OAuth token: {}", e)))?;
+        
+        info!("OAuth token obtained, building FCM message");
 
         let url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
@@ -86,6 +93,8 @@ impl FcmClient {
         );
 
         let fcm_message = self.build_fcm_message(payload);
+        
+        info!("FCM message built, sending to FCM API");
 
         let response = self.client.post(&url)
             .bearer_auth(token.token().unwrap_or_default())
@@ -93,10 +102,12 @@ impl FcmClient {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        info!(status = %status, "Received FCM API response");
+        
+        if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            warn!("FCM API error: {} - {}", status, body);
+            warn!(status = %status, body = %body, "FCM API error");
             return Err(FcmError::Api(format!("Status {}: {}", status, body)));
         }
 
@@ -107,6 +118,7 @@ impl FcmClient {
     /// Build FCM message with proper Android and APNS configuration
     fn build_fcm_message(&self, payload: PushPayload) -> serde_json::Value {
         let is_call = payload.data.sub_type.as_deref() == Some("calls");
+        info!(is_call = is_call, sub_type = ?payload.data.sub_type, "Building FCM message");
 
         // Android config — use the mobile app's existing notification channel IDs:
         // "channel_01" = High Importance (IMPORTANCE_HIGH, plays sound)
@@ -117,12 +129,8 @@ impl FcmClient {
             serde_json::json!({
                 "priority": "high",
                 "ttl": "0s",
-                "notification": {
-                    "channel_id": "channel_01",
-                    "sound": "default",
-                    "click_action": "TOP_STORY_ACTIVITY"
-                },
-                // Data-only notification for background call handling
+                // NO "notification" field here either - for data-only messages
+                // the app will handle displaying the UI
                 "direct_boot_ok": true
             })
         } else {
@@ -175,6 +183,7 @@ impl FcmClient {
                     "post_id": payload.data.post_id,
                     "sender_name": payload.data.sender_name.unwrap_or_default(),
                     "server_url": payload.data.server_url.unwrap_or_default(),
+                    "call_uuid": payload.data.call_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     // Include title/body in data for the app to use
                     "title": payload.title,
                     "body": payload.body,

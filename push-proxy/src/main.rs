@@ -245,20 +245,30 @@ async fn send_notification(
     let platform = payload.platform.to_lowercase();
     let is_call = payload.data.sub_type.as_deref() == Some("calls") 
         || payload.notification_type == "call";
+    
+    info!(
+        platform = %platform,
+        is_call = is_call,
+        token_prefix = %&payload.token[..20.min(payload.token.len())],
+        title = %payload.title,
+        "Received push notification request"
+    );
 
     match platform.as_str() {
         "ios" => {
-            // iOS: Use APNS for VoIP pushes
+            info!("Routing to iOS handler");
             if is_call {
                 send_voip_push(&state, &payload).await
             } else {
-                // For regular iOS notifications, we could use FCM or APNS
-                // Currently falling back to FCM if available
                 send_fcm_push(&state, &payload).await
             }
         }
-        "android" | _ => {
-            // Android: Use FCM
+        "android" => {
+            info!("Routing to Android/FCM handler");
+            send_fcm_push(&state, &payload).await
+        }
+        _ => {
+            warn!(platform = %platform, "Unknown platform, defaulting to FCM");
             send_fcm_push(&state, &payload).await
         }
     }
@@ -332,6 +342,8 @@ async fn send_fcm_push(
     state: &AppState,
     payload: &PushRequest,
 ) -> Result<StatusCode, (StatusCode, Json<PushResponse>)> {
+    info!("Starting FCM push send");
+    
     let fcm_client = match &state.fcm_client {
         Some(client) => client,
         None => {
@@ -345,6 +357,8 @@ async fn send_fcm_push(
             ));
         }
     };
+    
+    info!("FCM client is available, building payload");
 
     // Convert to FCM payload format
     let fcm_payload = fcm::PushPayload {
@@ -361,8 +375,11 @@ async fn send_fcm_push(
             sender_name: payload.data.sender_name.clone(),
             is_crt_enabled: payload.data.is_crt_enabled,
             server_url: payload.data.server_url.clone(),
+            call_uuid: payload.data.call_uuid.clone(),
         },
     };
+    
+    info!("FCM payload built, sending to FCM client");
 
     match fcm_client.send(fcm_payload).await {
         Ok(_) => {
