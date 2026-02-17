@@ -94,7 +94,7 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
     // Add connection to hub
     let (connection_id, mut rx) = state.ws_hub.add_connection(user_id, username.clone()).await;
 
-    websocket_core::initialize_connection_state(&state, user_id, false).await;
+    websocket_core::initialize_connection_state(&state, user_id, true).await;
 
     // Send hello message with connection_id for reliable WebSocket support
     let connection_uuid = uuid::Uuid::new_v4();

@@ -532,7 +532,53 @@ export const useCallsStore = defineStore('calls', () => {
         return stripSimulcastFromSdp(sdp)
     }
 
+    function applyVideoCodecPreferences(pc: RTCPeerConnection) {
+        // Keep video negotiation on broadly supported codecs for mobile interoperability.
+        if (shouldUseSimulcast()) {
+            return
+        }
+
+        const capabilities = RTCRtpSender.getCapabilities?.('video')
+        const codecs = capabilities?.codecs || []
+        if (codecs.length === 0) {
+            return
+        }
+
+        const primary = codecs.filter((codec) => {
+            const mime = codec.mimeType.toLowerCase()
+            return mime === 'video/vp8' || mime === 'video/h264'
+        })
+        if (primary.length === 0) {
+            return
+        }
+
+        const repair = codecs.filter((codec) => {
+            const mime = codec.mimeType.toLowerCase()
+            return mime === 'video/rtx' || mime === 'video/red' || mime === 'video/ulpfec'
+        })
+        const preferred = [...primary, ...repair]
+
+        for (const transceiver of pc.getTransceivers()) {
+            const senderKind = transceiver.sender?.track?.kind
+            const receiverKind = transceiver.receiver?.track?.kind
+            if (senderKind !== 'video' && receiverKind !== 'video') {
+                continue
+            }
+
+            if (typeof transceiver.setCodecPreferences !== 'function') {
+                continue
+            }
+
+            try {
+                transceiver.setCodecPreferences(preferred)
+            } catch (error) {
+                console.debug('Failed to set codec preferences on transceiver', error)
+            }
+        }
+    }
+
     async function createAndSendOffer(channelId: string, pc: RTCPeerConnection) {
+        applyVideoCodecPreferences(pc)
         const offer = await pc.createOffer()
         const sdp = prepareOfferSdp(offer.sdp || '')
         await pc.setLocalDescription({
