@@ -2,10 +2,12 @@ import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useMessageStore, postToMessage } from '../stores/messages'
 import { usePresenceStore } from '../stores/presence'
+import type { Presence } from '../stores/presence'
 import { useUnreadStore } from '../stores/unreads'
 import { useChannelStore } from '../stores/channels'
 import { useToast } from './useToast'
 import { postsApi, type Post } from '../api/posts'
+import type { Channel } from '../api/channels'
 import { normalizeEntityId, normalizeIdsDeep } from '../utils/idCompat'
 
 // Server -> Client
@@ -174,6 +176,54 @@ function normalizeWsReactionPayload(data: any): Record<string, any> | null {
     }
 }
 
+function normalizeWsChannelType(value: unknown): Channel['channel_type'] {
+    const raw = String(value || '').toLowerCase()
+    if (raw === 'o' || raw === 'public') return 'public'
+    if (raw === 'p' || raw === 'private') return 'private'
+    if (raw === 'd' || raw === 'direct') return 'direct'
+    if (raw === 'g' || raw === 'group') return 'group'
+    return 'public'
+}
+
+function normalizeWsChannelPayload(data: any): Channel | null {
+    if (!data || typeof data !== 'object') {
+        return null
+    }
+
+    const id = normalizeEntityId(data.id) ?? data.id
+    const teamId = normalizeEntityId(data.team_id) ?? data.team_id
+    if (typeof id !== 'string' || !id || typeof teamId !== 'string' || !teamId) {
+        return null
+    }
+
+    const displayName = typeof data.display_name === 'string' && data.display_name
+        ? data.display_name
+        : (typeof data.name === 'string' ? data.name : '')
+    const createdAtRaw = data.created_at ?? data.create_at
+
+    return {
+        id,
+        team_id: teamId,
+        name: typeof data.name === 'string' ? data.name : '',
+        display_name: displayName,
+        channel_type: normalizeWsChannelType(data.channel_type ?? data.type),
+        header: typeof data.header === 'string' ? data.header : '',
+        purpose: typeof data.purpose === 'string' ? data.purpose : '',
+        created_at: normalizeWsTimestamp(createdAtRaw, new Date().toISOString()),
+        creator_id: normalizeEntityId(data.creator_id) ?? data.creator_id ?? '',
+        unreadCount: typeof data.unreadCount === 'number' ? data.unreadCount : 0,
+        mentionCount: typeof data.mentionCount === 'number' ? data.mentionCount : 0,
+    }
+}
+
+function normalizeWsPresence(value: unknown): Presence {
+    const raw = String(value || '').toLowerCase()
+    if (raw === 'online' || raw === 'away' || raw === 'dnd' || raw === 'offline') {
+        return raw
+    }
+    return 'offline'
+}
+
 export function useWebSocket() {
     const authStore = useAuthStore()
     const messageStore = useMessageStore()
@@ -181,6 +231,45 @@ export function useWebSocket() {
     const unreadStore = useUnreadStore()
     const channelStore = useChannelStore()
     const toast = useToast()
+
+    function applyInitialLoadSnapshot(data: any) {
+        if (!data || typeof data !== 'object') {
+            return
+        }
+
+        if (Array.isArray(data.channels)) {
+            data.channels.forEach((rawChannel: any) => {
+                const channel = normalizeWsChannelPayload(rawChannel)
+                if (channel) {
+                    channelStore.addChannel(channel)
+                }
+            })
+        }
+
+        if (Array.isArray(data.channel_unreads)) {
+            data.channel_unreads.forEach((rawUnread: any) => {
+                const channelId = normalizeEntityId(rawUnread.channel_id) ?? rawUnread.channel_id
+                if (typeof channelId !== 'string' || !channelId) {
+                    return
+                }
+
+                const unreadCount = Number(rawUnread.msg_count ?? rawUnread.unread_count ?? 0)
+                const mentionCount = Number(rawUnread.mention_count ?? 0)
+                unreadStore.channelUnreads[channelId] = Number.isFinite(unreadCount) ? unreadCount : 0
+                unreadStore.channelMentions[channelId] = Number.isFinite(mentionCount) ? mentionCount : 0
+            })
+        }
+
+        if (Array.isArray(data.statuses)) {
+            data.statuses.forEach((rawStatus: any) => {
+                const userId = normalizeEntityId(rawStatus.user_id) ?? rawStatus.user_id
+                const status = normalizeWsPresence(rawStatus.status)
+                if (typeof userId === 'string' && userId) {
+                    presenceStore.updatePresenceFromEvent(userId, status)
+                }
+            })
+        }
+    }
 
 
     function connect() {
@@ -202,6 +291,7 @@ export function useWebSocket() {
             ws.value = socket
 
             socket.onopen = () => {
+                const openedAfterReconnect = reconnectAttempts.value > 0
                 console.log('WebSocket connected')
                 connected.value = true
                 reconnectAttempts.value = 0
@@ -222,6 +312,11 @@ export function useWebSocket() {
                     // For now, simpler to just refetch messages if connection was lost for a while
                     // or rely on 'after' cursor fetch.
                     messageStore.fetchMessages(channelStore.currentChannelId)
+                }
+
+                if (openedAfterReconnect) {
+                    // Non-reliable WS clients must explicitly request a reconnect snapshot.
+                    sendAction('reconnect', {})
                 }
             }
 
@@ -270,6 +365,10 @@ export function useWebSocket() {
         switch (envelope.event) {
             case 'hello':
                 console.log('WebSocket hello received', envelope.data)
+                break
+
+            case 'initial_load':
+                applyInitialLoadSnapshot(envelope.data)
                 break
 
             case 'posted':
@@ -396,7 +495,10 @@ export function useWebSocket() {
 
             case 'channel_created': {
                 if (envelope.data) {
-                    channelStore.addChannel(envelope.data)
+                    const channel = normalizeWsChannelPayload(envelope.data)
+                    if (channel) {
+                        channelStore.addChannel(channel)
+                    }
                 }
                 break
             }
