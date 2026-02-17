@@ -4,6 +4,8 @@ import { postsApi, type Post } from '../api/posts'
 import { useChannelStore } from './channels'
 import { useUnreadStore } from './unreads'
 import { useAuthStore } from './auth'
+import { useTeamStore } from './teams'
+import { normalizeEntityId } from '../utils/idCompat'
 
 export interface Message {
     id: string
@@ -44,6 +46,59 @@ function toOptionalIsoTimestamp(value: unknown): string | undefined {
     return toIsoTimestamp(value)
 }
 
+function comparableId(value: unknown): string | undefined {
+    if (typeof value !== 'string' || value.length === 0) {
+        return undefined
+    }
+    return normalizeEntityId(value) ?? value
+}
+
+function idsMatch(left: unknown, right: unknown): boolean {
+    const lhs = comparableId(left)
+    const rhs = comparableId(right)
+    return !!lhs && !!rhs && lhs === rhs
+}
+
+function resolveAuthorDetails(rawPost: Post & { username?: string; avatar_url?: string; email?: string }): {
+    username: string
+    avatarUrl?: string
+    email?: string
+} {
+    const usernameFromPost = typeof rawPost.username === 'string' ? rawPost.username.trim() : ''
+    if (usernameFromPost) {
+        return {
+            username: usernameFromPost,
+            avatarUrl: rawPost.avatar_url,
+            email: rawPost.email,
+        }
+    }
+
+    const authStore = useAuthStore()
+    if (idsMatch(rawPost.user_id, authStore.user?.id)) {
+        return {
+            username: authStore.user?.display_name || authStore.user?.username || 'Unknown',
+            avatarUrl: rawPost.avatar_url || authStore.user?.avatar_url,
+            email: rawPost.email || authStore.user?.email,
+        }
+    }
+
+    const teamStore = useTeamStore()
+    const teamMember = teamStore.members.find((member) => idsMatch(member.user_id, rawPost.user_id))
+    if (teamMember) {
+        return {
+            username: teamMember.display_name || teamMember.username || 'Unknown',
+            avatarUrl: rawPost.avatar_url || teamMember.avatar_url,
+            email: rawPost.email,
+        }
+    }
+
+    return {
+        username: 'Unknown',
+        avatarUrl: rawPost.avatar_url,
+        email: rawPost.email,
+    }
+}
+
 export function postToMessage(post: Post): Message {
     const rawPost = post as Post & {
         root_id?: string
@@ -53,14 +108,15 @@ export function postToMessage(post: Post): Message {
         last_reply_at?: string | number | null
     }
     const rootId = (rawPost.root_post_id ?? rawPost.root_id) || undefined
+    const author = resolveAuthorDetails(rawPost)
 
     return {
         id: rawPost.id,
         channelId: rawPost.channel_id,
         userId: rawPost.user_id,
-        username: rawPost.username || 'Unknown',
-        avatarUrl: rawPost.avatar_url,
-        email: rawPost.email,
+        username: author.username,
+        avatarUrl: author.avatarUrl,
+        email: author.email,
         content: rawPost.message,
         timestamp: toIsoTimestamp(rawPost.created_at ?? rawPost.create_at),
         reactions: rawPost.reactions?.map((r: any) => ({
