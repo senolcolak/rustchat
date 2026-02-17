@@ -324,6 +324,15 @@ fn legacy_config(site: &SiteConfig, auth: &AuthConfig, email: &EmailConfig, diag
     insert(&mut map, "WebsocketSecurePort", "443");
     insert(&mut map, "WebsocketURL", "");
     insert(&mut map, "MaxReactionsPerPost", "50");
+    // Typing indicators (used by Mattermost mobile/web clients).
+    // Mobile defaults to `false` when missing, which disables typing emits.
+    insert(&mut map, "EnableUserTypingMessages", "true");
+    // Activity-based typing emits every 2s to avoid per-keystroke websocket traffic.
+    insert(
+        &mut map,
+        "TimeBetweenUserTypingUpdatesMilliseconds",
+        "2000",
+    );
     insert(&mut map, "MaxNotificationsPerChannel", "1000");
 
     // Add calls-related settings for mobile app

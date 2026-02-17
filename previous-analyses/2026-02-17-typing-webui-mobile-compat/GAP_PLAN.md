@@ -37,15 +37,24 @@
 - Verification test: `npm run build` in `/Users/scolak/Projects/rustchat/frontend` (pass).
 - Status: Done.
 
+- Rustchat target path: `/Users/scolak/Projects/rustchat/backend/src/api/v4/config_client.rs`
+- Required behavior: Mattermost mobile must receive typing-related config flags from `/api/v4/config/client?format=old`.
+- Current gap: `EnableUserTypingMessages` and `TimeBetweenUserTypingUpdatesMilliseconds` were missing, causing mobile default `EnableUserTypingMessages=false` and no typing sends.
+- Planned change: Add `EnableUserTypingMessages=true` and `TimeBetweenUserTypingUpdatesMilliseconds=2000` in legacy config payload.
+- Verification test: `cargo check --lib` in `/Users/scolak/Projects/rustchat/backend` (pass).
+- Status: Done.
+
 ## Completed compatibility checks
 
 - Request action compatibility (`user_typing`): verified and aligned for WebUI sender.
 - Event name compatibility (`typing`, `stop_typing`): fixed.
 - Payload compatibility (`data.user_id`, `data.parent_id`, `broadcast.channel_id`): fixed and verified in code.
 - 26-char ID compatibility for websocket typing command IDs: fixed for envelope command path.
+- Mobile config compatibility for typing feature flags: fixed in legacy client config endpoint.
 
 ## Remaining risks
 
 - Full backend `cargo test` currently blocked by unrelated pre-existing test compile error in `/Users/scolak/Projects/rustchat/backend/src/mattermost_compat/mappers.rs` (missing `notify_props` field in a test initializer).
-- End-to-end runtime validation (WebUI <-> mobile typing both directions) still required after deploy/restart.
+- Existing mobile sessions may cache old config; a reconnect/relogin may be required for clients to pick up new typing flags.
+- End-to-end runtime validation (mobile <-> mobile and mobile <-> web typing) still required after deploy/restart.
 
