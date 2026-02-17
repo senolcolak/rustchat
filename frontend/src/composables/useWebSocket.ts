@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { useMessageStore } from '../stores/messages'
+import { useMessageStore, postToMessage } from '../stores/messages'
 import { usePresenceStore } from '../stores/presence'
 import { useUnreadStore } from '../stores/unreads'
 import { useChannelStore } from '../stores/channels'
@@ -402,11 +402,13 @@ export function useWebSocket() {
                 channel_id: channelId,
                 message: content,
                 root_post_id: rootId,
-                file_ids: fileIds
+                file_ids: fileIds,
+                client_msg_id: clientMsgId
             })
 
-            // Update optimistic message with real ID and attributes from server
-            messageStore.updateOptimisticMessage(clientMsgId, normalizeWsPost({ post }) as any)
+            // Convert server Post to frontend Message using store helper
+            const finalMsg = postToMessage(post)
+            messageStore.updateOptimisticMessage(clientMsgId, finalMsg)
         } catch (error) {
             console.error('Failed to send message via REST:', error)
             // Ideally we'd have a store method to mark as failed

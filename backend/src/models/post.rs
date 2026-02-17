@@ -52,6 +52,8 @@ pub struct CreatePost {
     pub props: Option<serde_json::Value>,
     #[serde(default)]
     pub file_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
 }
 
 /// DTO for updating a post

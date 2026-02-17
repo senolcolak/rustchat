@@ -44,7 +44,7 @@ function toOptionalIsoTimestamp(value: unknown): string | undefined {
     return toIsoTimestamp(value)
 }
 
-function postToMessage(post: Post): Message {
+export function postToMessage(post: Post): Message {
     const rawPost = post as Post & {
         root_id?: string
         create_at?: string | number
@@ -188,14 +188,29 @@ export const useMessageStore = defineStore('messages', () => {
     }
 
     function updateOptimisticMessage(clientMsgId: string, serverMsg: Message) {
-        const dest = serverMsg.rootId ? repliesByThread.value[serverMsg.rootId] : messagesByChannel.value[serverMsg.channelId]
-        if (!dest) return
+        const channelId = serverMsg.channelId
+        const rootId = serverMsg.rootId
 
-        const index = dest.findIndex(m => m.clientMsgId === clientMsgId)
-        if (index !== -1) {
-            dest[index] = serverMsg
+        if (rootId) {
+            const threadReplies = repliesByThread.value[rootId]
+            if (threadReplies) {
+                const index = threadReplies.findIndex(m => m.clientMsgId === clientMsgId || m.id === clientMsgId)
+                if (index !== -1) {
+                    threadReplies[index] = serverMsg
+                } else {
+                    threadReplies.push(serverMsg)
+                }
+            }
         } else {
-            dest.push(serverMsg)
+            const channelMessages = messagesByChannel.value[channelId]
+            if (channelMessages) {
+                const index = channelMessages.findIndex(m => m.clientMsgId === clientMsgId || m.id === clientMsgId)
+                if (index !== -1) {
+                    channelMessages[index] = serverMsg
+                } else {
+                    channelMessages.push(serverMsg)
+                }
+            }
         }
     }
 
