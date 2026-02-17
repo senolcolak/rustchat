@@ -511,15 +511,38 @@ export const useCallsStore = defineStore('calls', () => {
     function stripSimulcastFromSdp(sdp: string): string {
         if (!sdp) return sdp
 
-        const lines = sdp.split(/\r\n|\n/)
+        const lines = sdp
+            .split(/\r\n|\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+
+        let removedAny = false
         const filtered = lines.filter((line) => {
             const lower = line.toLowerCase()
-            if (lower.startsWith('a=simulcast:')) return false
-            if (lower.startsWith('a=rid:')) return false
-            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id')) return false
-            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id')) return false
+            if (lower.startsWith('a=simulcast:')) {
+                removedAny = true
+                return false
+            }
+            if (lower.startsWith('a=rid:')) {
+                removedAny = true
+                return false
+            }
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id')) {
+                removedAny = true
+                return false
+            }
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id')) {
+                removedAny = true
+                return false
+            }
             return true
         })
+
+        // Preserve browser-generated SDP when nothing was removed to avoid
+        // unnecessary rewrites that can break strict parsers.
+        if (!removedAny) {
+            return sdp
+        }
 
         return `${filtered.join('\r\n')}\r\n`
     }
@@ -580,12 +603,27 @@ export const useCallsStore = defineStore('calls', () => {
     async function createAndSendOffer(channelId: string, pc: RTCPeerConnection) {
         applyVideoCodecPreferences(pc)
         const offer = await pc.createOffer()
-        const sdp = prepareOfferSdp(offer.sdp || '')
-        await pc.setLocalDescription({
-            type: 'offer',
-            sdp
-        })
-        return callsApi.sendOffer(channelId, sdp)
+        const rawSdp = offer.sdp || ''
+        const preparedSdp = prepareOfferSdp(rawSdp)
+
+        let selectedSdp = preparedSdp
+        try {
+            await pc.setLocalDescription({
+                type: 'offer',
+                sdp: preparedSdp
+            })
+        } catch (error) {
+            // Brave can reject aggressively munged SDP. Fall back to the
+            // browser-generated offer so call setup still succeeds.
+            console.warn('Prepared SDP rejected by browser, retrying with original SDP', error)
+            selectedSdp = rawSdp
+            await pc.setLocalDescription({
+                type: 'offer',
+                sdp: rawSdp
+            })
+        }
+
+        return callsApi.sendOffer(channelId, selectedSdp)
     }
 
     // WebRTC
