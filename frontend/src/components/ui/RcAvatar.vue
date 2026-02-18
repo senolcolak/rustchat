@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { usePresenceStore } from '../../features/presence';
+import { useTeamStore } from '../../stores/teams';
 import type { PresenceStatus } from '../../core/entities/User';
 
 interface Props {
@@ -18,14 +19,21 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const presenceStore = usePresenceStore();
+const teamStore = useTeamStore();
 
 const userPresence = computed(() => {
   if (!props.userId) return null;
   return presenceStore.getUserPresence(props.userId).value;
 });
 
+const fallbackTeamPresence = computed<PresenceStatus | null>(() => {
+  if (!props.userId) return null;
+  const member = teamStore.members.find((m) => m.user_id === props.userId);
+  return (member?.presence?.toLowerCase() as PresenceStatus) || null;
+});
+
 const currentPresence = computed<PresenceStatus>(() => {
-  return (userPresence.value?.presence?.toLowerCase() as PresenceStatus) || 'offline';
+  return (userPresence.value?.presence?.toLowerCase() as PresenceStatus) || fallbackTeamPresence.value || 'offline';
 });
 
 const initials = computed(() => {

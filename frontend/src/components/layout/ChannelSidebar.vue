@@ -267,7 +267,7 @@ async function handleLeaveTeam() {
                 <div v-else-if="channel.type === 'dm'" class="relative flex items-center justify-center w-3.5 h-3.5">
                     <div 
                         class="w-2.5 h-2.5 rounded-full border border-border-2"
-                        :class="{ 'bg-green-500': channel.status === 'online', 'bg-transparent border-2 border-border-2': channel.status === 'offline', 'bg-yellow-500': channel.status === 'away' }"
+                        :class="{ 'bg-green-500': channel.status === 'online', 'bg-transparent border-2 border-border-2': channel.status === 'offline', 'bg-yellow-500': channel.status === 'away', 'bg-red-500': channel.status === 'dnd' }"
                     ></div>
                 </div>
                 <MessageCircle v-else class="w-4 h-4" />
@@ -283,7 +283,7 @@ async function handleLeaveTeam() {
             <div v-if="channel.type === 'dm'" class="ml-2 shrink-0">
                  <div 
                     class="w-2 h-2 rounded-full"
-                    :class="{ 'bg-green-500': channel.status === 'online', 'border border-border-2': channel.status === 'offline', 'bg-yellow-500': channel.status === 'away' }"
+                    :class="{ 'bg-green-500': channel.status === 'online', 'border border-border-2': channel.status === 'offline', 'bg-yellow-500': channel.status === 'away', 'bg-red-500': channel.status === 'dnd' }"
                 ></div>
             </div>
 
