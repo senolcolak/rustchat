@@ -433,6 +433,27 @@ async fn calls_mobile_channel_state_and_end_route_are_compatible() {
     let end_body: serde_json::Value = end_ok.json().await.expect("end JSON");
     assert_eq!(end_body["status"], "OK");
 
+    let ended_thread = app
+        .api_client
+        .get(format!("{}/api/v4/posts/{}/thread", app.address, thread_id))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .send()
+        .await
+        .expect("get ended call thread request failed");
+    assert_eq!(ended_thread.status(), StatusCode::OK);
+    let ended_thread_body: serde_json::Value =
+        ended_thread.json().await.expect("ended thread JSON");
+    let ended_post = ended_thread_body["posts"]
+        .get(&thread_id)
+        .expect("thread root post should exist after call end");
+    let ended_at = ended_post["props"]["end_at"]
+        .as_i64()
+        .expect("call thread post should contain numeric end_at");
+    assert!(
+        ended_at > 0,
+        "call thread post end_at should be set once the call ends"
+    );
+
     let idle_state = app
         .api_client
         .get(format!(

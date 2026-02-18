@@ -841,6 +841,40 @@ async fn create_call_thread_post(
     Ok(post.id)
 }
 
+async fn mark_call_thread_post_ended(
+    state: &AppState,
+    thread_id: Uuid,
+    ended_at: i64,
+) -> Result<Option<crate::models::post::PostResponse>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        WITH updated_post AS (
+            UPDATE posts
+            SET
+                props = jsonb_set(
+                    COALESCE(props, '{}'::jsonb),
+                    '{end_at}',
+                    to_jsonb($1::bigint),
+                    true
+                ),
+                edited_at = NOW()
+            WHERE id = $2
+            RETURNING *
+        )
+        SELECT p.id, p.channel_id, p.user_id, p.root_post_id, p.message, p.props, p.file_ids,
+               p.is_pinned, p.created_at, p.edited_at, p.deleted_at,
+               p.reply_count::int8 as reply_count, p.last_reply_at, p.seq,
+               u.username, u.avatar_url, u.email
+        FROM updated_post p
+        LEFT JOIN users u ON p.user_id = u.id
+        "#,
+    )
+    .bind(ended_at)
+    .bind(thread_id)
+    .fetch_optional(&state.db)
+    .await
+}
+
 async fn ensure_call_thread_id(state: &AppState, call: &CallState) -> Option<Uuid> {
     if let Some(thread_id) = call.thread_id {
         return Some(thread_id);
@@ -3984,8 +4018,46 @@ async fn end_call(
     reason: &'static str,
     participant_count: usize,
 ) {
+    let thread_id = state
+        .call_state_manager
+        .get_call(call_id)
+        .await
+        .and_then(|call| call.thread_id);
+    let ended_at = Utc::now().timestamp_millis();
+
     state.call_state_manager.remove_call(call_id).await;
     state.sfu_manager.remove_sfu(call_id).await;
+
+    if let Some(call_thread_id) = thread_id {
+        match mark_call_thread_post_ended(state, call_thread_id, ended_at).await {
+            Ok(Some(updated_post)) => {
+                let broadcast =
+                    WsEnvelope::event(EventType::MessageUpdated, updated_post, Some(channel_id))
+                        .with_broadcast(WsBroadcast {
+                            channel_id: Some(channel_id),
+                            team_id: None,
+                            user_id: None,
+                            exclude_user_id: None,
+                        });
+                state.ws_hub.broadcast(broadcast).await;
+            }
+            Ok(None) => {
+                warn!(
+                    call_id = %call_id,
+                    thread_id = %call_thread_id,
+                    "calls.end_call thread post not found while marking end_at"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    call_id = %call_id,
+                    thread_id = %call_thread_id,
+                    error = %err,
+                    "calls.end_call failed to persist end_at on call thread post"
+                );
+            }
+        }
+    }
 
     let encoded_channel_id = encode_mm_id(channel_id);
     let encoded_call_id = encode_mm_id(call_id);

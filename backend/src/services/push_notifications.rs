@@ -369,7 +369,13 @@ pub async fn send_push_to_user(
         let notification_type = data
             .get("sub_type")
             .and_then(|v| v.as_str())
-            .map(|s| if s == "calls" { NotificationType::Call } else { NotificationType::Message })
+            .map(|s| {
+                if s == "calls" {
+                    NotificationType::Call
+                } else {
+                    NotificationType::Message
+                }
+            })
             .unwrap_or(NotificationType::Message);
 
         let notification = PushNotification {

@@ -241,14 +241,19 @@ async fn get_team_members(
 
     let members: Vec<mm::TeamMember> = rows
         .into_iter()
-        .map(|(team_id, user_id, role, _username, _display_name, presence)| {
-            map_team_member_with_presence(TeamMember {
-                team_id,
-                user_id,
-                role,
-                created_at: chrono::Utc::now(),
-            }, presence)
-        })
+        .map(
+            |(team_id, user_id, role, _username, _display_name, presence)| {
+                map_team_member_with_presence(
+                    TeamMember {
+                        team_id,
+                        user_id,
+                        role,
+                        created_at: chrono::Utc::now(),
+                    },
+                    presence,
+                )
+            },
+        )
         .collect();
 
     Ok(Json(members))

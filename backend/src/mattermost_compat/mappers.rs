@@ -9,6 +9,14 @@ use crate::models::{
 use serde_json::json;
 use uuid::Uuid;
 
+fn post_type_from_props(props: &serde_json::Value) -> String {
+    props
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 impl From<User> for mm::User {
     fn from(user: User) -> Self {
         mm::User {
@@ -130,6 +138,7 @@ impl From<Channel> for mm::Channel {
 
 impl From<Post> for mm::Post {
     fn from(post: Post) -> Self {
+        let post_type = post_type_from_props(&post.props);
         mm::Post {
             id: encode_mm_id(post.id),
             create_at: post.created_at.timestamp_millis(),
@@ -141,7 +150,7 @@ impl From<Post> for mm::Post {
             root_id: post.root_post_id.map(encode_mm_id).unwrap_or_default(),
             original_id: "".to_string(),
             message: post.message,
-            post_type: "".to_string(),
+            post_type,
             props: post.props,
             hashtags: "".to_string(),
             file_ids: post.file_ids.iter().map(|id| encode_mm_id(*id)).collect(),
@@ -153,6 +162,7 @@ impl From<Post> for mm::Post {
 
 impl From<PostResponse> for mm::Post {
     fn from(post: PostResponse) -> Self {
+        let post_type = post_type_from_props(&post.props);
         // Build metadata with files if files are present
         let metadata = if !post.files.is_empty() {
             let mm_files: Vec<mm::FileInfo> = post
@@ -214,7 +224,7 @@ impl From<PostResponse> for mm::Post {
             root_id: post.root_post_id.map(encode_mm_id).unwrap_or_default(),
             original_id: "".to_string(),
             message: post.message,
-            post_type: "".to_string(),
+            post_type,
             props: post.props,
             hashtags: "".to_string(),
             file_ids: post.file_ids.iter().map(|id| encode_mm_id(*id)).collect(),

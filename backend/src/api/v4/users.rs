@@ -1881,7 +1881,7 @@ async fn patch_user(
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
     let user_id = resolve_user_id(&user_id, &auth)?;
-    
+
     // Update user profile fields
     sqlx::query(
         r#"UPDATE users SET 
@@ -1891,7 +1891,7 @@ async fn patch_user(
             position = COALESCE($4, position),
             notify_props = COALESCE($5, notify_props),
             updated_at = NOW()
-        WHERE id = $6"#
+        WHERE id = $6"#,
     )
     .bind(input.nickname)
     .bind(input.first_name)
@@ -1901,7 +1901,7 @@ async fn patch_user(
     .bind(user_id)
     .execute(&state.db)
     .await?;
-    
+
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&state.db)
