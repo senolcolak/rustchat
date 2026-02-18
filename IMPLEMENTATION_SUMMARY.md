@@ -1,307 +1,257 @@
-# Implementation Summary: Mobile Compatibility Fixes
+# VoIP Push Notification Implementation Summary
 
-## Issues Fixed
+## Overview
+This document summarizes the implementation of push notifications for call ringing in RustChat.
 
-### 1. Original Issues (Channels, Status, Typing)
-- ✅ Empty channels list on app open
-- ✅ User status not displayed  
-- ✅ Typing indicators not shown
+## Architecture Flow
 
-### 2. New Issues (Ringing, Notifications)
-- ✅ Call ringing not working on mobile
-- ✅ Push notifications for messages not working
-
----
-
-## Changes Made
-
-### A. Status and WebSocket Events (2026-02-14)
-
-#### Files Modified:
-1. **`backend/src/api/websocket_core.rs`**
-   - Enhanced `persist_presence_and_broadcast()` to include complete status data
-   - Added `manual` and `last_activity_at` fields to status events
-   - Added proper `WsBroadcast` with `user_id` for event routing
-   - Added debug logging
-
-2. **`backend/src/api/v4/websocket.rs`**
-   - Updated `map_envelope_to_mm()` for `status_change` events
-   - Extract and include `manual` and `last_activity_at` fields
-
-3. **`backend/src/api/v4/users.rs`**
-   - Added debug logging to `my_team_channels()` to trace channel loading
-
-4. **`backend/src/realtime/hub.rs`**
-   - Added debug logging for typing and status_change events
-
----
-
-### B. Push Notification Service (2026-02-14)
-
-#### New Files Created:
-
-1. **`backend/src/services/push_notifications.rs`** (New Service)
-   - FCM (Firebase Cloud Messaging) support via HTTP v1 API
-   - APNS support structure (via FCM proxy)
-   - Call ringing notifications (high priority)
-   - Message notifications (normal priority)
-   - Device token management
-   - Async notification sending
-
-   **Key Functions:**
-   - `send_push_notification()` - Send single notification
-   - `send_push_to_user()` - Send to all user devices
-   - `send_call_ringing_notification()` - Call notifications
-   - `send_message_notification()` - Message notifications
-   - `get_user_devices()` - Fetch registered devices
-   - `build_fcm_message()` - Build FCM message structure
-
-2. **`backend/migrations/20260214230000_add_push_notification_config.sql`**
-   - Added FCM configuration columns:
-     - `fcm_project_id`
-     - `fcm_access_token`
-   - Added APNS configuration columns:
-     - `apns_key_id`
-     - `apns_team_id`
-     - `apns_bundle_id`
-     - `apns_private_key`
-
-3. **`docs/PUSH_NOTIFICATIONS.md`**
-   - Complete setup guide for FCM and APNS
-   - Firebase project configuration
-   - Apple Developer Portal setup
-   - Mobile app integration
-   - Testing procedures
-   - Troubleshooting guide
-
-#### Files Modified:
-
-4. **`backend/src/services/mod.rs`**
-   - Added `pub mod push_notifications;`
-
-5. **`backend/src/api/v4/calls_plugin/mod.rs`**
-   - Modified `broadcast_ringing_event()` to send push notifications
-   - Sends push to all channel members except sender
-   - Respects dismissed notifications
-   - Runs asynchronously (non-blocking)
-
-6. **`backend/src/api/v4/calls_plugin/state.rs`**
-   - Added `is_notification_dismissed()` method to CallStateManager
-
-7. **`backend/src/services/posts.rs`**
-   - Added push notification logic in `create_post()`
-   - Sends notifications for:
-     - Direct messages (DMs)
-     - Mentions (@username)
-   - Async processing to avoid blocking
-
----
-
-## How It Works
-
-### Status Updates Flow
-
-1. User connects via WebSocket
-2. `persist_presence_and_broadcast()` called
-3. Updates database with `presence` and `last_login_at`
-4. Broadcasts `status_change` event with:
-   - `user_id` - Who's status changed
-   - `status` - online/away/offline
-   - `manual` - false for automatic updates
-   - `last_activity_at` - timestamp
-   - `broadcast.user_id` - For mobile routing
-
-### Typing Events Flow
-
-1. Client sends `typing` command via WebSocket
-2. `handle_client_envelope()` in `websocket_core.rs` creates event
-3. Event includes `WsBroadcast` with `channel_id`
-4. `map_envelope_to_mm()` converts to Mattermost format
-5. Mobile receives `user_typing` event with `broadcast.channel_id`
-
-### Call Ringing Flow
-
-1. Call starts in DM/GM channel
-2. `broadcast_ringing_event()` called
-3. WebSocket event sent to all channel members
-4. **NEW:** Push notification sent to each member's devices:
-   - FCM message with high priority
-   - Title: "Incoming call from [Caller]"
-   - Body: "Tap to answer"
-   - Data: call_id, channel_id, caller_name
-
-### Message Notification Flow
-
-1. Post created via `create_post()`
-2. WebSocket event broadcast
-3. **NEW:** If DM or contains mentions:
-   - Parse mentions from message
-   - Get channel members (for DMs) or mentioned users
-   - Send push notification to each user's devices:
-     - FCM message with normal priority
-     - Title: Sender name
-     - Body: Message preview (100 chars)
-     - Data: channel_id, sender_name
-
----
-
-## Configuration Required
-
-### For Push Notifications to Work:
-
-1. **Firebase Cloud Messaging (Android)**
-   ```bash
-   # Option A: Environment variables
-   export FCM_PROJECT_ID="your-project-id"
-   export FCM_ACCESS_TOKEN="ya29.c.Kp8..."
-   
-   # Option B: Database
-   UPDATE server_config 
-   SET fcm_project_id = 'your-project-id',
-       fcm_access_token = 'your-token'
-   WHERE id = 'default';
-   ```
-
-2. **Apple Push Notification Service (iOS)**
-   ```bash
-   # Environment variables
-   export APNS_KEY_ID="your-key-id"
-   export APNS_TEAM_ID="your-team-id"
-   export APNS_BUNDLE_ID="com.mattermost.rnbeta"
-   export APNS_PRIVATE_KEY="-----BEGIN EC PRIVATE KEY-----..."
-   ```
-
-3. **Mobile App Registration**
-   - Mobile app must call `POST /api/v4/users/me/device`
-   - Include: device_id, token (FCM/APNS), platform (ios/android)
-   - Should register on login and periodically refresh
-
----
-
-## Testing Checklist
-
-### Status and Typing (WebSocket)
-- [ ] Open app - channels appear immediately
-- [ ] User status visible (online/away/offline)
-- [ ] Typing indicators appear when users type
-- [ ] Status updates when users go offline
-
-### Call Ringing (Push + WebSocket)
-- [ ] Start call in DM channel
-- [ ] Other user receives push notification (if app in background)
-- [ ] Other user sees ringing UI (if app in foreground)
-- [ ] Ring button works in regular channels
-- [ ] Dismiss notification works
-
-### Message Notifications (Push + WebSocket)
-- [ ] Send DM - other user receives push
-- [ ] Send message with @mention - mentioned user receives push
-- [ ] Regular messages don't send push (unless configured)
-- [ ] Message appears immediately via WebSocket
-
----
-
-## Debug Logging
-
-Enable debug logging to trace issues:
-```bash
-RUST_LOG=debug cargo run
+```
+Backend (push_notifications.rs)
+    ↓ HTTP POST
+Push Proxy (/send endpoint)
+    ↓ Routes based on platform
+FCM (Android) or APNS (iOS)
+    ↓ Push delivery
+Mobile Device
+    ↓ Wake app + deliver data
+Mobile App (React Native)
+    ↓ Process notification
+Call Notification UI
 ```
 
-Key log messages to watch for:
+## Backend Implementation
 
-**Status:**
-- `Broadcasting status change event user_id=... status=...`
+### 1. Backend Service (`backend/src/services/push_notifications.rs`)
+- `send_call_ringing_notification()` - Sends call notifications with `sub_type: "calls"`
+- Generates `call_uuid` for VoIP identification
+- Sends to push proxy or directly to FCM
 
-**Channels:**
-- `Fetching channels for user user_id=... team_id=...`
-- `Found channels for user user_id=... team_id=... channel_count=N`
+### 2. Push Proxy (`push-proxy/src/`)
+- **Main**: Axum server with `/send` and `/health` endpoints
+- **FCM Client** (`fcm.rs`): OAuth2 authentication, data-only messages for calls
+- **APNS Client** (`apns.rs`): JWT authentication, VoIP pushes (currently disabled)
 
-**Typing:**
-- `Broadcasting WebSocket event event=typing has_broadcast=true`
-
-**Calls:**
-- `calls.broadcast_ringing_event call_id=... channel_id=...`
-- `Sent push notification for incoming call`
-
-**Messages:**
-- `Sent push notification for message`
-- `Failed to send push notification...` (check configuration)
-
----
-
-## Migration
-
-Apply the database migration:
-```bash
-# Using sqlx migrate
-cd backend
-sqlx migrate run
-
-# Or manually run:
-psql -d rustchat -f migrations/20260214230000_add_push_notification_config.sql
+### 3. FCM Payload Structure
+```json
+{
+  "message": {
+    "token": "<device_token>",
+    "data": {
+      "type": "call",
+      "call_uuid": "<uuid>",
+      "channel_id": "<channel_id>",
+      "sender_name": "<caller_name>",
+      "title": "Incoming Call",
+      "body": "<caller> is calling"
+    },
+    "android": {
+      "priority": "high",
+      "direct_boot_ok": true
+    }
+  }
+}
 ```
 
----
+**Key Points:**
+- Data-only message (no `notification` field) - required for custom handling
+- `priority: high` - wakes device from Doze mode
+- `direct_boot_ok: true` - delivers before user unlocks
 
-## Next Steps
+## Mobile App Requirements
 
-1. **Configure FCM/APNS** using the setup guide in `docs/PUSH_NOTIFICATIONS.md`
-2. **Build and deploy** the updated backend
-3. **Test with mattermost-mobile** using the checklist above
-4. **Monitor logs** for any issues
+### Current Status
+The backend and push proxy are complete and working. The mobile app needs handlers to process call push notifications.
 
-## Known Limitations
+### Android Implementation Needed
 
-1. **FCM Token Refresh**: Currently requires manual token updates (expires every hour)
-   - For production: Implement automatic OAuth2 token refresh
+#### Option 1: Standard Push (Current - App in Foreground/Background)
+The app uses `react-native-notifications` which handles standard push notifications.
+- When app is **foreground**: JS handler processes notification
+- When app is **background**: Notification appears in tray, tapping opens app
+- When app is **killed**: May not wake up reliably for data-only messages
 
-2. **APNS**: Currently using FCM as proxy for iOS
-   - For better iOS support: Implement native APNS HTTP/2
+#### Option 2: Full-Screen Call UI (Recommended for Production)
+For WhatsApp/Signal-style incoming call screen:
 
-3. **No notification preferences**: All DMs and mentions send push
-   - Future: Add per-user notification settings
-
-4. **No rich notifications**: Basic text only
-   - Future: Add images, actions, custom UI
-
----
-
-## Files Changed Summary
-
-**Modified (7 files):**
-1. `backend/src/api/websocket_core.rs`
-2. `backend/src/api/v4/websocket.rs`
-3. `backend/src/api/v4/users.rs`
-4. `backend/src/realtime/hub.rs`
-5. `backend/src/services/mod.rs`
-6. `backend/src/api/v4/calls_plugin/mod.rs`
-7. `backend/src/api/v4/calls_plugin/state.rs`
-8. `backend/src/services/posts.rs`
-
-**Created (4 files):**
-1. `backend/src/services/push_notifications.rs` (New service)
-2. `backend/migrations/20260214230000_add_push_notification_config.sql`
-3. `docs/PUSH_NOTIFICATIONS.md`
-4. `previous-analyses/2026-02-14-channels-status-typing/` (Analysis docs)
-
-**Lines of Code:**
-- Added: ~800 lines (push notification service)
-- Modified: ~100 lines (integrations)
-- Total impact: ~900 lines
-
----
-
-## Verification
-
-All changes compile successfully:
-```bash
-cd backend && cargo check
-# ✅ Finished dev profile
+1. **Create a FirebaseMessagingService**:
+```kotlin
+class CallMessagingService : FirebaseMessagingService() {
+    override fun onMessageReceived(remoteMessage: RemoteMessage) {
+        val data = remoteMessage.data
+        if (data["type"] == "call") {
+            // Show full-screen incoming call activity
+            showIncomingCallUI(data)
+        }
+    }
+    
+    private fun showIncomingCallUI(data: Map<String, String>) {
+        val intent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            putExtra("call_uuid", data["call_uuid"])
+            putExtra("channel_id", data["channel_id"])
+            putExtra("sender_name", data["sender_name"])
+        }
+        startActivity(intent)
+    }
+}
 ```
 
-All tests should pass (existing tests unchanged):
-```bash
-cd backend && cargo test
-# ✅ All tests passing
+2. **Register in AndroidManifest.xml**:
+```xml
+<service
+    android:name=".CallMessagingService"
+    android:exported="false">
+    <intent-filter>
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+    </intent-filter>
+</service>
 ```
+
+3. **Add to build.gradle**:
+```gradle
+dependencies {
+    implementation 'com.google.firebase:firebase-messaging:23.4.0'
+}
+```
+
+### iOS Implementation Needed
+
+#### PushKit + CallKit (Required for True VoIP)
+1. **Enable Background Modes**:
+   - Voice over IP
+   - Remote notifications
+
+2. **Register for VoIP pushes**:
+```swift
+import PushKit
+import CallKit
+
+class CallProvider: NSObject, PKPushRegistryDelegate {
+    let pushRegistry = PKPushRegistry(queue: .main)
+    let callController = CXCallController()
+    
+    override init() {
+        super.init()
+        pushRegistry.delegate = self
+        pushRegistry.desiredPushTypes = [.voIP]
+    }
+    
+    func pushRegistry(_ registry: PKPushRegistry, 
+                      didReceiveIncomingPushWith payload: PKPushPayload,
+                      for type: PKPushType) {
+        // Extract call data from payload
+        let uuid = UUID(uuidString: payload.dictionaryPayload["call_uuid"] as! String)!
+        let callerName = payload.dictionaryPayload["sender_name"] as! String
+        
+        // Report to CallKit
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: callerName)
+        update.hasVideo = false
+        
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        provider.reportNewIncomingCall(with: uuid, update: update) { error in
+            // Handle error
+        }
+    }
+}
+```
+
+## Testing
+
+### Backend Test Script
+```bash
+# Send test call notification
+curl -X POST http://localhost:3000/api/v4/calls/test-push \
+  -H "Authorization: Bearer <token>" \
+  -d '{"user_id": "<user_id>"}'
+```
+
+### Push Proxy Test
+```bash
+# Test push proxy directly
+curl -X POST http://localhost:3001/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "<fcm_token>",
+    "title": "Test Call",
+    "body": "Someone is calling",
+    "platform": "android",
+    "type": "call",
+    "data": {
+      "channel_id": "test123",
+      "post_id": "call456",
+      "type": "call",
+      "sub_type": "calls",
+      "sender_name": "Test User"
+    }
+  }'
+```
+
+## Environment Variables
+
+### Push Proxy
+```bash
+# Required for FCM
+FIREBASE_PROJECT_ID=your-project-id
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+
+# Required for APNS (optional)
+APNS_KEY_PATH=/path/to/apns-key.p8
+APNS_KEY_ID=your-key-id
+APNS_TEAM_ID=your-team-id
+
+# Optional
+RUSTCHAT_PUSH_PORT=3001
+RUSTCHAT_PUSH_TIMEOUT=10
+```
+
+### Backend
+```bash
+# Push proxy URL (if using proxy)
+RUSTCHAT_PUSH_PROXY_URL=http://push-proxy:3001
+
+# Or direct FCM
+FIREBASE_PROJECT_ID=your-project-id
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+```
+
+## Current Limitations
+
+1. **Android**: App must be running (foreground/background) to ring immediately. For killed-state ringing, a custom `FirebaseMessagingService` is needed.
+
+2. **iOS**: VoIP pushes require PushKit + CallKit implementation in the mobile app. Currently, standard push notifications are used.
+
+3. **No Fallback**: If push fails, there's no retry mechanism or fallback notification.
+
+## Next Steps for Full Implementation
+
+### Phase 1: Android Full-Screen Calls
+- [ ] Create `CallMessagingService` in Android native code
+- [ ] Implement `IncomingCallActivity` with answer/decline buttons
+- [ ] Test with app in killed state
+
+### Phase 2: iOS CallKit Integration
+- [ ] Add PushKit framework
+- [ ] Implement `PKPushRegistryDelegate`
+- [ ] Add CallKit provider
+- [ ] Test background and killed states
+
+### Phase 3: Enhanced Features
+- [ ] Add call duration tracking
+- [ ] Missed call notifications
+- [ ] Call history sync
+
+## References
+
+- [FCM Data Messages](https://firebase.google.com/docs/cloud-messaging/concept-options#data_messages)
+- [Android Full-Screen Intents](https://developer.android.com/reference/android/app/Notification.Builder#setFullScreenIntent(android.app.PendingIntent,%20boolean))
+- [iOS PushKit Guide](https://developer.apple.com/documentation/pushkit)
+- [iOS CallKit Guide](https://developer.apple.com/documentation/callkit)
+
+## Notes
+
+- Mattermost Mobile v2 uses in-app call notifications (React Native component) rather than native full-screen intents
+- The `sub_type: "calls"` field is used by the mobile app to identify call notifications
+- Data-only FCM messages are required for the app to handle the notification in `onMessageReceived()`

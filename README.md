@@ -180,6 +180,57 @@ rustchat/
 
 See `docs/calls_deployment_modes.md` for single-node vs multi-node behavior, fallback semantics, and current limits.
 
+## Push Notifications (Mobile)
+
+RustChat includes a push notification proxy service for mobile call ringing and message notifications.
+
+### Features
+- **FCM (Android)**: High-priority data messages for call notifications
+- **APNS (iOS)**: VoIP push support for CallKit integration (requires credentials)
+- **Call Identification**: Uses `sub_type: "calls"` for mobile app call detection
+
+### Configuration
+
+1. **Copy and edit `.env`:**
+```bash
+cp .env.example .env
+```
+
+2. **Add Firebase credentials:**
+```bash
+# Download service account key from Firebase Console
+# Place it at: ./secrets/firebase-key.json
+
+# Add to .env:
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_KEY_PATH=./secrets/firebase-key.json
+```
+
+3. **(Optional) APNS for iOS:**
+```bash
+# Add to .env:
+APNS_KEY_PATH=./secrets/apns-key.p8
+APNS_KEY_ID=your-key-id
+APNS_TEAM_ID=your-team-id
+APNS_BUNDLE_ID=your-bundle-id
+```
+
+4. **Start services:**
+```bash
+docker compose up -d push-proxy
+```
+
+The push proxy runs on port `3001` (host) by default.
+
+### Testing
+
+```bash
+# Send test notification
+./scripts/test_push_notification.sh <device_token> [android|ios]
+```
+
+See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for detailed implementation notes and mobile app requirements.
+
 ## Security Mode Notes
 
 - `RUSTCHAT_ENVIRONMENT=development` keeps developer-friendly CORS defaults.
