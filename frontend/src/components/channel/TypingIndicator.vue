@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { usePresenceStore } from '../../stores/presence'
+import { usePresenceStore } from '../../features/presence'
 
 const props = defineProps<{
     channelId: string

@@ -5,7 +5,7 @@ import {
 } from 'lucide-vue-next';import { useTeamStore } from '../../stores/teams';
 import { useChannelStore } from '../../stores/channels';
 import { useAuthStore } from '../../stores/auth';
-import { usePresenceStore } from '../../stores/presence';
+import { usePresenceStore } from '../../features/presence';
 import { useUnreadStore } from '../../stores/unreads';
 import CreateChannelModal from '../modals/CreateChannelModal.vue';
 import DirectMessageModal from '../modals/DirectMessageModal.vue';

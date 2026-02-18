@@ -1,8 +1,8 @@
 import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useMessageStore, postToMessage } from '../stores/messages'
-import { usePresenceStore } from '../stores/presence'
-import type { Presence } from '../stores/presence'
+import { usePresenceStore } from '../features/presence'
+import type { PresenceStatus } from '../core/entities/User'
 import { useUnreadStore } from '../stores/unreads'
 import { useChannelStore } from '../stores/channels'
 import { useToast } from './useToast'
@@ -216,7 +216,7 @@ function normalizeWsChannelPayload(data: any): Channel | null {
     }
 }
 
-function normalizeWsPresence(value: unknown): Presence {
+function normalizeWsPresence(value: unknown): PresenceStatus {
     const raw = String(value || '').toLowerCase()
     if (raw === 'online' || raw === 'away' || raw === 'dnd' || raw === 'offline') {
         return raw
