@@ -7,11 +7,12 @@ export interface Team {
   name: string
   displayName: string
   description?: string
-  type: 'open' | 'invite'
-  allowOpenInvite: boolean
+  type?: 'open' | 'invite'
+  allowOpenInvite?: boolean
   companyName?: string
   createdAt: Date
   updatedAt: Date
+  isArchived?: boolean
 }
 
 export interface TeamMember {
