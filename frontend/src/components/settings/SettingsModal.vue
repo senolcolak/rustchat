@@ -6,6 +6,7 @@ import BaseInput from '../atomic/BaseInput.vue'
 import { useAuthStore } from '../../stores/auth'
 import { usersApi } from '../../api/users'
 import { filesApi } from '../../api/files'
+import api from '../../api/client'
 import {
     useThemeStore,
     THEME_OPTIONS,
@@ -36,6 +37,10 @@ const fontSearch = ref('')
 const username = ref('')
 const displayName = ref('')
 const avatarUrl = ref('')
+const firstName = ref('')
+const lastName = ref('')
+const nickname = ref('')
+const position = ref('')
 
 // Status fields
 const statusText = ref('')
@@ -123,6 +128,10 @@ watch(() => props.isOpen, (isOpen) => {
     username.value = auth.user.username || ''
     displayName.value = auth.user.display_name || ''
     avatarUrl.value = auth.user.avatar_url || ''
+    firstName.value = auth.user.first_name || ''
+    lastName.value = auth.user.last_name || ''
+    nickname.value = auth.user.nickname || ''
+    position.value = auth.user.position || ''
     
     statusText.value = auth.user.status_text || ''
     statusEmoji.value = auth.user.status_emoji || ''
@@ -220,6 +229,18 @@ async function handleSaveProfile() {
   success.value = ''
 
   try {
+    const firstNameValue = firstName.value.trim()
+    const lastNameValue = lastName.value.trim()
+    const nicknameValue = nickname.value.trim()
+    const positionValue = position.value.trim()
+
+    await api.put('/api/v4/users/me/patch', {
+      first_name: firstNameValue || undefined,
+      last_name: lastNameValue || undefined,
+      nickname: nicknameValue || undefined,
+      position: positionValue || undefined,
+    })
+
     const response = await usersApi.update(auth.user.id, {
       username: username.value.trim() || undefined,
       display_name: displayName.value.trim() || undefined,
@@ -228,6 +249,10 @@ async function handleSaveProfile() {
     
     auth.user = {
       ...auth.user,
+      first_name: firstNameValue,
+      last_name: lastNameValue,
+      nickname: nicknameValue,
+      position: positionValue,
       username: response.data.username,
       display_name: response.data.display_name,
       avatar_url: response.data.avatar_url,
@@ -340,6 +365,12 @@ function requestNotifications() {
                         <div class="grid grid-cols-1 gap-4">
                             <BaseInput label="Username" v-model="username" placeholder="your_username" :disabled="loading" />
                             <BaseInput label="Display Name" v-model="displayName" placeholder="Your Name" :disabled="loading" />
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                              <BaseInput label="First Name" v-model="firstName" placeholder="John" :disabled="loading" />
+                              <BaseInput label="Last Name" v-model="lastName" placeholder="Doe" :disabled="loading" />
+                            </div>
+                            <BaseInput label="Nickname" v-model="nickname" placeholder="Johnny" :disabled="loading" />
+                            <BaseInput label="Position" v-model="position" placeholder="Software Engineer" :disabled="loading" />
                             <BaseInput label="Avatar URL" v-model="avatarUrl" placeholder="https://example.com/avatar.jpg" :disabled="loading" />
                             <div class="space-y-1">
                               <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>

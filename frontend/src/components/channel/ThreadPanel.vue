@@ -5,16 +5,19 @@ import { format } from 'date-fns'
 import { useMessageStore } from '../../stores/messages'
 import { useUIStore } from '../../stores/ui'
 import { useAuthStore } from '../../stores/auth'
+import { useTeamStore } from '../../stores/teams'
 import { useWebSocket } from '../../composables/useWebSocket'
 import RcAvatar from '../ui/RcAvatar.vue'
 import FilePreview from '../atomic/FilePreview.vue'
 import ImageGallery from '../atomic/ImageGallery.vue'
 import type { FileUploadResponse } from '../../api/files'
+import { threadsApi } from '../../api/threads'
 import { renderMarkdown } from '../../utils/markdown'
 
 const messageStore = useMessageStore()
 const uiStore = useUIStore()
 const authStore = useAuthStore()
+const teamStore = useTeamStore()
 
 const { sendMessage } = useWebSocket()
 
@@ -57,6 +60,14 @@ watch(() => uiStore.rhsContextId, async (newId) => {
         loading.value = true
         try {
             await messageStore.fetchThread(newId)
+            // Mark thread as read when opened
+            if (teamStore.currentTeamId) {
+                try {
+                    await threadsApi.markAsRead(newId, teamStore.currentTeamId)
+                } catch (e) {
+                    console.error('Failed to mark thread as read:', e)
+                }
+            }
         } catch (e) {
             console.error('Failed to fetch thread:', e)
         } finally {
