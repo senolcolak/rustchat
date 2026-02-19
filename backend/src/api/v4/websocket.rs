@@ -265,9 +265,13 @@ async fn run_connection(
         }
     };
 
-    // Add connection to hub
+    // Add connection to hub.
+    // Presence tracking must use a per-socket unique id instead of the resumable
+    // actor connection id, otherwise reconnect races can unregister an active
+    // socket that reused the same actor connection id.
     let (hub_conn_id, mut hub_rx) = state.ws_hub.add_connection(user_id, username.clone()).await;
-    websocket_core::register_presence_connection(&state, user_id, &actor_connection_id).await;
+    let presence_connection_id = hub_conn_id.to_string();
+    websocket_core::register_presence_connection(&state, user_id, &presence_connection_id).await;
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
@@ -490,7 +494,7 @@ async fn run_connection(
 
     // Remove from hub
     state.ws_hub.remove_connection(user_id, hub_conn_id).await;
-    websocket_core::handle_disconnect(&state, user_id, &actor_connection_id).await;
+    websocket_core::handle_disconnect(&state, user_id, &presence_connection_id).await;
 
     info!(
         connection_id = %actor_connection_id,
