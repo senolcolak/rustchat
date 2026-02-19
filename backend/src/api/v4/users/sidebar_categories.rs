@@ -4,6 +4,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::Deserialize;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::MmAuthUser;
@@ -13,6 +14,7 @@ use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     models as mm,
 };
+use crate::models::channel::ChannelType;
 
 #[derive(Deserialize)]
 pub(super) struct CategoriesPath {
@@ -137,6 +139,7 @@ pub(crate) async fn get_categories_internal(
 
     let mut categories = Vec::new();
     let mut order = Vec::new();
+    let mut assigned_channel_ids = HashSet::new();
     let mut sorted_rows = categories_rows;
     sort_category_rows(&mut sorted_rows);
 
@@ -147,6 +150,10 @@ pub(crate) async fn get_categories_internal(
         .bind(row.id)
         .fetch_all(&state.db)
         .await?;
+
+        for channel_id in &channel_ids {
+            assigned_channel_ids.insert(*channel_id);
+        }
 
         let channel_ids = channel_ids.into_iter().map(encode_mm_id).collect();
 
@@ -167,6 +174,15 @@ pub(crate) async fn get_categories_internal(
             delete_at: row.delete_at,
         });
     }
+
+    // Mattermost backfills channels that are not explicitly mapped to any category so the
+    // mobile sidebar never renders empty due to stale mappings.
+    let sidebar_channels = get_sidebar_candidate_channels(&state, user_id, team_id).await?;
+    backfill_orphaned_channels(
+        &mut categories,
+        &sidebar_channels,
+        &mut assigned_channel_ids,
+    );
 
     Ok(Json(mm::SidebarCategories { categories, order }))
 }
@@ -239,6 +255,86 @@ async fn ensure_team_member(state: &AppState, user_id: Uuid, team_id: Uuid) -> A
     Ok(())
 }
 
+#[derive(sqlx::FromRow, Clone, Copy)]
+struct SidebarCandidateChannel {
+    id: Uuid,
+    #[sqlx(rename = "type")]
+    channel_type: ChannelType,
+}
+
+async fn get_sidebar_candidate_channels(
+    state: &AppState,
+    user_id: Uuid,
+    team_id: Uuid,
+) -> ApiResult<Vec<SidebarCandidateChannel>> {
+    let channels = sqlx::query_as(
+        r#"
+        SELECT c.id, c.type
+        FROM channels c
+        JOIN channel_members cm ON c.id = cm.channel_id
+        WHERE cm.user_id = $1
+          AND c.is_archived = false
+          AND (
+            (c.type IN ('public', 'private') AND c.team_id = $2)
+            OR c.type IN ('direct', 'group')
+          )
+        ORDER BY COALESCE(c.display_name, c.name) ASC
+        "#,
+    )
+    .bind(user_id)
+    .bind(team_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(channels)
+}
+
+fn category_index_by_type_or_name(
+    categories: &[mm::SidebarCategory],
+    target_type: &str,
+) -> Option<usize> {
+    categories
+        .iter()
+        .position(|category| category.category_type == target_type)
+        .or_else(|| {
+            categories.iter().position(|category| {
+                category
+                    .display_name
+                    .replace('_', " ")
+                    .eq_ignore_ascii_case(&target_type.replace('_', " "))
+            })
+        })
+}
+
+fn backfill_orphaned_channels(
+    categories: &mut [mm::SidebarCategory],
+    channels: &[SidebarCandidateChannel],
+    assigned_channel_ids: &mut HashSet<Uuid>,
+) {
+    if categories.is_empty() {
+        return;
+    }
+
+    let channels_idx = category_index_by_type_or_name(categories, "channels").or(Some(0));
+    let dms_idx = category_index_by_type_or_name(categories, "direct_messages").or(channels_idx);
+
+    for channel in channels {
+        if assigned_channel_ids.contains(&channel.id) {
+            continue;
+        }
+
+        let target_idx = match channel.channel_type {
+            ChannelType::Direct | ChannelType::Group => dms_idx,
+            ChannelType::Public | ChannelType::Private => channels_idx,
+        };
+
+        if let Some(idx) = target_idx {
+            categories[idx].channel_ids.push(encode_mm_id(channel.id));
+            assigned_channel_ids.insert(channel.id);
+        }
+    }
+}
+
 fn build_default_categories(
     user_id: Uuid,
     team_id: Uuid,
@@ -272,21 +368,12 @@ async fn get_default_categories(
     user_id: Uuid,
     team_id: Uuid,
 ) -> ApiResult<mm::SidebarCategories> {
-    let channels: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT c.id FROM channels c
-        JOIN channel_members cm ON c.id = cm.channel_id
-        WHERE cm.user_id = $1 AND c.team_id = $2
-        ORDER BY COALESCE(c.display_name, c.name) ASC
-        "#,
-    )
-    .bind(user_id)
-    .bind(team_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let channels = get_sidebar_candidate_channels(state, user_id, team_id).await?;
     let now = Utc::now().timestamp_millis();
-    let channel_ids = channels.into_iter().map(encode_mm_id).collect();
+    let channel_ids = channels
+        .into_iter()
+        .map(|channel| encode_mm_id(channel.id))
+        .collect();
     Ok(build_default_categories(user_id, team_id, channel_ids, now))
 }
 
@@ -496,6 +583,7 @@ pub(crate) async fn update_category_order_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn is_millis_timestamp(value: i64) -> bool {
         value >= 1_000_000_000_000 && value <= 9_999_999_999_999
@@ -564,5 +652,60 @@ mod tests {
         assert_eq!(rows[0].display_name, "alpha");
         assert_eq!(rows[1].display_name, "Bravo");
         assert_eq!(rows[2].display_name, "Charlie");
+    }
+
+    #[test]
+    fn backfills_orphaned_channels_into_default_buckets() {
+        let mut categories = vec![
+            mm::SidebarCategory {
+                id: "cat-channels".to_string(),
+                team_id: "team".to_string(),
+                user_id: "user".to_string(),
+                category_type: "channels".to_string(),
+                display_name: "Channels".to_string(),
+                sorting: "alpha".to_string(),
+                muted: false,
+                collapsed: false,
+                channel_ids: vec![],
+                sort_order: 0,
+                create_at: 0,
+                update_at: 0,
+                delete_at: 0,
+            },
+            mm::SidebarCategory {
+                id: "cat-dms".to_string(),
+                team_id: "team".to_string(),
+                user_id: "user".to_string(),
+                category_type: "direct_messages".to_string(),
+                display_name: "Direct Messages".to_string(),
+                sorting: "recent".to_string(),
+                muted: false,
+                collapsed: false,
+                channel_ids: vec![],
+                sort_order: 1,
+                create_at: 0,
+                update_at: 0,
+                delete_at: 0,
+            },
+        ];
+
+        let public_id = Uuid::new_v4();
+        let direct_id = Uuid::new_v4();
+        let candidates = vec![
+            SidebarCandidateChannel {
+                id: public_id,
+                channel_type: ChannelType::Public,
+            },
+            SidebarCandidateChannel {
+                id: direct_id,
+                channel_type: ChannelType::Direct,
+            },
+        ];
+
+        let mut assigned = HashSet::new();
+        backfill_orphaned_channels(&mut categories, &candidates, &mut assigned);
+
+        assert_eq!(categories[0].channel_ids, vec![encode_mm_id(public_id)]);
+        assert_eq!(categories[1].channel_ids, vec![encode_mm_id(direct_id)]);
     }
 }
