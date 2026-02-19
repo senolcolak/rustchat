@@ -353,9 +353,8 @@ async fn create_sso_config(
 ) -> ApiResult<Json<SsoConfigResponse>> {
     require_admin(&auth)?;
 
-    let org_id = auth
-        .org_id
-        .ok_or_else(|| AppError::BadRequest("No organization context".to_string()))?;
+    // For multi-tenant deployments, require org_id. For single-tenant (RustChat), org_id is optional.
+    let org_id = auth.org_id;
 
     // Validate input
     let provider_type = validate_sso_config(&input, false)?;

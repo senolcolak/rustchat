@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useAdminStore } from '../../stores/admin';
-import { Shield, Key, Lock, Users } from 'lucide-vue-next';
+import { Key, Lock, Users } from 'lucide-vue-next';
 
 const adminStore = useAdminStore();
 
@@ -10,20 +10,6 @@ const authForm = ref({
     enable_sso: false,
     require_sso: false,
     allow_registration: true,
-    enable_sign_in_with_email: true,
-    enable_sign_in_with_username: true,
-    enable_sign_up_with_email: true,
-    enable_sign_up_with_gitlab: false,
-    enable_sign_up_with_google: false,
-    enable_sign_up_with_office365: false,
-    enable_sign_up_with_openid: false,
-    enable_user_creation: true,
-    enable_open_server: false,
-    enable_guest_accounts: false,
-    enable_multifactor_authentication: false,
-    enforce_multifactor_authentication: false,
-    enable_saml: false,
-    enable_ldap: false,
     password_min_length: 8,
     password_require_lowercase: true,
     password_require_uppercase: true,
@@ -31,14 +17,6 @@ const authForm = ref({
     password_require_symbol: false,
     password_enable_forgot_link: true,
     session_length_hours: 24,
-});
-
-const ssoForm = ref({
-    provider: 'oidc',
-    display_name: 'SSO Provider',
-    issuer_url: '',
-    client_id: '',
-    client_secret: '',
 });
 
 const saving = ref(false);
@@ -161,160 +139,6 @@ const saveSettings = async () => {
                     <input type="checkbox" v-model="authForm.password_enable_forgot_link" class="w-4 h-4 text-indigo-600 rounded mr-3" />
                     <span class="text-gray-700 dark:text-gray-300">Enable forgot password link</span>
                 </label>
-            </div>
-        </div>
-
-        <!-- Advanced Authentication -->
-        <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-gray-200 dark:border-slate-700 p-6">
-            <div class="flex items-center mb-6">
-                <Shield class="w-5 h-5 text-gray-400 mr-2" />
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Advanced Authentication</h2>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign in with Email</p>
-                        <p class="text-sm text-gray-500">Expose email sign-in option</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_in_with_email" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign in with Username</p>
-                        <p class="text-sm text-gray-500">Expose username sign-in option</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_in_with_username" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign up with Email</p>
-                        <p class="text-sm text-gray-500">Allow email-based registration</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_up_with_email" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign up with GitLab</p>
-                        <p class="text-sm text-gray-500">Expose GitLab sign-up button</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_up_with_gitlab" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign up with Google</p>
-                        <p class="text-sm text-gray-500">Expose Google sign-up button</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_up_with_google" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign up with Office365</p>
-                        <p class="text-sm text-gray-500">Expose Office365 sign-up button</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_up_with_office365" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Sign up with OpenID</p>
-                        <p class="text-sm text-gray-500">Expose OpenID sign-up button</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_sign_up_with_openid" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Enable User Creation</p>
-                        <p class="text-sm text-gray-500">Allow new users to be created</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_user_creation" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Open Server</p>
-                        <p class="text-sm text-gray-500">Expose open server registration</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_open_server" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Guest Accounts</p>
-                        <p class="text-sm text-gray-500">Allow guest account access</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_guest_accounts" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Multi-factor Authentication</p>
-                        <p class="text-sm text-gray-500">Enable MFA on clients</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_multifactor_authentication" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Enforce MFA</p>
-                        <p class="text-sm text-gray-500">Require MFA for users</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enforce_multifactor_authentication" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Enable SAML</p>
-                        <p class="text-sm text-gray-500">Expose SAML login option</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_saml" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-                <label class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-900 rounded-lg">
-                    <div>
-                        <p class="font-medium text-gray-900 dark:text-white">Enable LDAP</p>
-                        <p class="text-sm text-gray-500">Expose LDAP login option</p>
-                    </div>
-                    <input type="checkbox" v-model="authForm.enable_ldap" class="w-5 h-5 text-indigo-600 rounded" />
-                </label>
-            </div>
-        </div>
-
-        <!-- SSO Configuration (shown when SSO is enabled) -->
-        <div v-if="authForm.enable_sso" class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-gray-200 dark:border-slate-700 p-6">
-            <div class="flex items-center mb-6">
-                <Shield class="w-5 h-5 text-gray-400 mr-2" />
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">OIDC Provider Configuration</h2>
-            </div>
-            
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Display Name</label>
-                    <input 
-                        v-model="ssoForm.display_name"
-                        type="text"
-                        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
-                        placeholder="Company SSO"
-                    />
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Issuer URL</label>
-                    <input 
-                        v-model="ssoForm.issuer_url"
-                        type="url"
-                        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
-                        placeholder="https://auth.example.com"
-                    />
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Client ID</label>
-                    <input 
-                        v-model="ssoForm.client_id"
-                        type="text"
-                        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
-                    />
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Client Secret</label>
-                    <input 
-                        v-model="ssoForm.client_secret"
-                        type="password"
-                        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
-                    />
-                </div>
             </div>
         </div>
 
