@@ -120,10 +120,27 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
     // Handle incoming messages from client
     let state_for_receive = state.clone();
     let username_for_receive = username.clone();
+    let connection_id_for_receive = connection_id_str.clone();
     let receive_task = tokio::spawn(async move {
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(Message::Text(text)) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
+                            if crate::api::v4::calls_plugin::handle_ws_action(
+                                &state_for_receive,
+                                user_id,
+                                &connection_id_for_receive,
+                                action,
+                                value.get("data"),
+                            )
+                            .await
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
                     if !websocket_core::handle_client_envelope_message(
                         &state_for_receive,
                         user_id,

@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
@@ -53,6 +52,15 @@ pub fn router() -> Router<AppState> {
         .route("/plugins/com.mattermost.calls/config", get(get_config))
         // Channels with calls enabled
         .route("/plugins/com.mattermost.calls/channels", get(get_channels))
+        // Avoid overlap with /api/v4/plugins/{plugin_id}/enable|disable mutation routes.
+        .route(
+            "/plugins/com.mattermost.calls/enable",
+            post(plugin_management_enable_not_implemented),
+        )
+        .route(
+            "/plugins/com.mattermost.calls/disable",
+            post(plugin_management_disable_not_implemented),
+        )
         // Mattermost mobile compatibility: some clients call
         // /plugins/com.mattermost.calls/{channel_id}?mobilev2=true directly.
         .route(
@@ -163,6 +171,28 @@ pub fn router() -> Router<AppState> {
         )
         // Slash commands
         .merge(commands::router())
+}
+
+async fn plugin_management_enable_not_implemented(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.plugins.enable.not_implemented.app_error",
+        "Plugin enable is not implemented.",
+        "POST /api/v4/plugins/{plugin_id}/enable is not supported in this server.",
+    ))
+}
+
+async fn plugin_management_disable_not_implemented(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.plugins.disable.not_implemented.app_error",
+        "Plugin disable is not implemented.",
+        "POST /api/v4/plugins/{plugin_id}/disable is not supported in this server.",
+    ))
 }
 
 /// Helper to resolve a channel ID which might be a UUID, a Mattermost encoded ID, or a DM name.
