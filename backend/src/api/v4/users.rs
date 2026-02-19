@@ -964,7 +964,8 @@ async fn attach_device(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_device_token;
+    use super::{parse_timezone_for_update, resolve_device_token};
+    use serde_json::json;
 
     #[test]
     fn resolve_device_token_uses_request_token_when_parsed_token_missing() {
@@ -980,6 +981,44 @@ mod tests {
             resolve_device_token("parsed-token", Some("request-token")),
             Some("parsed-token".to_string())
         );
+    }
+
+    #[test]
+    fn parse_timezone_prefers_automatic_when_enabled() {
+        let timezone = json!({
+            "useAutomaticTimezone": "true",
+            "automaticTimezone": "America/New_York",
+            "manualTimezone": "Europe/Berlin"
+        });
+
+        assert_eq!(
+            parse_timezone_for_update(Some(&timezone)),
+            Some("America/New_York".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_timezone_uses_manual_when_automatic_disabled() {
+        let timezone = json!({
+            "useAutomaticTimezone": false,
+            "automaticTimezone": "America/New_York",
+            "manualTimezone": "Europe/Berlin"
+        });
+
+        assert_eq!(
+            parse_timezone_for_update(Some(&timezone)),
+            Some("Europe/Berlin".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_timezone_returns_none_for_empty_value() {
+        let timezone = json!({
+            "useAutomaticTimezone": "true",
+            "automaticTimezone": ""
+        });
+
+        assert_eq!(parse_timezone_for_update(Some(&timezone)), None);
     }
 }
 
@@ -1390,7 +1429,35 @@ struct PatchMeRequest {
     last_name: Option<String>,
     position: Option<String>,
     #[serde(default)]
+    timezone: Option<serde_json::Value>,
+    #[serde(default)]
     notify_props: Option<serde_json::Value>,
+}
+
+fn parse_timezone_for_update(timezone: Option<&serde_json::Value>) -> Option<String> {
+    let timezone = timezone?;
+    let obj = timezone.as_object()?;
+
+    let use_automatic = obj
+        .get("useAutomaticTimezone")
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_str().map(|raw| raw.eq_ignore_ascii_case("true")))
+        })
+        .unwrap_or(true);
+
+    let selected = if use_automatic {
+        obj.get("automaticTimezone")
+    } else {
+        obj.get("manualTimezone")
+    };
+
+    selected
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn update_status(
@@ -1435,6 +1502,7 @@ async fn patch_me(
     body: Bytes,
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
+    let timezone = parse_timezone_for_update(input.timezone.as_ref());
 
     // Update any provided fields
     sqlx::query(
@@ -1445,8 +1513,9 @@ async fn patch_me(
             nickname = COALESCE($3, nickname),
             position = COALESCE($4, position),
             notify_props = COALESCE($5, notify_props),
+            timezone = COALESCE($6, timezone),
             updated_at = NOW()
-        WHERE id = $6
+        WHERE id = $7
         "#,
     )
     .bind(&input.first_name)
@@ -1454,6 +1523,7 @@ async fn patch_me(
     .bind(&input.nickname)
     .bind(&input.position)
     .bind(input.notify_props.as_ref())
+    .bind(timezone.as_deref())
     .bind(auth.user_id)
     .execute(&state.db)
     .await?;
@@ -1914,6 +1984,7 @@ async fn patch_user(
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
     let user_id = resolve_user_id(&user_id, &auth)?;
+    let timezone = parse_timezone_for_update(input.timezone.as_ref());
 
     // Update user profile fields
     sqlx::query(
@@ -1923,14 +1994,16 @@ async fn patch_user(
             last_name = COALESCE($3, last_name),
             position = COALESCE($4, position),
             notify_props = COALESCE($5, notify_props),
+            timezone = COALESCE($6, timezone),
             updated_at = NOW()
-        WHERE id = $6"#,
+        WHERE id = $7"#,
     )
     .bind(input.nickname)
     .bind(input.first_name)
     .bind(input.last_name)
     .bind(input.position)
     .bind(input.notify_props)
+    .bind(timezone.as_deref())
     .bind(user_id)
     .execute(&state.db)
     .await?;

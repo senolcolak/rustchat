@@ -52,6 +52,8 @@ pub struct User {
     pub custom_status: Option<serde_json::Value>,
     #[sqlx(default)]
     pub notify_props: serde_json::Value,
+    #[sqlx(default)]
+    pub timezone: Option<String>,
     pub last_login_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -78,6 +80,7 @@ pub struct UserResponse {
     pub status_expires_at: Option<DateTime<Utc>>,
     pub custom_status: Option<serde_json::Value>,
     pub notify_props: serde_json::Value,
+    pub timezone: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -102,6 +105,7 @@ impl From<User> for UserResponse {
             status_expires_at: user.status_expires_at,
             custom_status: user.custom_status,
             notify_props: user.notify_props,
+            timezone: user.timezone,
             created_at: user.created_at,
         }
     }

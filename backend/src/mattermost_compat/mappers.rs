@@ -19,6 +19,12 @@ fn post_type_from_props(props: &serde_json::Value) -> String {
 
 impl From<User> for mm::User {
     fn from(user: User) -> Self {
+        let tz = user
+            .timezone
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("UTC");
+
         mm::User {
             id: encode_mm_id(user.id),
             create_at: user.created_at.timestamp_millis(),
@@ -39,7 +45,11 @@ impl From<User> for mm::User {
             last_picture_update: 0,
             failed_attempts: 0,
             mfa_active: false,
-            timezone: json!({ "automaticTimezone": "UTC", "manualTimezone": "UTC", "useAutomaticTimezone": "true" }),
+            timezone: json!({
+                "automaticTimezone": tz,
+                "manualTimezone": tz,
+                "useAutomaticTimezone": "true"
+            }),
         }
     }
 }
@@ -328,6 +338,7 @@ mod tests {
             status_expires_at: None,
             custom_status: None,
             notify_props: serde_json::json!({}),
+            timezone: Some("UTC".to_string()),
             last_login_at: None,
             created_at: now,
             updated_at: now,
