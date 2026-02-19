@@ -485,7 +485,7 @@ pub(crate) async fn update_categories_internal(
 
     for cat in input.categories {
         let cat_uuid = parse_mm_or_uuid(&cat.id)
-            .ok_or_else(|| AppError::BadRequest("Invalid category ID".to_string()))?;
+            .unwrap_or_else(|| Uuid::new_v5(&Uuid::NAMESPACE_OID, cat.id.as_bytes()));
 
         let cat_user_id = parse_mm_or_uuid(&cat.user_id)
             .ok_or_else(|| AppError::BadRequest("Invalid category user_id".to_string()))?;
@@ -563,7 +563,7 @@ pub(crate) async fn update_category_order_internal(
 
     for (i, cat_id_str) in order.iter().enumerate() {
         let cat_uuid = parse_mm_or_uuid(cat_id_str)
-            .ok_or_else(|| AppError::BadRequest("Invalid category ID".to_string()))?;
+            .unwrap_or_else(|| Uuid::new_v5(&Uuid::NAMESPACE_OID, cat_id_str.as_bytes()));
         sqlx::query(
             "UPDATE channel_categories SET sort_order = $1 WHERE id = $2 AND user_id = $3 AND team_id = $4"
         )

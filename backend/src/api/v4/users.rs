@@ -596,10 +596,17 @@ async fn hydrate_direct_channel_display_name(
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct MyTeamChannelsQuery {
+    #[serde(default)]
+    last_delete_at: i64,
+}
+
 async fn my_team_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(team_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<MyTeamChannelsQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
@@ -610,17 +617,33 @@ async fn my_team_channels(
         "Fetching channels for user"
     );
 
-    let mut channels: Vec<Channel> = sqlx::query_as(
-        r#"
-        SELECT c.* FROM channels c
-        JOIN channel_members cm ON c.id = cm.channel_id
-        WHERE c.team_id = $1 AND cm.user_id = $2
-        "#,
-    )
-    .bind(team_id)
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+    let mut channels: Vec<Channel> = if query.last_delete_at > 0 {
+        let ts = chrono::DateTime::from_timestamp_millis(query.last_delete_at).unwrap_or_default();
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.updated_at >= $3
+            "#,
+        )
+        .bind(team_id)
+        .bind(auth.user_id)
+        .bind(ts)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE c.team_id = $1 AND cm.user_id = $2
+            "#,
+        )
+        .bind(team_id)
+        .bind(auth.user_id)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     tracing::debug!(
         user_id = %auth.user_id,
@@ -665,20 +688,42 @@ async fn get_team_channels_for_user(
     Ok(Json(mm_channels))
 }
 
+#[derive(Deserialize)]
+struct MyChannelsQuery {
+    #[serde(default)]
+    since: i64,
+}
+
 async fn my_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
+    axum::extract::Query(query): axum::extract::Query<MyChannelsQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let mut channels: Vec<Channel> = sqlx::query_as(
-        r#"
-        SELECT c.* FROM channels c
-        JOIN channel_members cm ON c.id = cm.channel_id
-        WHERE cm.user_id = $1
-        "#,
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+    let mut channels: Vec<Channel> = if query.since > 0 {
+        let ts = chrono::DateTime::from_timestamp_millis(query.since).unwrap_or_default();
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE cm.user_id = $1 AND c.updated_at >= $2
+            "#,
+        )
+        .bind(auth.user_id)
+        .bind(ts)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE cm.user_id = $1
+            "#,
+        )
+        .bind(auth.user_id)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     for channel in &mut channels {
         hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;

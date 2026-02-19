@@ -122,7 +122,7 @@ async fn get_category(
     let team_id = parse_mm_or_uuid(&params.team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
     let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
 
     // Fetch the specific category
     let category: Option<CategoryRow> = sqlx::query_as(
@@ -193,7 +193,7 @@ async fn update_category(
     let team_id = parse_mm_or_uuid(&params.team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
     let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -283,7 +283,7 @@ async fn delete_category(
     let team_id = parse_mm_or_uuid(&params.team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
     let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
 
     // First check category exists
     let category: Option<CategoryRow> = sqlx::query_as(
