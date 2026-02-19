@@ -9,6 +9,14 @@ use crate::models::{
 use serde_json::json;
 use uuid::Uuid;
 
+fn post_type_from_props(props: &serde_json::Value) -> String {
+    props
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 impl From<User> for mm::User {
     fn from(user: User) -> Self {
         mm::User {
@@ -25,7 +33,7 @@ impl From<User> for mm::User {
             auth_service: "".to_string(),
             roles: map_system_role(&user.role),
             locale: "en".to_string(),
-            notify_props: json!({ "email": "true", "push": "mention" }),
+            notify_props: user.notify_props.clone(),
             props: json!({}),
             last_password_update: 0,
             last_picture_update: 0,
@@ -130,6 +138,7 @@ impl From<Channel> for mm::Channel {
 
 impl From<Post> for mm::Post {
     fn from(post: Post) -> Self {
+        let post_type = post_type_from_props(&post.props);
         mm::Post {
             id: encode_mm_id(post.id),
             create_at: post.created_at.timestamp_millis(),
@@ -141,7 +150,7 @@ impl From<Post> for mm::Post {
             root_id: post.root_post_id.map(encode_mm_id).unwrap_or_default(),
             original_id: "".to_string(),
             message: post.message,
-            post_type: "".to_string(),
+            post_type,
             props: post.props,
             hashtags: "".to_string(),
             file_ids: post.file_ids.iter().map(|id| encode_mm_id(*id)).collect(),
@@ -153,6 +162,7 @@ impl From<Post> for mm::Post {
 
 impl From<PostResponse> for mm::Post {
     fn from(post: PostResponse) -> Self {
+        let post_type = post_type_from_props(&post.props);
         // Build metadata with files if files are present
         let metadata = if !post.files.is_empty() {
             let mm_files: Vec<mm::FileInfo> = post
@@ -175,8 +185,8 @@ impl From<PostResponse> for mm::Post {
                         .to_string(),
                     size: f.size,
                     mime_type: f.mime_type,
-                    width: 0,
-                    height: 0,
+                    width: f.width,
+                    height: f.height,
                     has_preview_image: f.thumbnail_url.is_some(),
                     mini_preview: None,
                 })
@@ -214,7 +224,7 @@ impl From<PostResponse> for mm::Post {
             root_id: post.root_post_id.map(encode_mm_id).unwrap_or_default(),
             original_id: "".to_string(),
             message: post.message,
-            post_type: "".to_string(),
+            post_type,
             props: post.props,
             hashtags: "".to_string(),
             file_ids: post.file_ids.iter().map(|id| encode_mm_id(*id)).collect(),
@@ -234,6 +244,7 @@ impl From<TeamMember> for mm::TeamMember {
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "system_admin",
+            presence: None,
         }
     }
 }
@@ -288,6 +299,7 @@ impl From<FileInfo> for mm::FileInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::file::FileUploadResponse;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -315,6 +327,7 @@ mod tests {
             status_emoji: None,
             status_expires_at: None,
             custom_status: None,
+            notify_props: serde_json::json!({}),
             last_login_at: None,
             created_at: now,
             updated_at: now,
@@ -351,5 +364,57 @@ mod tests {
         assert_eq!(mm_c.team_id, encode_mm_id(team_id));
         assert_eq!(mm_c.channel_type, "O");
         assert_eq!(mm_c.name, "general");
+    }
+
+    #[test]
+    fn test_post_response_file_dimensions_mapped_to_metadata() {
+        let now = Utc::now();
+        let post_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let post = PostResponse {
+            id: post_id,
+            channel_id,
+            user_id,
+            root_post_id: None,
+            message: "image post".to_string(),
+            props: serde_json::json!({}),
+            file_ids: vec![file_id],
+            is_pinned: false,
+            created_at: now,
+            edited_at: None,
+            deleted_at: None,
+            reply_count: 0,
+            last_reply_at: None,
+            username: Some("alice".to_string()),
+            avatar_url: None,
+            email: None,
+            files: vec![FileUploadResponse {
+                id: file_id,
+                name: "photo.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                size: 1024,
+                width: 1280,
+                height: 720,
+                url: "/api/v4/files/file".to_string(),
+                thumbnail_url: Some("/api/v4/files/file/thumbnail".to_string()),
+            }],
+            reactions: vec![],
+            is_saved: false,
+            client_msg_id: None,
+            seq: 1,
+        };
+
+        let mm_post: mm::Post = post.into();
+        let metadata = mm_post.metadata.expect("metadata should exist");
+        let files = metadata
+            .get("files")
+            .and_then(|v| v.as_array())
+            .expect("files metadata should exist");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get("width"), Some(&serde_json::json!(1280)));
+        assert_eq!(files[0].get("height"), Some(&serde_json::json!(720)));
     }
 }

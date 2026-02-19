@@ -25,7 +25,7 @@ use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
-use crate::realtime::{WsBroadcast, WsEnvelope};
+use crate::realtime::{EventType, WsBroadcast, WsEnvelope};
 
 pub mod commands;
 pub mod sfu;
@@ -52,6 +52,15 @@ pub fn router() -> Router<AppState> {
         .route("/plugins/com.mattermost.calls/config", get(get_config))
         // Channels with calls enabled
         .route("/plugins/com.mattermost.calls/channels", get(get_channels))
+        // Avoid overlap with /api/v4/plugins/{plugin_id}/enable|disable mutation routes.
+        .route(
+            "/plugins/com.mattermost.calls/enable",
+            post(plugin_management_enable_not_implemented),
+        )
+        .route(
+            "/plugins/com.mattermost.calls/disable",
+            post(plugin_management_disable_not_implemented),
+        )
         // Mattermost mobile compatibility: some clients call
         // /plugins/com.mattermost.calls/{channel_id}?mobilev2=true directly.
         .route(
@@ -162,6 +171,28 @@ pub fn router() -> Router<AppState> {
         )
         // Slash commands
         .merge(commands::router())
+}
+
+async fn plugin_management_enable_not_implemented(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.plugins.enable.not_implemented.app_error",
+        "Plugin enable is not implemented.",
+        "POST /api/v4/plugins/{plugin_id}/enable is not supported in this server.",
+    ))
+}
+
+async fn plugin_management_disable_not_implemented(
+    State(_state): State<AppState>,
+    _auth: MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.plugins.disable.not_implemented.app_error",
+        "Plugin disable is not implemented.",
+        "POST /api/v4/plugins/{plugin_id}/disable is not supported in this server.",
+    ))
 }
 
 /// Helper to resolve a channel ID which might be a UUID, a Mattermost encoded ID, or a DM name.
@@ -286,7 +317,6 @@ struct CallStateResponse {
     screen_sharing_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     screen_sharing_session_id_raw: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     thread_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<Value>,
@@ -329,6 +359,25 @@ struct HostControlRequest {
 #[derive(Debug, Deserialize)]
 struct HostMakeRequest {
     new_host_id: String,
+}
+
+fn is_system_admin(auth: &MmAuthUser) -> bool {
+    auth.role
+        .split_whitespace()
+        .any(|role| role == "system_admin")
+}
+
+fn can_manage_call(auth: &MmAuthUser, call: &CallState) -> bool {
+    call.host_id == auth.user_id || is_system_admin(auth)
+}
+
+fn is_host_session_active(_state: &AppState, call: &CallState) -> bool {
+    // The host has an active session if they're in the participants list.
+    // We don't check the connection_store here because:
+    // 1. The call session_id is different from the WebSocket connection_id
+    // 2. A participant in the call should be considered "active" regardless of
+    //    their WebSocket connection state (they might reconnect via WS but stay in the call)
+    call.participants.contains_key(&call.host_id)
 }
 
 // WebRTC Signaling Request/Response structs
@@ -654,6 +703,8 @@ async fn build_call_state_response(
     channel_id_for_response: String,
     channel_uuid: Uuid,
 ) -> ApiResult<CallStateResponse> {
+    let thread_id = ensure_call_thread_id(state, call).await;
+
     let call_participants = state
         .call_state_manager
         .get_participants(call.call_id)
@@ -741,10 +792,148 @@ async fn build_call_state_response(
             .map(|participant| participant.session_id.to_string()),
         screen_sharing_session_id_raw: screen_sharing_session
             .map(|participant| participant.session_id.to_string()),
-        thread_id: call.thread_id.map(encode_mm_id),
+        thread_id: thread_id.map(encode_mm_id),
         recording: None,
         dismissed_notification: Some(dismissed_notification),
     })
+}
+
+#[derive(sqlx::FromRow)]
+struct CallThreadPostRow {
+    id: Uuid,
+    created_at: chrono::DateTime<Utc>,
+    seq: i64,
+}
+
+async fn create_call_thread_post(
+    state: &AppState,
+    call_id: Uuid,
+    channel_id: Uuid,
+    owner_id: Uuid,
+    started_at: i64,
+) -> Result<Uuid, sqlx::Error> {
+    let props = serde_json::json!({
+        "type": "custom_calls",
+        "call_id": encode_mm_id(call_id),
+        "start_at": started_at,
+        "end_at": 0,
+        "participants": [encode_mm_id(owner_id)],
+    });
+
+    let post: CallThreadPostRow = sqlx::query_as(
+        r#"
+        INSERT INTO posts (channel_id, user_id, message, props, file_ids)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, created_at, seq
+        "#,
+    )
+    .bind(channel_id)
+    .bind(owner_id)
+    .bind("")
+    .bind(&props)
+    .bind(Vec::<Uuid>::new())
+    .fetch_one(&state.db)
+    .await?;
+
+    let mm_post = crate::mattermost_compat::models::Post {
+        id: encode_mm_id(post.id),
+        create_at: post.created_at.timestamp_millis(),
+        update_at: post.created_at.timestamp_millis(),
+        delete_at: 0,
+        edit_at: 0,
+        user_id: encode_mm_id(owner_id),
+        channel_id: encode_mm_id(channel_id),
+        root_id: String::new(),
+        original_id: String::new(),
+        message: String::new(),
+        post_type: "custom_calls".to_string(),
+        props,
+        hashtags: String::new(),
+        file_ids: Vec::new(),
+        pending_post_id: String::new(),
+        metadata: None,
+    };
+
+    let broadcast = WsEnvelope::event(EventType::MessageCreated, mm_post, Some(channel_id))
+        .with_broadcast(WsBroadcast {
+            channel_id: Some(channel_id),
+            team_id: None,
+            user_id: None,
+            exclude_user_id: None,
+        });
+    state.ws_hub.broadcast(broadcast).await;
+
+    let _ =
+        crate::services::unreads::increment_unreads(state, channel_id, owner_id, post.seq).await;
+
+    Ok(post.id)
+}
+
+async fn mark_call_thread_post_ended(
+    state: &AppState,
+    thread_id: Uuid,
+    ended_at: i64,
+) -> Result<Option<crate::models::post::PostResponse>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        WITH updated_post AS (
+            UPDATE posts
+            SET
+                props = jsonb_set(
+                    COALESCE(props, '{}'::jsonb),
+                    '{end_at}',
+                    to_jsonb($1::bigint),
+                    true
+                ),
+                edited_at = NOW()
+            WHERE id = $2
+            RETURNING *
+        )
+        SELECT p.id, p.channel_id, p.user_id, p.root_post_id, p.message, p.props, p.file_ids,
+               p.is_pinned, p.created_at, p.edited_at, p.deleted_at,
+               p.reply_count::int8 as reply_count, p.last_reply_at, p.seq,
+               u.username, u.avatar_url, u.email
+        FROM updated_post p
+        LEFT JOIN users u ON p.user_id = u.id
+        "#,
+    )
+    .bind(ended_at)
+    .bind(thread_id)
+    .fetch_optional(&state.db)
+    .await
+}
+
+async fn ensure_call_thread_id(state: &AppState, call: &CallState) -> Option<Uuid> {
+    if let Some(thread_id) = call.thread_id {
+        return Some(thread_id);
+    }
+
+    match create_call_thread_post(
+        state,
+        call.call_id,
+        call.channel_id,
+        call.owner_id,
+        call.started_at,
+    )
+    .await
+    {
+        Ok(thread_id) => {
+            state
+                .call_state_manager
+                .set_thread_id(call.call_id, Some(thread_id))
+                .await;
+            Some(thread_id)
+        }
+        Err(err) => {
+            warn!(
+                call_id = %call.call_id,
+                channel_id = %call.channel_id,
+                error = %err,
+                "calls failed to create call thread post"
+            );
+            None
+        }
+    }
 }
 
 /// GET /plugins/com.mattermost.calls/{channel_id}
@@ -878,6 +1067,8 @@ async fn start_call(
         "calls.start_call call state created"
     );
 
+    let thread_id = ensure_call_thread_id(&state, &call).await;
+
     // Add owner as first participant (muted by default)
     let participant = Participant {
         user_id: auth.user_id,
@@ -925,6 +1116,8 @@ async fn start_call(
     );
 
     // Broadcast call_start event
+    // Note: thread_id is used as post_id for call posts in Mattermost
+    let thread_id_str = thread_id.map(encode_mm_id).unwrap_or_default();
     broadcast_call_event(
         &state,
         "custom_com.mattermost.calls_call_start",
@@ -938,7 +1131,8 @@ async fn start_call(
             "start_at": now,
             "owner_id": encode_mm_id(auth.user_id),
             "host_id": encode_mm_id(auth.user_id),
-            "thread_id": call.thread_id.map(encode_mm_id),
+            "thread_id": thread_id_str.clone(),
+            "post_id": thread_id_str,  // Mobile expects post_id for navigation
         }),
         Some(auth.user_id), // Exclude sender
     )
@@ -952,7 +1146,7 @@ async fn start_call(
         serde_json::json!({
             "channel_id": channel_id,
             "user_id": encode_mm_id(auth.user_id),
-            "session_id": encode_mm_id(participant.session_id),
+            "session_id": participant.session_id.to_string(),
             "muted": true,
             "raised_hand": false,
         }),
@@ -960,9 +1154,17 @@ async fn start_call(
     )
     .await;
 
-    if is_dm_or_gm_channel(&state, channel_uuid).await? {
-        broadcast_ringing_event(&state, channel_uuid, call_id, auth.user_id, Some(auth.user_id)).await;
-    }
+    // Send ringing notifications to all channel members
+    // This ensures push notifications are sent for calls in ALL channel types
+    // (DMs, groups, and regular channels)
+    broadcast_ringing_event(
+        &state,
+        channel_uuid,
+        call_id,
+        auth.user_id,
+        Some(auth.user_id),
+    )
+    .await;
 
     broadcast_call_state_event(&state, channel_uuid, None).await;
 
@@ -1096,7 +1298,7 @@ async fn join_call(
         serde_json::json!({
             "channel_id": channel_id,
             "user_id": encode_mm_id(auth.user_id),
-            "session_id": encode_mm_id(participant.session_id),
+            "session_id": participant.session_id.to_string(),
             "muted": true,
             "raised_hand": false,
         }),
@@ -1184,15 +1386,14 @@ async fn leave_call(
         None,
     )
     .await;
-    broadcast_call_state_event(&state, channel_uuid, None).await;
-
-    let participants = call_manager.get_participants(call.call_id).await;
-    if participants.len() <= 1 {
+    let remaining =
+        reconcile_after_participant_left(&state, call.call_id, channel_uuid, auth.user_id).await;
+    if remaining <= 1 {
         schedule_empty_call_timeout(&state, call.call_id, channel_uuid);
         info!(
             call_id = %call.call_id,
             channel_id = %channel_uuid,
-            remaining_participants = participants.len(),
+            remaining_participants = remaining,
             timeout_secs = EMPTY_CALL_TIMEOUT_SECS,
             "calls.leave_call scheduled no-remote-participant timeout"
         );
@@ -1200,7 +1401,7 @@ async fn leave_call(
         info!(
             call_id = %call.call_id,
             channel_id = %channel_uuid,
-            remaining_participants = participants.len(),
+            remaining_participants = remaining,
             "calls.leave_call completed"
         );
     }
@@ -1220,7 +1421,7 @@ async fn end_call_endpoint(
     let channel_or_call_uuid = resolve_channel_id(&state, &channel_id).await?;
     let call_manager = state.call_state_manager.as_ref();
 
-    let call = match call_manager
+    let mut call = match call_manager
         .get_call_by_channel(&channel_or_call_uuid)
         .await
     {
@@ -1236,8 +1437,12 @@ async fn end_call_endpoint(
     };
 
     check_channel_permission(&state, auth.user_id, call.channel_id).await?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    let caller_is_participant = call.participants.contains_key(&auth.user_id);
+    let caller_is_only_participant = call.participants.len() <= 1 && caller_is_participant;
+    let host_session_inactive = caller_is_participant && !is_host_session_active(&state, &call);
+    if !can_manage_call(&auth, &call) && !caller_is_only_participant && !host_session_inactive {
         return Err(AppError::Forbidden(
             "Only the host can end this call".to_string(),
         ));
@@ -1325,12 +1530,13 @@ async fn host_screen_off(
         .ok_or_else(|| AppError::BadRequest("Invalid session_id".to_string()))?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can stop screen sharing".to_string(),
         ));
@@ -1426,6 +1632,19 @@ async fn send_reaction(
     Json(payload): Json<ReactionRequest>,
 ) -> ApiResult<Json<StatusResponse>> {
     let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    let timestamp = Utc::now().timestamp_millis();
+    let emoji_name = crate::mattermost_compat::emoji_data::get_short_name_for_emoji(&payload.emoji);
+
+    let session_id = state
+        .call_state_manager
+        .get_call_by_channel(&channel_uuid)
+        .await
+        .and_then(|call| {
+            call.participants
+                .get(&auth.user_id)
+                .map(|participant| participant.session_id.to_string())
+        })
+        .unwrap_or_default();
 
     // Broadcast reaction event
     broadcast_call_event(
@@ -1433,9 +1652,14 @@ async fn send_reaction(
         "custom_com.mattermost.calls_user_reacted",
         &channel_uuid,
         serde_json::json!({
-            "channel_id": channel_id,
             "user_id": encode_mm_id(auth.user_id),
-            "emoji": payload.emoji,
+            "session_id": session_id,
+            "reaction": payload.emoji,
+            "timestamp": timestamp,
+            "emoji": {
+                "name": emoji_name,
+                "literal": payload.emoji,
+            },
         }),
         None,
     )
@@ -1710,13 +1934,14 @@ async fn host_mute(
         .ok_or_else(|| AppError::BadRequest("Invalid session_id".to_string()))?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
     // Authorize: Only host can mute others
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can mute other participants".to_string(),
         ));
@@ -1778,12 +2003,13 @@ async fn host_mute_others(
     let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can mute other participants".to_string(),
         ));
@@ -1845,12 +2071,13 @@ async fn host_remove_user(
         .ok_or_else(|| AppError::BadRequest("Invalid session_id".to_string()))?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can remove participants".to_string(),
         ));
@@ -1906,8 +2133,9 @@ async fn host_remove_user(
     )
     .await;
 
-    let participants = call_manager.get_participants(call.call_id).await;
-    if participants.len() <= 1 {
+    let remaining =
+        reconcile_after_participant_left(&state, call.call_id, channel_uuid, target_user_id).await;
+    if remaining <= 1 {
         schedule_empty_call_timeout(&state, call.call_id, channel_uuid);
     }
 
@@ -1929,12 +2157,13 @@ async fn host_lower_hand(
         .ok_or_else(|| AppError::BadRequest("Invalid session_id".to_string()))?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can lower hands".to_string(),
         ));
@@ -2009,12 +2238,13 @@ async fn host_make_moderator(
         .ok_or_else(|| AppError::BadRequest("Invalid new_host_id".to_string()))?;
 
     let call_manager = state.call_state_manager.as_ref();
-    let call = call_manager
+    let mut call = call_manager
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call in this channel".to_string()))?;
+    call = normalize_call_host_if_stale(&state, call).await;
 
-    if call.host_id != auth.user_id {
+    if !can_manage_call(&auth, &call) {
         return Err(AppError::Forbidden(
             "Only the host can transfer host status".to_string(),
         ));
@@ -2030,28 +2260,7 @@ async fn host_make_moderator(
     // Transfer host in state
     call_manager.set_host(call.call_id, new_host_uuid).await;
 
-    let event_payload = serde_json::json!({
-        "channel_id": channel_id,
-        "hostID": payload.new_host_id,
-        "host_id": payload.new_host_id,
-    });
-    broadcast_call_event(
-        &state,
-        "custom_com.mattermost.calls_call_host_changed",
-        &channel_uuid,
-        event_payload.clone(),
-        None,
-    )
-    .await;
-    // Legacy alias kept for compatibility with existing rustchat consumers.
-    broadcast_call_event(
-        &state,
-        "custom_com.mattermost.calls_host_changed",
-        &channel_uuid,
-        event_payload,
-        None,
-    )
-    .await;
+    broadcast_host_changed_event(&state, channel_uuid, new_host_uuid).await;
     broadcast_call_state_event(&state, channel_uuid, None).await;
 
     Ok(Json(StatusResponse {
@@ -2067,6 +2276,7 @@ async fn ring_users(
     Path(channel_id): Path<String>,
 ) -> ApiResult<Json<StatusResponse>> {
     let channel_uuid = resolve_channel_id(&state, &channel_id).await?;
+    check_channel_permission(&state, auth.user_id, channel_uuid).await?;
 
     // Check if call exists
     let call_manager = state.call_state_manager.as_ref();
@@ -2074,6 +2284,32 @@ async fn ring_users(
         .get_call_by_channel(&channel_uuid)
         .await
         .ok_or_else(|| AppError::NotFound("No active call to ring".to_string()))?;
+
+    let thread_id = ensure_call_thread_id(&state, &call).await;
+
+    // Mattermost-mobile compatibility: stock mobile clients trigger incoming call UX
+    // from calls_call_start and do not handle calls_ringing directly.
+    // Note: thread_id is used as post_id for call posts in Mattermost
+    let thread_id_str = thread_id.map(encode_mm_id).unwrap_or_default();
+    broadcast_call_event(
+        &state,
+        "custom_com.mattermost.calls_call_start",
+        &channel_uuid,
+        serde_json::json!({
+            "id": encode_mm_id(call.call_id),
+            "channelID": encode_mm_id(channel_uuid),
+            "start_at": call.started_at,
+            "owner_id": encode_mm_id(call.owner_id),
+            "host_id": encode_mm_id(call.host_id),
+            "thread_id": thread_id_str.clone(),
+            "post_id": thread_id_str,  // Mobile expects post_id for navigation
+            "call_id": encode_mm_id(call.call_id),
+            "channel_id": encode_mm_id(channel_uuid),
+            "user_id": encode_mm_id(call.owner_id),
+        }),
+        Some(auth.user_id),
+    )
+    .await;
 
     broadcast_ringing_event(&state, channel_uuid, call.call_id, auth.user_id, None).await;
 
@@ -2381,10 +2617,27 @@ async fn broadcast_screen_share_event(
     session_id: Uuid,
     is_on: bool,
 ) {
+    let call = state
+        .call_state_manager
+        .get_call_by_channel(&channel_id)
+        .await;
+    let call_id = call.map(|c| c.call_id).unwrap_or_default();
+
     let payload = serde_json::json!({
         "user_id": encode_mm_id(user_id),
+        "user_id_raw": user_id.to_string(),
         "session_id": session_id.to_string(),
+        "session_id_raw": session_id.to_string(),
     });
+
+    debug!(
+        call_id = %call_id,
+        channel_id = %channel_id,
+        user_id = %user_id,
+        session_id = %session_id,
+        is_on = is_on,
+        "calls.broadcast_screen_share_event"
+    );
 
     broadcast_call_event(
         state,
@@ -2460,6 +2713,102 @@ async fn broadcast_raise_hand_event(
     .await;
 }
 
+fn select_next_host(participants: &HashMap<Uuid, Participant>) -> Option<Uuid> {
+    participants
+        .values()
+        .min_by_key(|participant| (participant.joined_at, participant.user_id))
+        .map(|participant| participant.user_id)
+}
+
+async fn broadcast_host_changed_event(state: &AppState, channel_id: Uuid, new_host_id: Uuid) {
+    let encoded_host_id = encode_mm_id(new_host_id);
+    let event_payload = serde_json::json!({
+        "hostID": encoded_host_id,
+        "host_id": encoded_host_id,
+    });
+
+    broadcast_call_event(
+        state,
+        "custom_com.mattermost.calls_call_host_changed",
+        &channel_id,
+        event_payload.clone(),
+        None,
+    )
+    .await;
+    // Legacy alias kept for compatibility with existing rustchat consumers.
+    broadcast_call_event(
+        state,
+        "custom_com.mattermost.calls_host_changed",
+        &channel_id,
+        event_payload,
+        None,
+    )
+    .await;
+}
+
+async fn normalize_call_host_if_stale(state: &AppState, call: CallState) -> CallState {
+    if call.participants.is_empty() || call.participants.contains_key(&call.host_id) {
+        return call;
+    }
+
+    let Some(new_host_id) = select_next_host(&call.participants) else {
+        return call;
+    };
+
+    state
+        .call_state_manager
+        .set_host(call.call_id, new_host_id)
+        .await;
+    broadcast_host_changed_event(state, call.channel_id, new_host_id).await;
+    broadcast_call_state_event(state, call.channel_id, None).await;
+
+    state
+        .call_state_manager
+        .get_call(call.call_id)
+        .await
+        .unwrap_or(call)
+}
+
+async fn reconcile_after_participant_left(
+    state: &AppState,
+    call_id: Uuid,
+    channel_id: Uuid,
+    departed_user_id: Uuid,
+) -> usize {
+    let mut call = match state.call_state_manager.get_call(call_id).await {
+        Some(call) => call,
+        None => return 0,
+    };
+
+    if call.host_id == departed_user_id {
+        if let Some(new_host_id) = select_next_host(&call.participants) {
+            state
+                .call_state_manager
+                .set_host(call.call_id, new_host_id)
+                .await;
+            broadcast_host_changed_event(state, channel_id, new_host_id).await;
+            if let Some(updated_call) = state.call_state_manager.get_call(call_id).await {
+                call = updated_call;
+            }
+        }
+    } else if !call.participants.is_empty() && !call.participants.contains_key(&call.host_id) {
+        if let Some(new_host_id) = select_next_host(&call.participants) {
+            state
+                .call_state_manager
+                .set_host(call.call_id, new_host_id)
+                .await;
+            broadcast_host_changed_event(state, channel_id, new_host_id).await;
+            if let Some(updated_call) = state.call_state_manager.get_call(call_id).await {
+                call = updated_call;
+            }
+        }
+    }
+
+    broadcast_call_state_event(state, channel_id, None).await;
+
+    call.participants.len()
+}
+
 /// Handle websocket actions used by Mattermost mobile calls.
 /// Returns `true` when the action is recognized and handled.
 pub async fn handle_ws_action(
@@ -2478,8 +2827,8 @@ pub async fn handle_ws_action(
         "leave" => handle_ws_leave_call(state, user_id, connection_id).await,
         "sdp" => handle_ws_sdp(state, user_id, connection_id, data).await,
         "ice" => handle_ws_ice(state, user_id, connection_id, data).await,
-        "mute" => handle_ws_mute(state, user_id, connection_id, true).await,
-        "unmute" => handle_ws_mute(state, user_id, connection_id, false).await,
+        "mute" => handle_ws_mute(state, user_id, connection_id, data, true).await,
+        "unmute" => handle_ws_mute(state, user_id, connection_id, data, false).await,
         "raise_hand" => handle_ws_raise_hand(state, user_id, connection_id, true).await,
         "unraise_hand" => handle_ws_raise_hand(state, user_id, connection_id, false).await,
         "react" => handle_ws_reaction(state, user_id, connection_id, data).await,
@@ -2523,9 +2872,8 @@ async fn handle_ws_join_call(
     connection_id: &str,
     data: Option<&Value>,
 ) -> Result<(), String> {
-    let conn_uuid = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
     let data = data.ok_or_else(|| "Missing join payload".to_string())?;
+    let conn_uuid = resolve_ws_session_uuid(connection_id, Some(data))?;
     let channel_uuid = parse_join_channel_id(data)?;
 
     check_channel_permission(state, user_id, channel_uuid)
@@ -2566,7 +2914,6 @@ async fn handle_ws_join_call(
         if existing.session_id == conn_uuid {
             should_add_participant = false;
         } else {
-            call_manager.remove_participant(call.call_id, user_id).await;
             if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
                 let _ = sfu.remove_participant(existing.session_id).await;
             }
@@ -2602,6 +2949,8 @@ async fn handle_ws_join_call(
             .map_err(|e| format!("Failed to add participant to SFU: {e}"))?;
     }
 
+    let thread_id = ensure_call_thread_id(state, &call).await;
+
     if created_call {
         schedule_unanswered_call_timeout(state, call.call_id, channel_uuid);
         broadcast_call_event(
@@ -2614,13 +2963,17 @@ async fn handle_ws_join_call(
                 "start_at": call.started_at,
                 "owner_id": encode_mm_id(call.owner_id),
                 "host_id": encode_mm_id(call.owner_id),
-                "thread_id": call.thread_id.map(encode_mm_id),
+                "thread_id": thread_id.map(encode_mm_id),
                 "call_id": encode_mm_id(call.call_id),
                 "channel_id": encode_mm_id(channel_uuid),
             }),
             None,
         )
         .await;
+
+        // Send ringing notifications via push for mobile apps
+        // WebSocket join doesn't go through HTTP /start endpoint, so we need to trigger ringing here
+        broadcast_ringing_event(state, channel_uuid, call.call_id, user_id, Some(user_id)).await;
     }
 
     broadcast_call_event(
@@ -2629,13 +2982,15 @@ async fn handle_ws_join_call(
         &channel_uuid,
         serde_json::json!({
             "user_id": encode_mm_id(user_id),
-            "session_id": connection_id,
+            "session_id": conn_uuid.to_string(),
             "muted": true,
             "raised_hand": 0,
         }),
         None,
     )
     .await;
+
+    broadcast_call_state_event(state, channel_uuid, None).await;
 
     send_ws_plugin_event(
         state,
@@ -2650,8 +3005,8 @@ async fn handle_ws_join_call(
             "callID": encode_mm_id(call.call_id),
             "call_id": encode_mm_id(call.call_id),
             "call_id_raw": call.call_id.to_string(),
-            "sessionID": connection_id,
-            "session_id": connection_id,
+            "sessionID": conn_uuid.to_string(),
+            "session_id": conn_uuid.to_string(),
         }),
     )
     .await;
@@ -2674,8 +3029,7 @@ async fn handle_ws_sdp(
     connection_id: &str,
     data: Option<&Value>,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
+    let requested_session_id = resolve_ws_session_uuid(connection_id, data)?;
 
     info!(
         user_id = %user_id,
@@ -2693,9 +3047,8 @@ async fn handle_ws_sdp(
         format!("Invalid SDP payload: {e}")
     })?;
 
-    let call = find_call_for_session(state, user_id, session_id)
-        .await
-        .ok_or_else(|| "No active call found for connection".to_string())?;
+    let (call, session_id) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await?;
 
     let sfu = state
         .sfu_manager
@@ -2755,8 +3108,7 @@ async fn handle_ws_ice(
     connection_id: &str,
     data: Option<&Value>,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
+    let requested_session_id = resolve_ws_session_uuid(connection_id, data)?;
 
     debug!(
         user_id = %user_id,
@@ -2774,9 +3126,8 @@ async fn handle_ws_ice(
         format!("Invalid ICE payload: {e}")
     })?;
 
-    let call = find_call_for_session(state, user_id, session_id)
-        .await
-        .ok_or_else(|| "No active call found for connection".to_string())?;
+    let (call, session_id) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await?;
 
     let sfu = state
         .sfu_manager
@@ -2817,9 +3168,10 @@ async fn handle_ws_leave_call(
     user_id: Uuid,
     connection_id: &str,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    let Some(call) = find_call_for_session(state, user_id, session_id).await else {
+    let requested_session_id = resolve_ws_session_uuid(connection_id, None)?;
+    let Ok((call, session_id)) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await
+    else {
         return Ok(());
     };
 
@@ -2835,30 +3187,115 @@ async fn handle_ws_leave_call(
         &call.channel_id,
         serde_json::json!({
             "user_id": encode_mm_id(user_id),
-            "session_id": connection_id,
+            "session_id": session_id.to_string(),
         }),
         None,
     )
     .await;
 
-    if call_manager.get_participants(call.call_id).await.len() <= 1 {
+    let remaining =
+        reconcile_after_participant_left(state, call.call_id, call.channel_id, user_id).await;
+    if remaining <= 1 {
         schedule_empty_call_timeout(state, call.call_id, call.channel_id);
     }
 
     Ok(())
 }
 
+/// Best-effort cleanup for abrupt websocket disconnects where no explicit
+/// calls_leave websocket action was delivered.
+pub async fn handle_ws_connection_closed(state: &AppState, user_id: Uuid, connection_id: &str) {
+    let Ok(session_id) = Uuid::parse_str(connection_id) else {
+        return;
+    };
+    let Some(call) = find_call_for_session(state, user_id, session_id).await else {
+        return;
+    };
+
+    state
+        .call_state_manager
+        .remove_participant(call.call_id, user_id)
+        .await;
+    if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
+        let _ = sfu.remove_participant(session_id).await;
+    }
+
+    broadcast_call_event(
+        state,
+        "custom_com.mattermost.calls_user_left",
+        &call.channel_id,
+        serde_json::json!({
+            "user_id": encode_mm_id(user_id),
+            "session_id": session_id.to_string(),
+        }),
+        None,
+    )
+    .await;
+
+    let remaining =
+        reconcile_after_participant_left(state, call.call_id, call.channel_id, user_id).await;
+    if remaining <= 1 {
+        schedule_empty_call_timeout(state, call.call_id, call.channel_id);
+    }
+
+    info!(
+        user_id = %user_id,
+        session_id = %session_id,
+        call_id = %call.call_id,
+        channel_id = %call.channel_id,
+        remaining_participants = remaining,
+        "calls.ws cleaned up disconnected participant"
+    );
+}
+
 async fn handle_ws_mute(
     state: &AppState,
     user_id: Uuid,
     connection_id: &str,
+    data: Option<&Value>,
     muted: bool,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    let call = find_call_for_session(state, user_id, session_id)
+    let requested_session_id = resolve_ws_session_uuid(connection_id, data)?;
+    let (call, session_id) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await?;
+
+    if state
+        .call_state_manager
+        .get_participant(call.call_id, user_id)
         .await
-        .ok_or_else(|| "No active call found for connection".to_string())?;
+        .is_none()
+    {
+        // Recover from transient reconnect races where mute/unmute arrives before join/reconnect
+        // has re-associated the user participant state.
+        state
+            .call_state_manager
+            .add_participant(
+                call.call_id,
+                Participant {
+                    user_id,
+                    session_id,
+                    joined_at: Utc::now().timestamp_millis(),
+                    muted: true,
+                    screen_sharing: false,
+                    hand_raised: false,
+                },
+            )
+            .await;
+
+        broadcast_call_event(
+            state,
+            "custom_com.mattermost.calls_user_joined",
+            &call.channel_id,
+            serde_json::json!({
+                "user_id": encode_mm_id(user_id),
+                "session_id": session_id.to_string(),
+                "muted": true,
+                "raised_hand": 0,
+            }),
+            None,
+        )
+        .await;
+    }
 
     state
         .call_state_manager
@@ -2874,7 +3311,7 @@ async fn handle_ws_mute(
         &call.channel_id,
         serde_json::json!({
             "user_id": encode_mm_id(user_id),
-            "session_id": connection_id,
+            "session_id": session_id.to_string(),
             "muted": muted,
         }),
         None,
@@ -2890,11 +3327,9 @@ async fn handle_ws_raise_hand(
     connection_id: &str,
     raised: bool,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    let call = find_call_for_session(state, user_id, session_id)
-        .await
-        .ok_or_else(|| "No active call found for connection".to_string())?;
+    let requested_session_id = resolve_ws_session_uuid(connection_id, None)?;
+    let (call, session_id) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await?;
 
     state
         .call_state_manager
@@ -2910,7 +3345,7 @@ async fn handle_ws_raise_hand(
         &call.channel_id,
         serde_json::json!({
             "user_id": encode_mm_id(user_id),
-            "session_id": connection_id,
+            "session_id": session_id.to_string(),
             "raised_hand": if raised { Utc::now().timestamp_millis() } else { 0 },
         }),
         None,
@@ -2926,17 +3361,28 @@ async fn handle_ws_reaction(
     connection_id: &str,
     data: Option<&Value>,
 ) -> Result<(), String> {
-    let session_id = Uuid::parse_str(connection_id)
-        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
-    let call = find_call_for_session(state, user_id, session_id)
-        .await
-        .ok_or_else(|| "No active call found for connection".to_string())?;
+    let requested_session_id = resolve_ws_session_uuid(connection_id, data)?;
+    let (call, session_id) =
+        resolve_call_for_ws_connection(state, user_id, requested_session_id).await?;
     let data = data.ok_or_else(|| "Missing reaction payload".to_string())?;
     let emoji = data
         .get("data")
         .and_then(|v| v.as_str())
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .or_else(|| data.get("data").cloned())
         .unwrap_or_else(|| serde_json::json!({}));
+    let reaction = emoji
+        .get("literal")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            emoji
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(|name| format!(":{name}:"))
+        })
+        .unwrap_or_default();
+    let timestamp = Utc::now().timestamp_millis();
 
     broadcast_call_event(
         state,
@@ -2944,7 +3390,9 @@ async fn handle_ws_reaction(
         &call.channel_id,
         serde_json::json!({
             "user_id": encode_mm_id(user_id),
-            "session_id": connection_id,
+            "session_id": session_id.to_string(),
+            "reaction": reaction,
+            "timestamp": timestamp,
             "emoji": emoji,
         }),
         None,
@@ -2966,6 +3414,101 @@ async fn find_call_for_session(
             .map(|p| p.session_id == session_id)
             .unwrap_or(false)
     })
+}
+
+async fn resolve_call_for_ws_connection(
+    state: &AppState,
+    user_id: Uuid,
+    requested_session_id: Uuid,
+) -> Result<(CallState, Uuid), String> {
+    if let Some(call) = find_call_for_session(state, user_id, requested_session_id).await {
+        return Ok((call, requested_session_id));
+    }
+
+    let user_calls: Vec<(CallState, Uuid)> = state
+        .call_state_manager
+        .get_all_calls()
+        .await
+        .into_iter()
+        .filter_map(|call| {
+            let participant_session_id = call.participants.get(&user_id).map(|p| p.session_id);
+            participant_session_id.map(|session_id| (call, session_id))
+        })
+        .collect();
+
+    if user_calls.len() == 1 {
+        let (call, participant_session_id) =
+            user_calls.into_iter().next().expect("len checked above");
+        warn!(
+            user_id = %user_id,
+            requested_session_id = %requested_session_id,
+            participant_session_id = %participant_session_id,
+            call_id = %call.call_id,
+            "calls.ws session mismatch recovered using existing participant session"
+        );
+        Ok((call, participant_session_id))
+    } else if user_calls.is_empty() {
+        let member_calls = find_member_calls_for_user(state, user_id).await?;
+        if member_calls.len() == 1 {
+            let call = member_calls.into_iter().next().expect("len checked above");
+            warn!(
+                user_id = %user_id,
+                requested_session_id = %requested_session_id,
+                call_id = %call.call_id,
+                "calls.ws session lookup recovered using channel membership fallback"
+            );
+            Ok((call, requested_session_id))
+        } else if member_calls.is_empty() {
+            Err("No active call found for connection".to_string())
+        } else {
+            Err("Multiple active calls found for user session resolution".to_string())
+        }
+    } else {
+        Err("Multiple active calls found for user session resolution".to_string())
+    }
+}
+
+async fn find_member_calls_for_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<CallState>, String> {
+    let calls = state.call_state_manager.get_all_calls().await;
+    let mut member_calls = Vec::new();
+
+    for call in calls {
+        let member: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT user_id FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+        )
+        .bind(call.channel_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| format!("Database error while resolving call membership: {e}"))?;
+
+        if member.is_some() {
+            member_calls.push(call);
+        }
+    }
+
+    Ok(member_calls)
+}
+
+fn resolve_ws_session_uuid(connection_id: &str, data: Option<&Value>) -> Result<Uuid, String> {
+    let default_session_id = Uuid::parse_str(connection_id)
+        .map_err(|_| format!("Invalid connection ID: {connection_id}"))?;
+
+    let Some(data) = data else {
+        return Ok(default_session_id);
+    };
+
+    let original_session_id = data
+        .get("originalConnID")
+        .or_else(|| data.get("original_conn_id"))
+        .or_else(|| data.get("originalConnId"))
+        .and_then(|value| value.as_str())
+        .and_then(|raw| Uuid::parse_str(raw).ok());
+
+    Ok(original_session_id.unwrap_or(default_session_id))
 }
 
 fn parse_ws_sdp_payload(data: Option<&Value>) -> Result<String, String> {
@@ -3161,18 +3704,22 @@ async fn check_channel_permission(
 }
 
 async fn is_dm_or_gm_channel(state: &AppState, channel_id: Uuid) -> ApiResult<bool> {
-    let channel_type: Option<String> = sqlx::query_scalar("SELECT type::text FROM channels WHERE id = $1")
-        .bind(channel_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+    let channel_type: Option<String> =
+        sqlx::query_scalar("SELECT type::text FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
 
     let Some(channel_type) = channel_type else {
         return Ok(false);
     };
 
     let normalized = channel_type.trim().to_ascii_lowercase();
-    Ok(matches!(normalized.as_str(), "direct" | "group" | "d" | "g"))
+    Ok(matches!(
+        normalized.as_str(),
+        "direct" | "group" | "d" | "g"
+    ))
 }
 
 /// Broadcast a call-related WebSocket event
@@ -3222,17 +3769,116 @@ async fn broadcast_ringing_event(
     sender_id: Uuid,
     exclude_user_id: Option<Uuid>,
 ) {
+    // Fetch sender info for better mobile client support
+    let sender_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT username, COALESCE(display_name, '') as display_name FROM users WHERE id = $1",
+    )
+    .bind(sender_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (username, display_name) =
+        sender_info.unwrap_or_else(|| (encode_mm_id(sender_id), String::new()));
+
+    info!(
+        call_id = %call_id,
+        channel_id = %channel_id,
+        sender_id = %sender_id,
+        exclude_user_id = ?exclude_user_id,
+        "calls.broadcast_ringing_event STARTED - will send push notifications"
+    );
+
+    // Broadcast WebSocket event
     broadcast_call_event(
         state,
         "custom_com.mattermost.calls_ringing",
         &channel_id,
         serde_json::json!({
             "call_id": encode_mm_id(call_id),
+            "call_id_raw": call_id.to_string(),
             "sender_id": encode_mm_id(sender_id),
+            "sender_id_raw": sender_id.to_string(),
+            "username": username,
+            "display_name": display_name,
         }),
         exclude_user_id,
     )
     .await;
+
+    // Also send push notifications to offline/mobile users
+    // Get channel members to notify
+    let members: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM channel_members WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+    info!(
+        member_count = members.len(),
+        "Found channel members for push notification"
+    );
+
+    let caller_name = if !display_name.is_empty() {
+        display_name.clone()
+    } else {
+        username.clone()
+    };
+
+    for (user_id,) in members {
+        // Skip the sender
+        if Some(user_id) == exclude_user_id {
+            info!(user_id = %user_id, "Skipping sender for push notification");
+            continue;
+        }
+
+        // Skip users who have dismissed this notification
+        if state
+            .call_state_manager
+            .is_notification_dismissed(call_id, user_id)
+            .await
+        {
+            info!(user_id = %user_id, "Skipping user who dismissed notification");
+            continue;
+        }
+
+        info!(user_id = %user_id, caller_name = %caller_name, "Sending push notification to user");
+
+        // Send push notification asynchronously (don't block)
+        let state_clone = state.clone();
+        let caller_name_clone = caller_name.clone();
+        tokio::spawn(async move {
+            match crate::services::push_notifications::send_call_ringing_notification(
+                &state_clone,
+                user_id,
+                channel_id,
+                call_id,
+                caller_name_clone,
+            )
+            .await
+            {
+                Ok(count) if count > 0 => {
+                    info!(
+                        user_id = %user_id,
+                        count = count,
+                        "Sent push notification for incoming call"
+                    );
+                }
+                Ok(_) => {
+                    // No devices to notify
+                }
+                Err(e) => {
+                    debug!(
+                        user_id = %user_id,
+                        error = %e,
+                        "Failed to send push notification for call"
+                    );
+                }
+            }
+        });
+    }
 }
 
 async fn broadcast_call_state_event(
@@ -3240,23 +3886,27 @@ async fn broadcast_call_state_event(
     channel_id: Uuid,
     exclude_user_id: Option<Uuid>,
 ) {
-    let Some(call) = state.call_state_manager.get_call_by_channel(&channel_id).await else {
+    let Some(call) = state
+        .call_state_manager
+        .get_call_by_channel(&channel_id)
+        .await
+    else {
         return;
     };
 
-    let call_state = match build_call_state_response(state, &call, encode_mm_id(channel_id), channel_id).await
-    {
-        Ok(state_payload) => state_payload,
-        Err(err) => {
-            warn!(
-                call_id = %call.call_id,
-                channel_id = %channel_id,
-                error = %err,
-                "calls.call_state failed to build call state payload"
-            );
-            return;
-        }
-    };
+    let call_state =
+        match build_call_state_response(state, &call, encode_mm_id(channel_id), channel_id).await {
+            Ok(state_payload) => state_payload,
+            Err(err) => {
+                warn!(
+                    call_id = %call.call_id,
+                    channel_id = %channel_id,
+                    error = %err,
+                    "calls.call_state failed to build call state payload"
+                );
+                return;
+            }
+        };
 
     let call_json = match serde_json::to_string(&call_state) {
         Ok(payload) => payload,
@@ -3396,8 +4046,46 @@ async fn end_call(
     reason: &'static str,
     participant_count: usize,
 ) {
+    let thread_id = state
+        .call_state_manager
+        .get_call(call_id)
+        .await
+        .and_then(|call| call.thread_id);
+    let ended_at = Utc::now().timestamp_millis();
+
     state.call_state_manager.remove_call(call_id).await;
     state.sfu_manager.remove_sfu(call_id).await;
+
+    if let Some(call_thread_id) = thread_id {
+        match mark_call_thread_post_ended(state, call_thread_id, ended_at).await {
+            Ok(Some(updated_post)) => {
+                let broadcast =
+                    WsEnvelope::event(EventType::MessageUpdated, updated_post, Some(channel_id))
+                        .with_broadcast(WsBroadcast {
+                            channel_id: Some(channel_id),
+                            team_id: None,
+                            user_id: None,
+                            exclude_user_id: None,
+                        });
+                state.ws_hub.broadcast(broadcast).await;
+            }
+            Ok(None) => {
+                warn!(
+                    call_id = %call_id,
+                    thread_id = %call_thread_id,
+                    "calls.end_call thread post not found while marking end_at"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    call_id = %call_id,
+                    thread_id = %call_thread_id,
+                    error = %err,
+                    "calls.end_call failed to persist end_at on call thread post"
+                );
+            }
+        }
+    }
 
     let encoded_channel_id = encode_mm_id(channel_id);
     let encoded_call_id = encode_mm_id(call_id);
@@ -3459,11 +4147,14 @@ async fn send_signaling_event(
         seq: None,
         channel_id: Some(channel_id),
         data: serde_json::json!({
+            "connID": session_id.to_string(),
+            "conn_id": session_id.to_string(),
+            "data": signal_payload.to_string(),
             "channel_id": encode_mm_id(channel_id),
             "channel_id_raw": channel_id.to_string(),
             "user_id": encode_mm_id(user_id),
             "user_id_raw": user_id.to_string(),
-            "session_id": encode_mm_id(session_id),
+            "session_id": session_id.to_string(),
             "session_id_raw": session_id.to_string(),
             "signal": signal_payload,
         }),

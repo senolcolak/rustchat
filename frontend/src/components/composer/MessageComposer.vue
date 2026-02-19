@@ -34,6 +34,7 @@ const attachedFiles = ref<{
 const mentionQuery = ref('')
 
 let lastTypingEmit = 0
+const TYPING_ACTIVITY_INTERVAL_MS = 2000
 
 // Slash command handling
 async function handleSlashCommand(command: string, args: string[]): Promise<boolean> {
@@ -171,7 +172,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 function handleInput() {
     const now = Date.now()
-    if (now - lastTypingEmit > 3000) {
+    if (content.value.trim().length > 0 && now - lastTypingEmit > TYPING_ACTIVITY_INTERVAL_MS) {
         lastTypingEmit = now
         emit('typing')
     }
@@ -316,17 +317,17 @@ function formatFileSize(bytes: number): string {
 <template>
   <FileUploader 
     ref="fileUploaderRef"
-    class="p-4 pt-2 shrink-0 z-20"
+    class="p-2 pt-1 shrink-0 z-20"
     @files-selected="handleFiles"
   >
 
-    <div class="relative rounded-2xl bg-white/10 dark:bg-slate-900/60 backdrop-blur-xl border border-white/20 dark:border-white/10 shadow-lg ring-1 ring-black/5 overflow-hidden transition-all duration-300 focus-within:ring-2 focus-within:ring-indigo-500/50 focus-within:bg-white/20 dark:focus-within:bg-slate-900/80">
+    <div class="relative rounded-2xl bg-surface dark:bg-surface-dim border border-border-dim dark:border-white/5 shadow-lg ring-1 ring-black/5 overflow-hidden transition-slow focus-within:ring-2 focus-within:ring-primary/5 focus-within:border-primary/50">
         <!-- Formatting Toolbar -->
         <FormattingToolbar 
           :showPreview="showPreview"
           @format="applyFormat"
           @togglePreview="showPreview = !showPreview"
-          class="border-b border-white/10 dark:border-white/5 bg-white/5"
+          class="border-b border-border-dim dark:border-white/5 bg-surface-dim/50"
         />
         
         <!-- Markdown Preview -->
@@ -335,11 +336,11 @@ function formatFileSize(bytes: number): string {
         </div>
         
         <!-- Attached Files Preview -->
-        <div v-if="attachedFiles.length > 0" class="flex flex-wrap gap-3 p-3 border-b border-white/10 dark:border-white/5 bg-white/5">
+        <div v-if="attachedFiles.length > 0" class="flex flex-wrap gap-2 p-2 border-b border-white/10 dark:border-white/5 bg-white/5">
           <div 
             v-for="(attachment, index) in attachedFiles"
             :key="index"
-            class="relative flex flex-col space-y-2 bg-white/5 dark:bg-slate-800/60 border border-white/10 dark:border-white/5 rounded-xl p-3 min-w-[200px] overflow-hidden group/file"
+            class="relative flex flex-col space-y-1.5 bg-surface-dim dark:bg-slate-800/40 border border-border-dim dark:border-white/5 rounded-xl p-2.5 min-w-[180px] overflow-hidden group/file shadow-sm"
           >
             <div class="flex items-center space-x-3">
                 <div class="p-2 bg-indigo-500/10 rounded-lg">
@@ -390,8 +391,9 @@ function formatFileSize(bytes: number): string {
               @keydown="handleKeydown"
               @input="handleInput"
               rows="1" 
-              class="w-full bg-transparent border-0 focus:ring-0 resize-none max-h-40 py-3.5 px-4 min-h-[48px] text-gray-800 dark:text-slate-200 placeholder-slate-400 placeholder:font-light" 
+              class="w-full bg-transparent border-0 focus:ring-0 resize-none max-h-36 py-2.5 px-3 min-h-[42px] text-gray-800 dark:text-slate-200 placeholder-slate-400 placeholder:font-light" 
               placeholder="Message... (Use @ to mention)"
+              aria-label="Message composer"
           ></textarea>
           
           <!-- Mention Menu -->
@@ -404,7 +406,7 @@ function formatFileSize(bytes: number): string {
         </div>
 
         <!-- Footer Actions -->
-        <div class="flex justify-between items-center px-2 pb-2">
+        <div class="flex justify-between items-center px-1.5 pb-1.5">
             <div class="flex space-x-1 text-slate-400 relative">
                 <button 
                   @click="openFilePicker"
@@ -464,7 +466,7 @@ function formatFileSize(bytes: number): string {
                 <button 
                     @click="handleSend"
                     :disabled="!content.trim() && attachedFiles.length === 0"
-                    class="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-600/20 active:scale-95"
+                    class="p-2 bg-primary hover:bg-primary-hover text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-primary/20 active:scale-95"
                 >
                     <Send class="w-4 h-4" />
                 </button>

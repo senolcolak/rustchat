@@ -1,5 +1,6 @@
 //! WebSocket event types
 
+use crate::mattermost_compat::id::parse_mm_or_uuid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -8,22 +9,19 @@ use uuid::Uuid;
 pub struct WsEnvelope {
     #[serde(rename = "type")]
     pub msg_type: String, // "event", "command", "ack", "error"
-    pub event: String, // e.g. "message_created"
+    pub event: String, // e.g. "posted"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<Uuid>,
     pub data: serde_json::Value,
 
-    // Internal use for broadcast targeting (not serialized to client if possible, or filtered out before send)
-    // Actually, we can use a wrapper or just strip this field.
-    // For simplicity, let's keep it but skip serializing it.
-    #[serde(skip)]
+    // Broadcast targeting info - included in serialization so clients receive routing info
     pub broadcast: Option<WsBroadcast>,
 }
 
 /// Broadcast targeting info
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsBroadcast {
     pub channel_id: Option<Uuid>,
     pub team_id: Option<Uuid>,
@@ -74,26 +72,26 @@ pub enum EventType {
 impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::MessageCreated => "message_created",
-            Self::MessageUpdated => "message_updated",
-            Self::MessageDeleted => "message_deleted",
+            Self::MessageCreated => "posted",
+            Self::MessageUpdated => "post_edited",
+            Self::MessageDeleted => "post_deleted",
             Self::ThreadReplyCreated => "thread_reply_created",
             Self::ThreadReplyUpdated => "thread_reply_updated",
             Self::ThreadReplyDeleted => "thread_reply_deleted",
             Self::ReactionAdded => "reaction_added",
             Self::ReactionRemoved => "reaction_removed",
-            Self::UserTyping => "user_typing",
-            Self::UserTypingStop => "user_typing_stop",
+            Self::UserTyping => "typing",
+            Self::UserTypingStop => "stop_typing",
             Self::ChannelSubscribed => "channel_subscribed",
             Self::ChannelUnsubscribed => "channel_unsubscribed",
             Self::ChannelCreated => "channel_created",
             Self::ChannelUpdated => "channel_updated",
             Self::ChannelDeleted => "channel_deleted",
             Self::ChannelViewed => "channel_viewed",
-            Self::MemberAdded => "member_added",
-            Self::MemberRemoved => "member_removed",
+            Self::MemberAdded => "user_added",
+            Self::MemberRemoved => "user_removed",
             Self::UserUpdated => "user_updated",
-            Self::UserPresence => "user_presence",
+            Self::UserPresence => "status_change",
             Self::EphemeralMessage => "ephemeral_message",
             Self::CallSignal => "call_signal",
             Self::ConfigUpdated => "config_updated",
@@ -110,6 +108,7 @@ impl EventType {
 pub struct ClientEnvelope {
     pub event: String,
     pub data: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid_compat")]
     pub channel_id: Option<Uuid>,
     pub seq: Option<u64>,
     pub client_msg_id: Option<String>,
@@ -118,7 +117,21 @@ pub struct ClientEnvelope {
 // Helper to deserialize specific command data
 #[derive(Debug, Deserialize)]
 pub struct TypingCommandData {
+    #[serde(default, deserialize_with = "deserialize_optional_uuid_compat")]
     pub thread_root_id: Option<Uuid>,
+}
+
+fn deserialize_optional_uuid_compat<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(id) => parse_mm_or_uuid(&id)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid uuid/mattermost id: {}", id)))
+            .map(Some),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,24 +190,28 @@ impl WsEnvelope {
         }
     }
 
-    pub fn hello(user_id: Uuid) -> Self {
+    pub fn pong(seq: Option<u64>) -> Self {
+        Self {
+            msg_type: "response".to_string(),
+            event: "pong".to_string(),
+            seq,
+            channel_id: None,
+            data: serde_json::json!({ "text": "pong" }), // Mobile app expects data.text === 'pong'
+            broadcast: None,
+        }
+    }
+
+    pub fn hello(connection_id: Uuid, server_version: &str) -> Self {
         Self {
             msg_type: "event".to_string(),
             event: "hello".to_string(),
             seq: None,
             channel_id: None,
-            data: serde_json::json!({ "user_id": user_id }),
-            broadcast: None,
-        }
-    }
-
-    pub fn pong() -> Self {
-        Self {
-            msg_type: "ack".to_string(), // Use "ack" or "response"
-            event: "pong".to_string(),
-            seq: None,
-            channel_id: None,
-            data: serde_json::Value::Null,
+            data: serde_json::json!({
+                "connection_id": connection_id.to_string(),
+                "server_version": server_version,
+                "reliable_websockets": true
+            }),
             broadcast: None,
         }
     }

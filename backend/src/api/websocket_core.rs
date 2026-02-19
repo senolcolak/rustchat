@@ -5,13 +5,14 @@
 //! bootstrap, presence lifecycle, and shared command handling.
 
 use axum::http::HeaderMap;
+use chrono::Utc;
+use deadpool_redis::redis::AsyncCommands;
 use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::auth::validate_token;
 use crate::realtime::{
-    ClientEnvelope, EventType, PresenceEvent, TypingCommandData, TypingEvent, WsBroadcast,
-    WsEnvelope,
+    ClientEnvelope, EventType, TypingCommandData, TypingEvent, WsBroadcast, WsEnvelope,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +54,108 @@ pub async fn get_max_simultaneous_connections(state: &AppState) -> usize {
     match value.and_then(|val| val.parse::<i64>().ok()) {
         Some(max) if max > 0 => max as usize,
         _ => 5,
+    }
+}
+
+async fn is_manual_presence(state: &AppState, user_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, Option<bool>>("SELECT presence_manual FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .unwrap_or(false)
+}
+
+fn presence_connection_key(user_id: Uuid) -> String {
+    format!("rustchat:presence:user:{user_id}:connections")
+}
+
+pub async fn register_presence_connection(state: &AppState, user_id: Uuid, connection_id: &str) {
+    let connection_id = connection_id.trim();
+    if connection_id.is_empty() {
+        return;
+    }
+
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(
+                user_id = %user_id,
+                connection_id = connection_id,
+                error = %err,
+                "Presence registry unavailable while registering websocket connection",
+            );
+            return;
+        }
+    };
+
+    let key = presence_connection_key(user_id);
+    if let Err(err) = conn.sadd::<_, _, usize>(&key, connection_id).await {
+        tracing::warn!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            error = %err,
+            "Failed to register websocket connection in presence registry",
+        );
+    }
+}
+
+pub async fn unregister_presence_connection(state: &AppState, user_id: Uuid, connection_id: &str) {
+    let connection_id = connection_id.trim();
+    if connection_id.is_empty() {
+        return;
+    }
+
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(
+                user_id = %user_id,
+                connection_id = connection_id,
+                error = %err,
+                "Presence registry unavailable while unregistering websocket connection",
+            );
+            return;
+        }
+    };
+
+    let key = presence_connection_key(user_id);
+    if let Err(err) = conn.srem::<_, _, usize>(&key, connection_id).await {
+        tracing::warn!(
+            user_id = %user_id,
+            connection_id = connection_id,
+            error = %err,
+            "Failed to unregister websocket connection from presence registry",
+        );
+    }
+}
+
+async fn global_presence_connection_count(state: &AppState, user_id: Uuid) -> Option<usize> {
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %err,
+                "Presence registry unavailable while reading global connection count",
+            );
+            return None;
+        }
+    };
+
+    let key = presence_connection_key(user_id);
+    match conn.scard::<_, usize>(&key).await {
+        Ok(count) => Some(count),
+        Err(err) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %err,
+                "Failed to read global presence connection count",
+            );
+            None
+        }
     }
 }
 
@@ -141,32 +244,78 @@ pub async fn initialize_connection_state(
     subscribe_channels: bool,
 ) {
     subscribe_default_scopes(state, user_id, subscribe_channels).await;
-    persist_presence_and_broadcast(state, user_id, "online").await;
+    if is_manual_presence(state, user_id).await {
+        return;
+    }
+    persist_presence_and_broadcast(state, user_id, "online", false).await;
 }
 
-pub async fn set_offline_if_last_connection(state: &AppState, user_id: Uuid) {
+pub async fn handle_disconnect(state: &AppState, user_id: Uuid, connection_id: &str) {
+    unregister_presence_connection(state, user_id, connection_id).await;
+
+    // Local short-circuit: still connected on this node.
     if state.ws_hub.user_connection_count(user_id).await > 0 {
         return;
     }
-    persist_presence_and_broadcast(state, user_id, "offline").await;
+
+    // Manual presence (busy/dnd/away/offline set by user) must not be
+    // overwritten by disconnect-driven offline updates.
+    if is_manual_presence(state, user_id).await {
+        return;
+    }
+
+    let Some(global_count) = global_presence_connection_count(state, user_id).await else {
+        // Conservative behavior: if we cannot determine global connection count,
+        // do not force an offline transition.
+        return;
+    };
+
+    if global_count == 0 {
+        persist_presence_and_broadcast(state, user_id, "offline", false).await;
+    }
 }
 
-pub async fn persist_presence_and_broadcast(state: &AppState, user_id: Uuid, status: &str) {
-    let _ = sqlx::query("UPDATE users SET presence = $1 WHERE id = $2")
-        .bind(status)
-        .bind(user_id)
-        .execute(&state.db)
-        .await;
+pub async fn persist_presence_and_broadcast(
+    state: &AppState,
+    user_id: Uuid,
+    status: &str,
+    manual: bool,
+) {
+    let now = Utc::now();
+
+    // Update user presence and last activity in database
+    let _ = sqlx::query(
+        "UPDATE users SET presence = $1, presence_manual = $2, last_login_at = $3 WHERE id = $4",
+    )
+    .bind(status)
+    .bind(manual)
+    .bind(now)
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
 
     state.ws_hub.set_presence(user_id, status.to_string()).await;
+
+    // Create status change event with full broadcast info
     let evt = WsEnvelope::event(
         EventType::UserPresence,
-        PresenceEvent {
-            user_id,
-            status: status.to_string(),
-        },
+        serde_json::json!({
+            "user_id": user_id,
+            "status": status,
+            "manual": manual,
+            "last_activity_at": now.timestamp_millis()
+        }),
         None,
     );
+    // No .with_broadcast(...) filter means it broadcasts to ALL connected users
+    // which is necessary for everyone else to see this user's status change.
+
+    tracing::debug!(
+        user_id = %user_id,
+        status = %status,
+        "Broadcasting status change event"
+    );
+
     state.ws_hub.broadcast(evt).await;
 }
 
@@ -292,11 +441,14 @@ pub async fn handle_client_envelope(
         }
         "presence" => {
             if let Some(status) = envelope.data.get("status").and_then(|v| v.as_str()) {
-                persist_presence_and_broadcast(state, user_id, status).await;
+                persist_presence_and_broadcast(state, user_id, status, status_is_manual(status))
+                    .await;
             }
         }
         "ping" => {
-            send_direct(state, user_id, WsEnvelope::pong()).await;
+            // Extract seq from the envelope for the response
+            let seq = envelope.seq;
+            send_direct(state, user_id, WsEnvelope::pong(seq)).await;
         }
         _ => {
             if options.emit_unknown_error {
@@ -304,6 +456,10 @@ pub async fn handle_client_envelope(
             }
         }
     }
+}
+
+pub fn status_is_manual(status: &str) -> bool {
+    !status.eq_ignore_ascii_case("online")
 }
 
 async fn send_direct(state: &AppState, user_id: Uuid, envelope: WsEnvelope) {

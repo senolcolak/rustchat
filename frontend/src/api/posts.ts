@@ -42,6 +42,8 @@ export interface CreatePostRequest {
     message: string
     root_post_id?: string
     parent_id?: string
+    file_ids?: string[]
+    client_msg_id?: string
 }
 
 export interface Reaction {

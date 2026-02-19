@@ -33,10 +33,12 @@ services:
       - TURN_SERVER_URL=${TURN_SERVER_URL:-turn:turn.kubedo.io:3478}
       - TURN_SERVER_USERNAME=${TURN_SERVER_USERNAME:-}
       - TURN_SERVER_CREDENTIAL=${TURN_SERVER_CREDENTIAL:-}
+      # Push Notification Proxy
+      - RUSTCHAT_PUSH_PROXY_URL=${RUSTCHAT_PUSH_PROXY_URL:-http://push-proxy:3000}
     ports:
       - "3000:3000"
-      - "8443:8443/tcp"  # WebRTC SFU TCP fallback
-      - "8443:8443/udp"  # WebRTC SFU UDP media transport
+      - "8443:8443/tcp" # WebRTC SFU TCP fallback
+      - "8443:8443/udp" # WebRTC SFU UDP media transport
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,7 +47,7 @@ services:
       rustfs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/v1/health/live"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/v1/health/live" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -132,6 +134,40 @@ services:
       - meilisearch_data:/meili_data
     profiles:
       - search
+
+  push-proxy:
+    build:
+      context: ./push-proxy
+      dockerfile: Dockerfile
+    image: rustchat-push-proxy
+    container_name: rustchat-push-proxy
+    restart: always
+    environment:
+      # Firebase (Android)
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
+      # APNS (iOS VoIP) - JWT-based authentication (disabled if APNS_KEY_ID not set)
+      - APNS_KEY_PATH=${APNS_KEY_PATH:-}
+      - APNS_KEY_ID=${APNS_KEY_ID:-}
+      - APNS_TEAM_ID=${APNS_TEAM_ID:-}
+      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-}
+      - APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
+      # General
+      - RUSTCHAT_PUSH_PORT=3000
+      - RUST_LOG=push_proxy=info,tower_http=info
+    volumes:
+      # Firebase credentials
+      - ${FIREBASE_KEY_PATH:-./secrets/firebase-key.json}:/secrets/firebase-key.json:ro
+      # APNS Auth Key (JWT-based) - mount only if configured
+      - ${APNS_KEY_PATH:-/dev/null}:/secrets/apns-key.p8:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health 2>&1 | grep -q 'ok' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 volumes:
   postgres_data:

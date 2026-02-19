@@ -13,7 +13,11 @@ export interface User {
 
 export interface UpdateUserRequest {
     username?: string
+    first_name?: string
+    last_name?: string
     display_name?: string
+    nickname?: string
+    position?: string
     avatar_url?: string
 }
 
@@ -47,6 +51,13 @@ export interface UpdateStatusRequest {
     duration_minutes?: number
 }
 
+export interface UserStatusResponse {
+    user_id: string
+    status: string
+    manual: boolean
+    last_activity_at: number
+}
+
 export const usersApi = {
     list: (params?: { page?: number; per_page?: number; q?: string }) =>
         api.get<User[]>('/users', { params }),
@@ -59,4 +70,5 @@ export const usersApi = {
     getMyStatus: () => api.get<UserStatus>('/users/me/status'),
     updateStatus: (data: UpdateStatusRequest) => api.put<UserStatus>('/users/me/status', data),
     clearStatus: () => api.delete<UserStatus>('/users/me/status'),
+    getStatusesByIds: (userIds: string[]) => api.post<UserStatusResponse[]>('/users/status/ids', userIds),
 }

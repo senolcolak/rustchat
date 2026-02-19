@@ -10,6 +10,7 @@ export interface CurrentCall {
     call: CallState
     mySessionId: string
     peerConnection: RTCPeerConnection | null
+    screenSender: RTCRtpSender | null
     localStream: MediaStream | null
     screenStream: MediaStream | null
     remoteStreams: Map<string, MediaStream>
@@ -321,6 +322,9 @@ export const useCallsStore = defineStore('calls', () => {
     async function loadCallForChannel(channelId: string) {
         try {
             const { data } = await callsApi.getCallForChannel(channelId)
+            if (!data) {
+                return null
+            }
             if (data.call) {
                 activeCalls.value.set(channelId, data.call)
                 if (currentCall.value?.channelId === channelId) {
@@ -369,6 +373,7 @@ export const useCallsStore = defineStore('calls', () => {
                 call: channelState.call,
                 mySessionId,
                 peerConnection: null,
+                screenSender: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
@@ -424,6 +429,7 @@ export const useCallsStore = defineStore('calls', () => {
                 call: callState,
                 mySessionId,
                 peerConnection: null,
+                screenSender: null,
                 localStream: null,
                 screenStream: null,
                 remoteStreams: new Map()
@@ -498,6 +504,128 @@ export const useCallsStore = defineStore('calls', () => {
         }
     }
 
+    function shouldUseSimulcast(): boolean {
+        return callsConfig.value?.EnableSimulcast === true
+    }
+
+    function stripSimulcastFromSdp(sdp: string): string {
+        if (!sdp) return sdp
+
+        const lines = sdp
+            .split(/\r\n|\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+
+        let removedAny = false
+        const filtered = lines.filter((line) => {
+            const lower = line.toLowerCase()
+            if (lower.startsWith('a=simulcast:')) {
+                removedAny = true
+                return false
+            }
+            if (lower.startsWith('a=rid:')) {
+                removedAny = true
+                return false
+            }
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id')) {
+                removedAny = true
+                return false
+            }
+            if (lower.includes('urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id')) {
+                removedAny = true
+                return false
+            }
+            return true
+        })
+
+        // Preserve browser-generated SDP when nothing was removed to avoid
+        // unnecessary rewrites that can break strict parsers.
+        if (!removedAny) {
+            return sdp
+        }
+
+        return `${filtered.join('\r\n')}\r\n`
+    }
+
+    function prepareOfferSdp(sdp: string): string {
+        if (shouldUseSimulcast()) {
+            return sdp
+        }
+
+        return stripSimulcastFromSdp(sdp)
+    }
+
+    function applyVideoCodecPreferences(pc: RTCPeerConnection) {
+        // Keep video negotiation on broadly supported codecs for mobile interoperability.
+        if (shouldUseSimulcast()) {
+            return
+        }
+
+        const capabilities = RTCRtpSender.getCapabilities?.('video')
+        const codecs = capabilities?.codecs || []
+        if (codecs.length === 0) {
+            return
+        }
+
+        const primary = codecs.filter((codec) => {
+            const mime = codec.mimeType.toLowerCase()
+            return mime === 'video/vp8' || mime === 'video/h264'
+        })
+        if (primary.length === 0) {
+            return
+        }
+
+        const repair = codecs.filter((codec) => {
+            const mime = codec.mimeType.toLowerCase()
+            return mime === 'video/rtx' || mime === 'video/red' || mime === 'video/ulpfec'
+        })
+        const preferred = [...primary, ...repair]
+
+        for (const transceiver of pc.getTransceivers()) {
+            const senderKind = transceiver.sender?.track?.kind
+            const receiverKind = transceiver.receiver?.track?.kind
+            if (senderKind !== 'video' && receiverKind !== 'video') {
+                continue
+            }
+
+            if (typeof transceiver.setCodecPreferences !== 'function') {
+                continue
+            }
+
+            try {
+                transceiver.setCodecPreferences(preferred)
+            } catch (error) {
+                console.debug('Failed to set codec preferences on transceiver', error)
+            }
+        }
+    }
+
+    async function createAndSendOffer(channelId: string, pc: RTCPeerConnection) {
+        applyVideoCodecPreferences(pc)
+        const offer = await pc.createOffer()
+        const rawSdp = offer.sdp || ''
+        const preparedSdp = prepareOfferSdp(rawSdp)
+
+        let selectedSdp = preparedSdp
+        try {
+            await pc.setLocalDescription({
+                type: 'offer',
+                sdp: preparedSdp
+            })
+        } catch (error) {
+            // Brave can reject aggressively munged SDP. Fall back to the
+            // browser-generated offer so call setup still succeeds.
+            console.warn('Prepared SDP rejected by browser, retrying with original SDP', error)
+            selectedSdp = rawSdp
+            await pc.setLocalDescription({
+                type: 'offer',
+                sdp: rawSdp
+            })
+        }
+
+        return callsApi.sendOffer(channelId, selectedSdp)
+    }
+
     // WebRTC
     async function initializeWebRTC(channelId: string, iceServers: RTCIceServer[]) {
         try {
@@ -526,11 +654,50 @@ export const useCallsStore = defineStore('calls', () => {
             // Handle incoming tracks
             pc.ontrack = (event) => {
                 console.log('Received remote track:', event.track.kind, event.streams)
-                if (event.streams && event.streams[0] && currentCall.value) {
+                const active = currentCall.value
+                if (!active) {
+                    return
+                }
+
+                if (event.streams && event.streams[0]) {
                     const remoteStream = event.streams[0]
-                    // The stream ID contains the session ID if the SFU set it correctly
-                    // For now, we'll store it by its own ID or a fixed key if only 1 remote
-                    currentCall.value.remoteStreams.set(remoteStream.id, remoteStream)
+                    active.remoteStreams.set(remoteStream.id, remoteStream)
+                } else {
+                    // Some browsers can emit ontrack without an attached stream.
+                    // Build a synthetic stream so screen-share video is still renderable.
+                    const syntheticStreamId = `track-${event.track.id}`
+                    const existing = active.remoteStreams.get(syntheticStreamId)
+                    const synthetic = existing || new MediaStream()
+                    const hasTrack = synthetic
+                        .getTracks()
+                        .some((track) => track.id === event.track.id)
+                    if (!hasTrack) {
+                        synthetic.addTrack(event.track)
+                    }
+                    active.remoteStreams.set(syntheticStreamId, synthetic)
+                }
+
+                event.track.onended = () => {
+                    const call = currentCall.value
+                    if (!call) {
+                        return
+                    }
+
+                    for (const [key, stream] of call.remoteStreams.entries()) {
+                        const remainingTracks = stream
+                            .getTracks()
+                            .filter((track) => track.id !== event.track.id)
+                        if (remainingTracks.length === stream.getTracks().length) {
+                            continue
+                        }
+                        if (remainingTracks.length === 0) {
+                            call.remoteStreams.delete(key)
+                            continue
+                        }
+                        const replacement = new MediaStream()
+                        remainingTracks.forEach((track) => replacement.addTrack(track))
+                        call.remoteStreams.set(key, replacement)
+                    }
                 }
             }
 
@@ -546,11 +713,7 @@ export const useCallsStore = defineStore('calls', () => {
                 }
             }
 
-            // Create and send offer
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-
-            const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
+            const { data: answer } = await createAndSendOffer(channelId, pc)
 
             // Set remote description
             await pc.setRemoteDescription(new RTCSessionDescription({
@@ -572,6 +735,9 @@ export const useCallsStore = defineStore('calls', () => {
     function cleanupWebRTC() {
         if (currentCall.value?.peerConnection) {
             currentCall.value.peerConnection.close()
+        }
+        if (currentCall.value) {
+            currentCall.value.screenSender = null
         }
         if (currentCall.value?.localStream) {
             currentCall.value.localStream.getTracks().forEach(track => track.stop())
@@ -624,7 +790,7 @@ export const useCallsStore = defineStore('calls', () => {
         }
     }
 
-    function stopLocalScreenShare(pc: RTCPeerConnection) {
+    async function stopLocalScreenShare() {
         if (!currentCall.value?.screenStream) {
             return
         }
@@ -632,12 +798,13 @@ export const useCallsStore = defineStore('calls', () => {
         currentCall.value.screenStream.getTracks().forEach(track => {
             track.onended = null
             track.stop()
-            const sender = pc.getSenders().find(s => s.track === track)
-            if (sender) {
-                pc.removeTrack(sender)
-            }
         })
         currentCall.value.screenStream = null
+
+        const sender = currentCall.value.screenSender
+        if (sender) {
+            await sender.replaceTrack(null)
+        }
     }
 
     async function toggleScreenShare() {
@@ -649,7 +816,7 @@ export const useCallsStore = defineStore('calls', () => {
         try {
             if (currentCall.value.screenStream) {
                 // Stop screen sharing
-                stopLocalScreenShare(pc)
+                await stopLocalScreenShare()
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
                 isScreenSharing.value = false
@@ -663,16 +830,19 @@ export const useCallsStore = defineStore('calls', () => {
                 currentCall.value.screenStream = stream
                 const [videoTrack] = stream.getVideoTracks()
                 if (videoTrack) {
+                    videoTrack.contentHint = 'detail'
                     videoTrack.onended = () => {
                         if (currentCall.value?.screenStream) {
                             void toggleScreenShare()
                         }
                     }
-                }
 
-                stream.getTracks().forEach(track => {
-                    pc.addTrack(track, stream)
-                })
+                    if (currentCall.value.screenSender) {
+                        await currentCall.value.screenSender.replaceTrack(videoTrack)
+                    } else {
+                        currentCall.value.screenSender = pc.addTrack(videoTrack, stream)
+                    }
+                }
 
                 await callsApi.toggleScreenShare(channelId)
                 await renegotiate(channelId, pc)
@@ -680,16 +850,13 @@ export const useCallsStore = defineStore('calls', () => {
             }
         } catch (error) {
             console.error('Failed to toggle screen share', error)
-            stopLocalScreenShare(pc)
+            await stopLocalScreenShare()
             isScreenSharing.value = false
         }
     }
 
     async function renegotiate(channelId: string, pc: RTCPeerConnection) {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-
-        const { data: answer } = await callsApi.sendOffer(channelId, offer.sdp!)
+        const { data: answer } = await createAndSendOffer(channelId, pc)
         await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'answer',
             sdp: answer.sdp

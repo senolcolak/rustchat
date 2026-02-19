@@ -7,6 +7,7 @@
 //! - Message buffering for replay on reconnect
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::{
@@ -17,9 +18,10 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -29,8 +31,10 @@ use crate::api::AppState;
 use crate::auth::validate_token;
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
+    mappers::map_channel_role,
     models as mm,
 };
+use crate::models::channel::{Channel, ChannelType};
 use crate::realtime::{
     websocket_actor::{close_codes, WebSocketActor, WsEvent},
     WsBroadcast, WsEnvelope,
@@ -239,6 +243,8 @@ async fn run_connection(
 
     let actor_connection_id = actor.connection_id.clone();
     let is_resumed = !missed_messages.is_empty() || is_resumption_attempt;
+    let should_send_reconnect_snapshot =
+        should_send_reconnect_snapshot(requested_connection_id.as_deref(), sequence_number);
 
     info!(
         connection_id = %actor_connection_id,
@@ -261,6 +267,7 @@ async fn run_connection(
 
     // Add connection to hub
     let (hub_conn_id, mut hub_rx) = state.ws_hub.add_connection(user_id, username.clone()).await;
+    websocket_core::register_presence_connection(&state, user_id, &actor_connection_id).await;
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
@@ -321,6 +328,16 @@ async fn run_connection(
             break;
         }
     }
+
+    // After hello/replay, proactively push a full state snapshot for reconnects.
+    send_reconnect_snapshot_if_needed(
+        &state,
+        &actor,
+        user_id,
+        &actor_connection_id,
+        should_send_reconnect_snapshot,
+    )
+    .await;
 
     // Main event loop
     let actor_clone = actor.clone();
@@ -449,10 +466,31 @@ async fn run_connection(
     // Mark connection as disconnected (for potential resumption)
     actor.disconnect();
 
+    // Calls websocket clients may disconnect without sending an explicit
+    // `leave` action. Apply a short grace window for reconnect and then
+    // best-effort participant cleanup if this exact session is still inactive.
+    let disconnect_state = state.clone();
+    let disconnect_connection_id = actor_connection_id.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(3)).await;
+        let still_inactive = disconnect_state
+            .connection_store
+            .get_connection(&disconnect_connection_id)
+            .map(|conn| !conn.is_active.load(Ordering::SeqCst))
+            .unwrap_or(true);
+        if still_inactive {
+            calls_plugin::handle_ws_connection_closed(
+                &disconnect_state,
+                user_id,
+                &disconnect_connection_id,
+            )
+            .await;
+        }
+    });
+
     // Remove from hub
     state.ws_hub.remove_connection(user_id, hub_conn_id).await;
-
-    websocket_core::set_offline_if_last_connection(&state, user_id).await;
+    websocket_core::handle_disconnect(&state, user_id, &actor_connection_id).await;
 
     info!(
         connection_id = %actor_connection_id,
@@ -479,6 +517,15 @@ async fn handle_client_text_message(
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
         handle_client_value_message(state, actor, user_id, username, connection_id, &value).await;
+    } else {
+        // Handle plain text calls actions (e.g., mobile sends "mute", "unmute" as plain text)
+        let trimmed = text.trim();
+        let calls_actions = ["mute", "unmute", "raise_hand", "unraise_hand", "leave"];
+        if calls_actions.contains(&trimmed) {
+            let action = format!("custom_com.mattermost.calls_{}", trimmed);
+            let _ =
+                calls_plugin::handle_ws_action(state, user_id, connection_id, &action, None).await;
+        }
     }
 
     let _ = websocket_core::handle_client_envelope_message(
@@ -552,42 +599,356 @@ async fn handle_client_value_message(
         });
 
         if let Err(err) = actor.send_raw(response) {
-            warn!(
-                user_id = %user_id,
-                connection_id = connection_id,
-                error = %err,
-                "Failed to send ping response"
-            );
-        }
-    } else if action == "user_typing" {
-        if let Some(data) = value.get("data") {
-            if let Some(channel_id_str) = data.get("channel_id").and_then(|v| v.as_str()) {
-                if let Some(channel_id) = parse_mm_or_uuid(channel_id_str) {
-                    let broadcast = WsEnvelope::event(
-                        crate::realtime::EventType::UserTyping,
-                        crate::realtime::TypingEvent {
-                            user_id,
-                            display_name: username.to_string(),
-                            thread_root_id: data
-                                .get("parent_id")
-                                .and_then(|v| v.as_str())
-                                .and_then(parse_mm_or_uuid),
-                        },
-                        Some(channel_id),
-                    )
-                    .with_broadcast(WsBroadcast {
-                        channel_id: Some(channel_id),
-                        team_id: None,
-                        user_id: None,
-                        exclude_user_id: Some(user_id),
-                    });
-                    state.ws_hub.broadcast(broadcast).await;
-                }
+            if err.contains("closing") {
+                debug!(
+                    user_id = %user_id,
+                    connection_id = connection_id,
+                    error = %err,
+                    "Skipping ping response on closing websocket"
+                );
+            } else {
+                warn!(
+                    user_id = %user_id,
+                    connection_id = connection_id,
+                    error = %err,
+                    "Failed to send ping response"
+                );
             }
+        }
+    } else if matches!(action, "reconnect" | "get_initial_load" | "initial_load") {
+        let seq_reply = value.get("seq").cloned().unwrap_or(serde_json::Value::Null);
+        let response = json!({
+            "status": "OK",
+            "seq_reply": seq_reply
+        });
+        let _ = actor.send_raw(response);
+        send_reconnect_snapshot_if_needed(state, actor, user_id, connection_id, true).await;
+    } else if matches!(action, "user_typing" | "typing" | "typing_start") {
+        let channel_id = extract_typing_channel_id(value);
+        if let Some(channel_id) = channel_id {
+            let broadcast = WsEnvelope::event(
+                crate::realtime::EventType::UserTyping,
+                crate::realtime::TypingEvent {
+                    user_id,
+                    display_name: username.to_string(),
+                    thread_root_id: extract_typing_thread_root_id(value),
+                },
+                Some(channel_id),
+            )
+            .with_broadcast(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            });
+            state.ws_hub.broadcast(broadcast).await;
+        }
+    } else if matches!(action, "user_typing_stop" | "stop_typing" | "typing_stop") {
+        let channel_id = extract_typing_channel_id(value);
+        if let Some(channel_id) = channel_id {
+            let broadcast = WsEnvelope::event(
+                crate::realtime::EventType::UserTypingStop,
+                crate::realtime::TypingEvent {
+                    user_id,
+                    display_name: username.to_string(),
+                    thread_root_id: extract_typing_thread_root_id(value),
+                },
+                Some(channel_id),
+            )
+            .with_broadcast(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            });
+            state.ws_hub.broadcast(broadcast).await;
         }
     } else {
         trace!(action = %action, "Unknown action received");
     }
+}
+
+#[derive(serde::Serialize)]
+struct ChannelUnreadSnapshot {
+    channel_id: String,
+    msg_count: i64,
+    mention_count: i64,
+    last_viewed_at: i64,
+}
+
+fn should_send_reconnect_snapshot(
+    requested_connection_id: Option<&str>,
+    sequence_number: Option<i64>,
+) -> bool {
+    requested_connection_id
+        .map(|id| !id.trim().is_empty())
+        .unwrap_or(false)
+        || sequence_number.unwrap_or_default() > 0
+}
+
+async fn send_reconnect_snapshot_if_needed(
+    state: &AppState,
+    actor: &std::sync::Arc<WebSocketActor>,
+    user_id: Uuid,
+    connection_id: &str,
+    should_send: bool,
+) {
+    if !should_send {
+        return;
+    }
+
+    match build_reconnect_snapshot(state, user_id).await {
+        Ok(snapshot) => {
+            let mut message = mm::WebSocketMessage {
+                seq: None,
+                event: "initial_load".to_string(),
+                data: snapshot,
+                broadcast: mm::Broadcast {
+                    omit_users: None,
+                    user_id: encode_mm_id(user_id),
+                    channel_id: String::new(),
+                    team_id: String::new(),
+                },
+            };
+
+            let replay_payload = json!({
+                "event": message.event.clone(),
+                "data": message.data.clone(),
+                "broadcast": message.broadcast.clone(),
+            });
+            if let Some(seq) = state
+                .connection_store
+                .queue_message(connection_id, replay_payload)
+            {
+                message.seq = Some(seq);
+            }
+
+            if let Err(err) = actor.send(message) {
+                warn!(
+                    user_id = %user_id,
+                    connection_id = connection_id,
+                    error = %err,
+                    "Failed to send reconnect snapshot"
+                );
+            } else {
+                info!(
+                    user_id = %user_id,
+                    connection_id = connection_id,
+                    "Sent reconnect initial_load snapshot"
+                );
+            }
+        }
+        Err(err) => {
+            warn!(
+                user_id = %user_id,
+                connection_id = connection_id,
+                error = %err,
+                "Failed to build reconnect snapshot"
+            );
+        }
+    }
+}
+
+async fn build_reconnect_snapshot(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let mut channels: Vec<Channel> = sqlx::query_as(
+        r#"
+        SELECT c.*
+        FROM channels c
+        JOIN channel_members cm ON cm.channel_id = c.id
+        WHERE cm.user_id = $1
+        ORDER BY c.updated_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    for channel in &mut channels {
+        hydrate_direct_channel_display_name(state, user_id, channel).await?;
+    }
+
+    let mm_channels: Vec<mm::Channel> = channels.iter().cloned().map(Into::into).collect();
+    let channel_ids: Vec<Uuid> = channels.iter().map(|c| c.id).collect();
+
+    let membership_rows: Vec<(Uuid, String, serde_json::Value, Option<DateTime<Utc>>, i64)> =
+        sqlx::query_as(
+            r#"
+            SELECT
+                cm.channel_id,
+                cm.role,
+                cm.notify_props,
+                cm.last_viewed_at,
+                COUNT(p.id)::BIGINT AS msg_count
+            FROM channel_members cm
+            LEFT JOIN posts p
+                ON p.channel_id = cm.channel_id
+               AND p.deleted_at IS NULL
+               AND p.user_id <> cm.user_id
+               AND p.created_at > COALESCE(cm.last_viewed_at, to_timestamp(0))
+            WHERE cm.user_id = $1
+            GROUP BY cm.channel_id, cm.role, cm.notify_props, cm.last_viewed_at
+            ORDER BY cm.channel_id
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await?;
+
+    let channel_members: Vec<mm::ChannelMember> = membership_rows
+        .iter()
+        .map(
+            |(channel_id, role, notify_props, last_viewed_at, msg_count)| mm::ChannelMember {
+                channel_id: encode_mm_id(*channel_id),
+                user_id: encode_mm_id(user_id),
+                roles: map_channel_role(role),
+                last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+                msg_count: *msg_count,
+                mention_count: 0,
+                notify_props: normalize_notify_props_for_snapshot(notify_props.clone()),
+                last_update_at: 0,
+                scheme_guest: false,
+                scheme_user: true,
+                scheme_admin: role == "admin" || role == "team_admin" || role == "channel_admin",
+            },
+        )
+        .collect();
+
+    let channel_unreads: Vec<ChannelUnreadSnapshot> = membership_rows
+        .iter()
+        .map(
+            |(channel_id, _role, _notify_props, last_viewed_at, msg_count)| ChannelUnreadSnapshot {
+                channel_id: encode_mm_id(*channel_id),
+                msg_count: *msg_count,
+                mention_count: 0,
+                last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+            },
+        )
+        .collect();
+
+    let statuses: Vec<mm::Status> = if channel_ids.is_empty() {
+        Vec::new()
+    } else {
+        let rows: Vec<(Uuid, String, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT
+                u.id,
+                u.presence,
+                COALESCE(u.presence_manual, false),
+                u.last_login_at
+            FROM users u
+            JOIN channel_members cm ON cm.user_id = u.id
+            WHERE cm.channel_id = ANY($1)
+            "#,
+        )
+        .bind(&channel_ids)
+        .fetch_all(&state.db)
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, presence, manual, last_login_at)| mm::Status {
+                user_id: encode_mm_id(id),
+                status: if presence.is_empty() {
+                    "offline".to_string()
+                } else {
+                    presence
+                },
+                manual,
+                last_activity_at: last_login_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+            })
+            .collect()
+    };
+
+    Ok(json!({
+        "channels": mm_channels,
+        "channel_members": channel_members,
+        "channel_unreads": channel_unreads,
+        "statuses": statuses,
+        "server_time": Utc::now().timestamp_millis(),
+    }))
+}
+
+fn normalize_notify_props_for_snapshot(value: serde_json::Value) -> serde_json::Value {
+    if value.is_null() {
+        return json!({"desktop": "default", "mark_unread": "all"});
+    }
+
+    if let Some(obj) = value.as_object() {
+        if obj.is_empty() {
+            return json!({"desktop": "default", "mark_unread": "all"});
+        }
+    }
+
+    value
+}
+
+async fn hydrate_direct_channel_display_name(
+    state: &AppState,
+    viewer_id: Uuid,
+    channel: &mut Channel,
+) -> Result<(), sqlx::Error> {
+    if channel.channel_type != ChannelType::Direct {
+        return Ok(());
+    }
+
+    let display_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.channel_id = $1
+          AND cm.user_id <> $2
+        ORDER BY u.username ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel.id)
+    .bind(viewer_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    channel.display_name = display_name.or_else(|| Some("Direct Message".to_string()));
+    Ok(())
+}
+
+fn extract_typing_channel_id(value: &serde_json::Value) -> Option<Uuid> {
+    value
+        .get("data")
+        .and_then(|v| v.get("channel_id"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_mm_or_uuid)
+        .or_else(|| {
+            value
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+}
+
+fn extract_typing_thread_root_id(value: &serde_json::Value) -> Option<Uuid> {
+    let data = value.get("data");
+    data.and_then(|v| v.get("parent_id"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_mm_or_uuid)
+        .or_else(|| {
+            data.and_then(|v| v.get("thread_root_id"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+        .or_else(|| {
+            value
+                .get("parent_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
+        .or_else(|| {
+            value
+                .get("thread_root_id")
+                .and_then(|v| v.as_str())
+                .and_then(parse_mm_or_uuid)
+        })
 }
 
 fn decode_msgpack_value(bytes: &[u8]) -> Option<serde_json::Value> {
@@ -761,43 +1122,50 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
     let seq = None; // Will be assigned by actor
 
     match env.event.as_str() {
-        "message_created" | "thread_reply_created" => {
-            if let Ok(post_resp) =
+        "posted" | "thread_reply_created" => {
+            let mm_post = if let Ok(post_resp) =
                 serde_json::from_value::<crate::models::post::PostResponse>(env.data.clone())
             {
-                let mm_post: mm::Post = post_resp.into();
-                let post_json = serde_json::to_string(&mm_post).unwrap_or_default();
-
-                let data = json!({
-                    "post": post_json,
-                    "channel_display_name": "",
-                    "channel_name": "",
-                    "channel_type": "O",
-                    "sender_name": mm_post.user_id,
-                    "team_id": ""
-                });
-
-                Some(mm::WebSocketMessage {
-                    seq,
-                    event: "posted".to_string(),
-                    data,
-                    broadcast: map_broadcast(env.broadcast.as_ref()),
-                })
+                let mapped: mm::Post = post_resp.into();
+                mapped
+            } else if let Ok(post) = serde_json::from_value::<mm::Post>(env.data.clone()) {
+                post
             } else {
-                None
-            }
+                return None;
+            };
+
+            let post_json = serde_json::to_string(&mm_post).unwrap_or_default();
+
+            let data = json!({
+                "post": post_json,
+                "channel_display_name": "",
+                "channel_name": "",
+                "channel_type": "O",
+                "sender_name": mm_post.user_id,
+                "team_id": ""
+            });
+
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "posted".to_string(),
+                data,
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
         }
-        "user_typing" => {
+        "typing" | "typing_start" => {
             if let Ok(typing) =
                 serde_json::from_value::<crate::realtime::TypingEvent>(env.data.clone())
             {
                 let parent_id = typing.thread_root_id.map(encode_mm_id).unwrap_or_default();
                 Some(mm::WebSocketMessage {
                     seq,
+                    // Mattermost clients (web/mobile) dispatch typing indicators from `typing`.
                     event: "typing".to_string(),
                     data: json!({
                         "parent_id": parent_id,
                         "user_id": encode_mm_id(typing.user_id),
+                        "display_name": typing.display_name,
+                        "thread_root_id": parent_id,
                     }),
                     broadcast: map_broadcast(env.broadcast.as_ref()),
                 })
@@ -805,7 +1173,27 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 None
             }
         }
-        "message_updated" | "thread_reply_updated" => {
+        "stop_typing" | "typing_stop" => {
+            if let Ok(typing) =
+                serde_json::from_value::<crate::realtime::TypingEvent>(env.data.clone())
+            {
+                let parent_id = typing.thread_root_id.map(encode_mm_id).unwrap_or_default();
+                Some(mm::WebSocketMessage {
+                    seq,
+                    // Mattermost clients dispatch stop-typing from `stop_typing`.
+                    event: "stop_typing".to_string(),
+                    data: json!({
+                        "parent_id": parent_id,
+                        "user_id": encode_mm_id(typing.user_id),
+                        "thread_root_id": parent_id,
+                    }),
+                    broadcast: map_broadcast(env.broadcast.as_ref()),
+                })
+            } else {
+                None
+            }
+        }
+        "post_edited" | "thread_reply_updated" => {
             if let Ok(post_resp) =
                 serde_json::from_value::<crate::models::post::PostResponse>(env.data.clone())
             {
@@ -821,7 +1209,7 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 None
             }
         }
-        "message_deleted" | "thread_reply_deleted" => {
+        "post_deleted" | "thread_reply_deleted" => {
             if let Ok(post_resp) =
                 serde_json::from_value::<crate::models::post::PostResponse>(env.data.clone())
             {
@@ -891,7 +1279,7 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 None
             }
         }
-        "user_updated" | "user_presence" => {
+        "user_updated" | "status_change" => {
             if let Some(status_str) = env.data.get("status").and_then(|v| v.as_str()) {
                 let user_id = env
                     .data
@@ -900,10 +1288,28 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                     .and_then(parse_mm_or_uuid)
                     .map(encode_mm_id)
                     .unwrap_or_default();
+
+                // Extract additional fields if available
+                let manual = env
+                    .data
+                    .get("manual")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let last_activity_at = env
+                    .data
+                    .get("last_activity_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+
                 Some(mm::WebSocketMessage {
                     seq,
                     event: "status_change".to_string(),
-                    data: json!({ "user_id": user_id, "status": status_str }),
+                    data: json!({
+                        "user_id": user_id,
+                        "status": status_str,
+                        "manual": manual,
+                        "last_activity_at": last_activity_at
+                    }),
                     broadcast: map_broadcast(env.broadcast.as_ref()),
                 })
             } else {
@@ -919,7 +1325,7 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 broadcast: map_broadcast(env.broadcast.as_ref()),
             })
         }
-        "member_added" => {
+        "user_added" => {
             let user_id = extract_mm_id(env.data.get("user_id"));
             let channel_id = extract_mm_id(env.data.get("channel_id"));
             let team_id = extract_mm_id(env.data.get("team_id"));
@@ -934,7 +1340,7 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 broadcast: map_broadcast(env.broadcast.as_ref()),
             })
         }
-        "member_removed" => {
+        "user_removed" => {
             let user_id = extract_mm_id(env.data.get("user_id"));
             let remover_id = extract_mm_id(env.data.get("remover_id"));
             Some(mm::WebSocketMessage {
@@ -987,6 +1393,9 @@ fn map_broadcast(b_opt: Option<&crate::realtime::WsBroadcast>) -> mm::Broadcast 
 mod tests {
     use super::map_envelope_to_mm;
     use super::parse_authentication_challenge;
+    use super::should_send_reconnect_snapshot;
+    use crate::mattermost_compat::id::encode_mm_id;
+    use crate::mattermost_compat::models as mm;
     use crate::realtime::{WsBroadcast, WsEnvelope};
     use uuid::Uuid;
 
@@ -1037,5 +1446,131 @@ mod tests {
         let mapped = map_envelope_to_mm(&env).expect("custom event should map");
         assert_eq!(mapped.event, "custom_com.mattermost.calls_signal");
         assert_eq!(mapped.data["signal"]["type"], "answer");
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_posted_from_mm_post_payload() {
+        let channel_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "posted".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "id": "post123",
+                "create_at": 1739500000000i64,
+                "update_at": 1739500000000i64,
+                "delete_at": 0,
+                "edit_at": 0,
+                "user_id": "user123",
+                "channel_id": "channel123",
+                "root_id": "root123",
+                "original_id": "",
+                "message": "hello from mm payload",
+                "type": "",
+                "props": {},
+                "hashtags": "",
+                "file_ids": [],
+                "pending_post_id": ""
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("posted event should map");
+        assert_eq!(mapped.event, "posted");
+        let post_json = mapped.data["post"]
+            .as_str()
+            .expect("mapped post payload should be a JSON string");
+        let post: mm::Post = serde_json::from_str(post_json).expect("post JSON should deserialize");
+        assert_eq!(post.id, "post123");
+        assert_eq!(post.root_id, "root123");
+        assert_eq!(post.message, "hello from mm payload");
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_typing_event_name_to_typing() {
+        let channel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let root_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "typing_start".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "user_id": user_id,
+                "display_name": "alice",
+                "thread_root_id": root_id
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("typing event should map");
+        assert_eq!(mapped.event, "typing");
+        assert_eq!(
+            mapped.data["user_id"],
+            serde_json::json!(encode_mm_id(user_id))
+        );
+        assert_eq!(
+            mapped.data["parent_id"],
+            serde_json::json!(encode_mm_id(root_id))
+        );
+        assert_eq!(
+            mapped.broadcast.channel_id,
+            encode_mm_id(channel_id),
+            "typing channel must be routed via broadcast.channel_id"
+        );
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_typing_stop_event_name_to_stop_typing() {
+        let channel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "typing_stop".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "user_id": user_id,
+                "display_name": "alice",
+                "thread_root_id": serde_json::Value::Null
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: None,
+                exclude_user_id: Some(user_id),
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("stop typing event should map");
+        assert_eq!(mapped.event, "stop_typing");
+        assert_eq!(
+            mapped.data["user_id"],
+            serde_json::json!(encode_mm_id(user_id))
+        );
+        assert_eq!(mapped.data["parent_id"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn reconnect_snapshot_trigger_matches_resume_signals() {
+        assert!(!should_send_reconnect_snapshot(None, None));
+        assert!(!should_send_reconnect_snapshot(None, Some(0)));
+        assert!(!should_send_reconnect_snapshot(Some(""), Some(0)));
+
+        assert!(should_send_reconnect_snapshot(Some("conn-1"), None));
+        assert!(should_send_reconnect_snapshot(None, Some(1)));
+        assert!(should_send_reconnect_snapshot(Some("conn-2"), Some(0)));
     }
 }

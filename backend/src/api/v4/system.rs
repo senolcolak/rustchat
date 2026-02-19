@@ -135,10 +135,54 @@ async fn test_email(
 
 /// POST /notifications/test
 async fn test_notifications(
-    State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
+    use tracing::info;
+
+    info!(user_id = %auth.user_id, "Test notification requested");
+
+    // Try to send a test push notification to the user's devices
+    // Use 'message' type with all required fields for Mattermost mobile compatibility
+    // Generate unique IDs for channel_id and post_id so clicking the notification works
+    let test_channel_id = "test_channel_".to_string() + &uuid::Uuid::new_v4().to_string();
+    let test_post_id = "test_post_".to_string() + &uuid::Uuid::new_v4().to_string();
+
+    let result = crate::services::push_notifications::send_push_to_user(
+        &state,
+        auth.user_id,
+        "Test Notification".to_string(),
+        "This is a test push notification from RustChat".to_string(),
+        serde_json::json!({
+            "type": "message",
+            "version": "2",
+            "sender_name": "RustChat",
+            "channel_id": test_channel_id,
+            "post_id": test_post_id,
+            "channel_name": "Test Notifications"
+        }),
+        crate::services::push_notifications::PushPriority::Normal,
+    )
+    .await;
+
+    match result {
+        Ok(count) if count > 0 => {
+            info!(user_id = %auth.user_id, count = count, "Test notification sent successfully");
+            Ok(Json(serde_json::json!({"status": "OK", "sent": count})))
+        }
+        Ok(_) => {
+            info!(user_id = %auth.user_id, "Test notification: No devices found");
+            Ok(Json(
+                serde_json::json!({"status": "OK", "sent": 0, "message": "No devices registered"}),
+            ))
+        }
+        Err(e) => {
+            info!(user_id = %auth.user_id, error = %e, "Test notification failed");
+            Ok(Json(
+                serde_json::json!({"status": "OK", "error": e.to_string()}),
+            ))
+        }
+    }
 }
 
 /// POST /site_url/test
@@ -218,7 +262,11 @@ async fn get_config(
             "SMTPServer": config.email.0.smtp_host,
             "SMTPPort": config.email.0.smtp_port.to_string(),
             "SMTPUsername": config.email.0.smtp_username,
-            "ConnectionSecurity": if config.email.0.smtp_tls { "TLS" } else { "" },
+            "ConnectionSecurity": match config.email.0.smtp_security.as_str() {
+                "tls" => "TLS",
+                "starttls" => "STARTTLS",
+                _ => "",
+            },
             "PasswordResetSalt": "",
             "EnablePasswordReset": config.authentication.0.password_enable_forgot_link,
         },

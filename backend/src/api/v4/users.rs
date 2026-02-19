@@ -530,6 +530,7 @@ async fn my_team_members(
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "team_admin",
+            presence: None,
         })
         .collect();
 
@@ -557,6 +558,7 @@ async fn get_team_members_for_user(
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "team_admin",
+            presence: None,
         })
         .collect();
 
@@ -601,6 +603,13 @@ async fn my_team_channels(
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    tracing::debug!(
+        user_id = %auth.user_id,
+        team_id = %team_id,
+        "Fetching channels for user"
+    );
+
     let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
@@ -612,6 +621,13 @@ async fn my_team_channels(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
+
+    tracing::debug!(
+        user_id = %auth.user_id,
+        team_id = %team_id,
+        channel_count = channels.len(),
+        "Found channels for user"
+    );
 
     for channel in &mut channels {
         hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
@@ -834,6 +850,54 @@ struct AttachDeviceRequest {
     token: Option<String>,
     #[serde(default)]
     platform: Option<String>,
+    // Fields sent by mobile app but not used
+    #[serde(default)]
+    device_notification_disabled: Option<String>,
+    #[serde(default)]
+    mobile_version: Option<String>,
+}
+
+/// Extract FCM token and platform from mobile app's device_id format
+/// Format: "android_rn-v2:FCM_TOKEN" or "apple_rn-v2:FCM_TOKEN"
+fn parse_mobile_device_id(device_id: &str) -> (String, String, String) {
+    // device_id format: "prefix:FCM_TOKEN"
+    // prefix examples: android_rn-v2, apple_rn-v2, android_rn-v2beta
+
+    let parts: Vec<&str> = device_id.splitn(2, ':').collect();
+    if parts.len() == 2 {
+        let prefix = parts[0];
+        let token = parts[1];
+
+        // Extract platform from prefix
+        let platform = if prefix.starts_with("android") {
+            "android"
+        } else if prefix.starts_with("apple") || prefix.starts_with("ios") {
+            "ios"
+        } else {
+            "unknown"
+        };
+
+        // Return full device_id as stored ID, the token, and platform
+        (
+            device_id.to_string(),
+            token.to_string(),
+            platform.to_string(),
+        )
+    } else {
+        // No colon found, treat entire string as device_id with no token
+        (device_id.to_string(), String::new(), "unknown".to_string())
+    }
+}
+
+fn resolve_device_token(parsed_token: &str, request_token: Option<&str>) -> Option<String> {
+    if !parsed_token.is_empty() {
+        return Some(parsed_token.to_string());
+    }
+
+    request_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn attach_device(
@@ -842,10 +906,23 @@ async fn attach_device(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
+    use tracing::{info, warn};
+
+    let body_str = String::from_utf8_lossy(&body);
+    info!(user_id = %auth.user_id, body = %body_str, "attach_device received");
+
     // Try to parse body, but accept empty/malformed requests gracefully
-    let input: AttachDeviceRequest = match parse_body(&headers, &body, "Invalid device body") {
-        Ok(v) => v,
-        Err(_) => {
+    let input: AttachDeviceRequest = match parse_body::<AttachDeviceRequest>(
+        &headers,
+        &body,
+        "Invalid device body",
+    ) {
+        Ok(v) => {
+            info!(user_id = %auth.user_id, device_id = ?v.device_id, "attach_device parsed successfully");
+            v
+        }
+        Err(e) => {
+            warn!(user_id = %auth.user_id, error = %e, body = %body_str, "attach_device parse error");
             // Return OK for malformed requests - mobile sends various formats
             return Ok(Json(serde_json::json!({"status": "OK"})));
         }
@@ -853,6 +930,19 @@ async fn attach_device(
 
     // Only insert if we have device_id
     if let Some(device_id) = input.device_id {
+        // Parse device_id to extract FCM token (it's embedded in the device_id!)
+        let (device_id_stored, parsed_token, platform) = parse_mobile_device_id(&device_id);
+        let resolved_token = resolve_device_token(&parsed_token, input.token.as_deref());
+
+        info!(
+            user_id = %auth.user_id,
+            device_id = %device_id_stored,
+            has_token = resolved_token.is_some(),
+            token_preview = %resolved_token.as_deref().map(|token| &token[..20.min(token.len())]).unwrap_or(""),
+            platform = %platform,
+            "Extracted token from device_id"
+        );
+
         let _ = sqlx::query(
             r#"
             INSERT INTO user_devices (user_id, device_id, token, platform)
@@ -862,14 +952,35 @@ async fn attach_device(
             "#,
         )
         .bind(auth.user_id)
-        .bind(&device_id)
-        .bind(input.token.as_deref())
-        .bind(input.platform.unwrap_or_else(|| "unknown".to_string()))
+        .bind(&device_id_stored)
+        .bind(resolved_token.as_deref())
+        .bind(&platform)
         .execute(&state.db)
         .await;
     }
 
     Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_device_token;
+
+    #[test]
+    fn resolve_device_token_uses_request_token_when_parsed_token_missing() {
+        assert_eq!(
+            resolve_device_token("", Some("request-token")),
+            Some("request-token".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_device_token_prefers_parsed_token() {
+        assert_eq!(
+            resolve_device_token("parsed-token", Some("request-token")),
+            Some("parsed-token".to_string())
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -1137,22 +1248,23 @@ async fn get_statuses_by_ids(
         return Ok(Json(vec![]));
     }
 
-    let users: Vec<(Uuid, String, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT id, presence, last_login_at FROM users WHERE id = ANY($1)")
+    let users: Vec<(Uuid, String, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = ANY($1)",
+    )
             .bind(&uuids)
             .fetch_all(&state.db)
             .await?;
 
     let statuses = users
         .into_iter()
-        .map(|(id, presence, last_login)| mm::Status {
+        .map(|(id, presence, manual, last_login)| mm::Status {
             user_id: encode_mm_id(id),
             status: if presence.is_empty() {
                 "offline".to_string()
             } else {
                 presence
             },
-            manual: false,
+            manual,
             last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
         })
         .collect();
@@ -1223,11 +1335,12 @@ async fn get_status(
 ) -> ApiResult<Json<mm::Status>> {
     let user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    let (presence, last_login): (String, Option<DateTime<Utc>>) =
-        sqlx::query_as("SELECT presence, last_login_at FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&state.db)
-            .await?;
+    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(mm::Status {
         user_id: encode_mm_id(user_id),
@@ -1236,7 +1349,7 @@ async fn get_status(
         } else {
             presence
         },
-        manual: false,
+        manual,
         last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
     }))
 }
@@ -1245,11 +1358,12 @@ async fn get_my_status(
     State(state): State<AppState>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<mm::Status>> {
-    let (presence, last_login): (String, Option<DateTime<Utc>>) =
-        sqlx::query_as("SELECT presence, last_login_at FROM users WHERE id = $1")
-            .bind(auth.user_id)
-            .fetch_one(&state.db)
-            .await?;
+    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
+    )
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(mm::Status {
         user_id: encode_mm_id(auth.user_id),
@@ -1258,7 +1372,7 @@ async fn get_my_status(
         } else {
             presence
         },
-        manual: false,
+        manual,
         last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
     }))
 }
@@ -1275,6 +1389,8 @@ struct PatchMeRequest {
     first_name: Option<String>,
     last_name: Option<String>,
     position: Option<String>,
+    #[serde(default)]
+    notify_props: Option<serde_json::Value>,
 }
 
 async fn update_status(
@@ -1293,31 +1409,21 @@ async fn update_status(
         ));
     }
 
-    sqlx::query("UPDATE users SET presence = $1 WHERE id = $2")
-        .bind(&input.status)
-        .bind(auth.user_id)
-        .execute(&state.db)
-        .await?;
+    let manual = crate::api::websocket_core::status_is_manual(&input.status);
+    crate::api::websocket_core::persist_presence_and_broadcast(
+        &state,
+        auth.user_id,
+        &input.status,
+        manual,
+    )
+    .await;
 
     let status = mm::Status {
         user_id: encode_mm_id(auth.user_id),
         status: input.status.clone(),
-        manual: true,
+        manual,
         last_activity_at: Utc::now().timestamp_millis(),
     };
-
-    // Broadcast status change
-    let broadcast = crate::realtime::WsEnvelope::event(
-        crate::realtime::EventType::UserUpdated, // Mapping to status_change in WS handler
-        serde_json::json!({
-             "user_id": auth.user_id,
-             "status": input.status,
-             "manual": true,
-             "last_activity_at": status.last_activity_at
-        }),
-        None,
-    );
-    state.ws_hub.broadcast(broadcast).await;
 
     Ok(Json(status))
 }
@@ -1338,14 +1444,16 @@ async fn patch_me(
             last_name = COALESCE($2, last_name),
             nickname = COALESCE($3, nickname),
             position = COALESCE($4, position),
+            notify_props = COALESCE($5, notify_props),
             updated_at = NOW()
-        WHERE id = $5
+        WHERE id = $6
         "#,
     )
     .bind(&input.first_name)
     .bind(&input.last_name)
     .bind(&input.nickname)
     .bind(&input.position)
+    .bind(input.notify_props.as_ref())
     .bind(auth.user_id)
     .execute(&state.db)
     .await?;
@@ -1804,8 +1912,29 @@ async fn patch_user(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<mm::User>> {
-    let _input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
+    let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
     let user_id = resolve_user_id(&user_id, &auth)?;
+
+    // Update user profile fields
+    sqlx::query(
+        r#"UPDATE users SET 
+            nickname = COALESCE($1, nickname),
+            first_name = COALESCE($2, first_name),
+            last_name = COALESCE($3, last_name),
+            position = COALESCE($4, position),
+            notify_props = COALESCE($5, notify_props),
+            updated_at = NOW()
+        WHERE id = $6"#,
+    )
+    .bind(input.nickname)
+    .bind(input.first_name)
+    .bind(input.last_name)
+    .bind(input.position)
+    .bind(input.notify_props)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&state.db)

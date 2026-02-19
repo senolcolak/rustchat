@@ -2,7 +2,7 @@
 //!
 //! Implements:
 //! - Protocol-level Ping/Pong (WebSocket control frames)
-//! - 60s ping interval, 100s pong timeout, 30s write deadline
+//! - 30s ping interval, 2 missed-heartbeat timeout, 30s write deadline
 //! - Session resumption support
 //! - Graceful shutdown with proper close codes
 
@@ -22,13 +22,13 @@ use uuid::Uuid;
 use crate::mattermost_compat::models as mm;
 use crate::realtime::connection_store::{ConnectionState, ConnectionStore};
 
-// Mattermost WebSocket constants from web_conn.go
+// Heartbeat constants
 /// Write timeout for WebSocket operations (30 seconds)
 const WRITE_WAIT: Duration = Duration::from_secs(30);
-/// Time to wait for Pong response after Ping (100 seconds)
-const PONG_WAIT: Duration = Duration::from_secs(100);
-/// Interval between Ping frames (60 seconds)
-const PING_INTERVAL: Duration = Duration::from_secs(60);
+/// Interval between Ping frames (30 seconds)
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// Number of missed heartbeat windows tolerated before closing.
+const MAX_MISSED_HEARTBEATS: u32 = 2;
 
 fn is_benign_disconnect_error(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
@@ -301,40 +301,11 @@ impl ActorTask {
 
         // Create ping interval
         let mut ping_interval = interval(PING_INTERVAL);
+        // Skip the immediate first tick; we want the first ping after PING_INTERVAL.
+        ping_interval.tick().await;
 
         // Track last pong time
         let last_pong = Arc::new(std::sync::Mutex::new(Instant::now()));
-
-        // Spawn ping task
-        let ping_last_pong = last_pong.clone();
-        let ping_is_closing = self.is_closing.clone();
-        let ping_connection_id = self.connection_id.clone();
-
-        let ping_task = tokio::spawn(async move {
-            loop {
-                ping_interval.tick().await;
-
-                if ping_is_closing.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Check if we've received a pong recently
-                let last_pong_time = *ping_last_pong.lock().unwrap();
-                if Instant::now().duration_since(last_pong_time) > PONG_WAIT {
-                    warn!(
-                        connection_id = %ping_connection_id,
-                        "Pong timeout - closing connection"
-                    );
-                    ping_is_closing.store(true, Ordering::SeqCst);
-                    break;
-                }
-
-                // Send ping frame
-                trace!(connection_id = %ping_connection_id, "Sending Ping frame");
-                // We can't easily send from here since we don't have sink access
-                // The ping will be sent by the select! loop below
-            }
-        });
 
         // Main event loop
         loop {
@@ -556,7 +527,23 @@ impl ActorTask {
                 }
 
                 // Send periodic pings
-                _ = tokio::time::sleep(PING_INTERVAL) => {
+                _ = ping_interval.tick() => {
+                    if self.is_closing.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    let last_pong_time = *last_pong.lock().unwrap();
+                    let heartbeat_deadline =
+                        PING_INTERVAL.saturating_mul(MAX_MISSED_HEARTBEATS);
+                    if Instant::now().duration_since(last_pong_time) > heartbeat_deadline {
+                        warn!(
+                            connection_id = %self.connection_id,
+                            missed_heartbeats = MAX_MISSED_HEARTBEATS,
+                            "Pong timeout - closing connection"
+                        );
+                        break;
+                    }
+
                     trace!(connection_id = %self.connection_id, "Sending periodic Ping");
 
                     match timeout(
@@ -580,23 +567,12 @@ impl ActorTask {
                             break;
                         }
                     }
-
-                    // Check for pong timeout
-                    let last_pong_time = *last_pong.lock().unwrap();
-                    if Instant::now().duration_since(last_pong_time) > PONG_WAIT {
-                        warn!(
-                            connection_id = %self.connection_id,
-                            "Pong timeout detected"
-                        );
-                        break;
-                    }
                 }
             }
         }
 
         // Cleanup
         self.is_closing.store(true, Ordering::SeqCst);
-        ping_task.abort();
 
         // Send close frame for graceful shutdown (unless client already closed)
         // This prevents "Connection reset without closing handshake" errors

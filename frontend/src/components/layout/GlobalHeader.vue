@@ -1,22 +1,23 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { useRouter } from 'vue-router';
 import { Bell, Search, HelpCircle, LogOut, Settings, Smile, Shield } from 'lucide-vue-next';
 import { useAuthStore } from '../../stores/auth';
 import { useUIStore } from '../../stores/ui';
 import SearchModal from '../modals/SearchModal.vue';
 import SetStatusModal from '../modals/SetStatusModal.vue';
 import RcAvatar from '../ui/RcAvatar.vue';
-import PresenceSelector from '../ui/PresenceSelector.vue';
 import NotificationsDropdown from './NotificationsDropdown.vue';
 import { useConfigStore } from '../../stores/config';
-import { usePresenceStore } from '../../stores/presence';
-import { useUnreadStore } from '../../stores/unreads';
+import { usePresenceStore } from '../../features/presence';
+import { useUnreadStore } from '../../features/unreads';
 
 const auth = useAuthStore();
 const ui = useUIStore();
 const configStore = useConfigStore();
 const presenceStore = usePresenceStore();
 const unreadStore = useUnreadStore();
+const router = useRouter();
 
 const showSearch = ref(false);
 const showUserMenu = ref(false);
@@ -84,7 +85,7 @@ const statusLabel = computed(() => {
 </script>
 
 <template>
-  <header class="h-[60px] bg-gray-900 border-b border-gray-800 flex items-center justify-between px-3 text-white shrink-0 z-20 relative">
+  <header class="h-[64px] bg-bg-surface-1 border-b border-border-1 flex items-center justify-between px-4 text-text-1 shrink-0 z-30 relative transition-standard">
     <!-- Left: Logo & Team -->
     <div class="flex items-center min-w-[200px]">
       <div class="font-bold text-lg tracking-tight mr-4 flex items-center">
@@ -95,48 +96,45 @@ const statusLabel = computed(() => {
     </div>
 
     <!-- Center: Search -->
-    <div class="flex-1 max-w-2xl px-4">
-      <div 
-        class="relative group cursor-pointer"
-        @click="showSearch = true"
-      >
-        <div class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-400">
-          <Search class="w-4 h-4" />
-        </div>
+    <div class="flex-1 max-w-2xl px-4 hidden sm:block">
         <div 
-          class="block w-full bg-gray-800 border-transparent rounded text-sm text-gray-400 pl-8 pr-3 py-1.5 transition-colors hover:bg-gray-700 flex items-center justify-between"
+          @click="showSearch = true"
+          class="flex items-center w-full bg-bg-surface-2 hover:bg-bg-surface-1 border border-border-1 rounded-r-2 px-4 py-2 cursor-pointer transition-standard group focus-ring shadow-1"
         >
-          <span>Search {{ configStore.siteConfig.site_name }}</span>
-          <kbd class="hidden sm:inline-flex px-1.5 py-0.5 bg-gray-700 text-gray-400 text-xs rounded">⌘K</kbd>
+          <Search class="w-4 h-4 text-text-3 group-hover:text-text-2 transition-colors mr-3" />
+          <span class="text-sm text-text-3 group-hover:text-text-2 transition-colors flex-1">
+            Search {{ configStore.siteConfig.site_name }}
+          </span>
+          <div class="flex items-center space-x-1 opacity-50 group-hover:opacity-100 transition-opacity">
+            <kbd class="px-1.5 py-0.5 bg-bg-app border border-border-1 rounded text-[10px] font-bold text-text-2">⌘</kbd>
+            <kbd class="px-1.5 py-0.5 bg-bg-app border border-border-1 rounded text-[10px] font-bold text-text-2">K</kbd>
+          </div>
         </div>
-      </div>
     </div>
 
     <!-- Right: Actions -->
     <div class="flex items-center space-x-3">
-      <button class="text-gray-400 hover:text-white transition-colors">
+      <button class="text-text-3 hover:text-text-1 transition-colors p-1.5 rounded-r-1 hover:bg-bg-surface-2">
         <HelpCircle class="w-5 h-5" />
       </button>
       
       <div class="relative">
         <button 
           @click="showNotifications = !showNotifications"
-          class="relative text-gray-400 hover:text-white transition-colors p-1"
+          class="relative text-text-3 hover:text-text-1 transition-standard p-1.5 rounded-r-1 hover:bg-bg-surface-2 focus-ring"
+          aria-label="Toggle notifications"
+          title="Notifications"
         >
           <Bell class="w-5 h-5" />
           <span 
             v-if="unreadStore.totalUnreadCount > 0"
-            class="absolute top-0 right-0 block h-2.5 w-2.5 rounded-full ring-2 ring-gray-900 bg-red-500 animate-pulse"
+            class="absolute top-1 right-1 block h-2.5 w-2.5 rounded-full ring-2 ring-bg-surface-1 bg-danger animate-pulse"
           ></span>
         </button>
         <NotificationsDropdown v-if="showNotifications" @close="showNotifications = false" />
         <div v-if="showNotifications" class="fixed inset-0 z-40" @click="showNotifications = false"></div>
       </div>
       
-      <!-- Presence Switcher -->
-      <div>
-        <PresenceSelector />
-      </div>
 
       <!-- User Menu -->
       <div class="ml-2 relative">
@@ -150,83 +148,89 @@ const statusLabel = computed(() => {
         </div>
 
         <!-- Dropdown -->
-        <div v-if="showUserMenu" class="absolute top-full right-0 mt-2 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 z-50 origin-top-right focus:outline-none">
-            <!-- User Info -->
-            <div class="px-4 py-3 border-b border-gray-700">
-                <p class="text-sm font-medium text-white truncate">{{ auth.user?.display_name || auth.user?.username }}</p>
-                <div class="flex items-center mt-1">
-                    <div class="h-2 w-2 rounded-full mr-2" :class="statusColor"></div>
-                    <p class="text-xs text-gray-400">{{ statusLabel }}</p>
+        <div v-if="showUserMenu" class="absolute top-full right-0 mt-3 w-72 glass-panel rounded-2xl shadow-2xl py-2 z-50 origin-top-right focus:outline-none animate-fade-in ring-1 ring-black/5">
+            <!-- User Info Section -->
+            <div class="px-5 py-4 border-b border-black/5 dark:border-white/5 bg-black/5 dark:bg-white/5">
+                <div class="flex items-center space-x-3">
+                    <RcAvatar 
+                      :userId="auth.user?.id"
+                      :src="auth.user?.avatar_url" 
+                      :username="auth.user?.username" 
+                      size="lg"
+                      class="ring-2 ring-primary/20"
+                    />
+                    <div class="flex-1 min-w-0">
+                        <p class="text-[15px] font-bold text-gray-900 dark:text-white truncate">{{ auth.user?.display_name || auth.user?.username }}</p>
+                        <div class="flex items-center mt-1">
+                            <div class="h-2 w-2 rounded-full mr-2" :class="statusColor"></div>
+                            <p class="text-xs font-medium text-gray-500 dark:text-gray-400 capitalize">{{ statusLabel }}</p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <!-- Custom Status -->
-            <div class="px-1 py-1">
+            <!-- Custom Status Button -->
+            <div class="p-2">
                 <button 
                     @click="showSetStatus = true; showUserMenu = false"
-                    class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center transition-colors border border-gray-700 bg-gray-700/30"
+                    class="w-full text-left px-3 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-primary/10 hover:text-primary dark:hover:text-primary-hover rounded-xl flex items-center transition-standard group focus-ring bg-white/50 dark:bg-black/20 border border-black/5 dark:border-white/5"
                 >
-                    <span v-if="auth.user?.status_emoji" class="mr-2">{{ auth.user.status_emoji }}</span>
-                    <Smile v-else class="w-4 h-4 mr-2" />
-                    <span class="truncate">{{ auth.user?.status_text || 'Update your status' }}</span>
+                    <span v-if="auth.user?.status_emoji" class="mr-2 text-lg">{{ auth.user.status_emoji }}</span>
+                    <Smile v-else class="w-4.5 h-4.5 mr-2 opacity-60 group-hover:opacity-100" />
+                    <span class="truncate">{{ auth.user?.status_text || 'Set a custom status' }}</span>
                 </button>
             </div>
 
-            <div class="border-t border-gray-700 my-1"></div>
-
-            <!-- Presence Options -->
-            <div class="px-1 py-1">
-                 <button @click="setPresence('online')" class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center justify-between group">
-                    <div class="flex items-center">
-                        <div class="h-2 w-2 rounded-full bg-green-500 mr-2"></div>
-                        Online
-                    </div>
-                </button>
-                <button @click="setPresence('away')" class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center justify-between group">
-                    <div class="flex items-center">
-                        <div class="h-2 w-2 rounded-full bg-yellow-500 mr-2"></div>
-                        Away
-                    </div>
-                </button>
-                 <button @click="setPresence('dnd')" class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center justify-between group">
-                    <div class="flex items-center">
-                        <div class="h-2 w-2 rounded-full bg-red-500 mr-2"></div>
-                        Do not disturb
-                    </div>
-                </button>
-                 <button @click="setPresence('offline')" class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center justify-between group">
-                    <div class="flex items-center">
-                        <div class="h-2 w-2 rounded-full ring-1 ring-gray-400 mr-2"></div>
-                        Offline
-                    </div>
-                </button>
+            <div class="px-2 pb-2">
+                <div class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest px-3 py-2">
+                    Availability
+                </div>
+                <!-- Presence Options Grid -->
+                <div class="grid grid-cols-2 gap-1 px-1">
+                     <button @click="setPresence('online')" class="flex items-center space-x-2 px-3 py-2 text-xs font-semibold rounded-lg transition-standard focus-ring group" :class="userPresence === 'online' ? 'bg-primary/10 text-primary' : 'text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5'">
+                        <div class="h-2 w-2 rounded-full bg-green-500 group-hover:scale-125 transition-transform"></div>
+                        <span>Online</span>
+                    </button>
+                    <button @click="setPresence('away')" class="flex items-center space-x-2 px-3 py-2 text-xs font-semibold rounded-lg transition-standard focus-ring group" :class="userPresence === 'away' ? 'bg-amber-100/50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400' : 'text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5'">
+                        <div class="h-2 w-2 rounded-full bg-amber-500 group-hover:scale-125 transition-transform"></div>
+                        <span>Away</span>
+                    </button>
+                     <button @click="setPresence('dnd')" class="flex items-center space-x-2 px-3 py-2 text-xs font-semibold rounded-lg transition-standard focus-ring group" :class="userPresence === 'dnd' ? 'bg-red-100/50 dark:bg-red-900/20 text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5'">
+                        <div class="h-2 w-2 rounded-full bg-red-500 group-hover:scale-125 transition-transform"></div>
+                        <span>Busy</span>
+                    </button>
+                     <button @click="setPresence('offline')" class="flex items-center space-x-2 px-3 py-2 text-xs font-semibold rounded-lg transition-standard focus-ring group" :class="userPresence === 'offline' ? 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-300' : 'text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5'">
+                        <div class="h-2 w-2 rounded-full bg-gray-400 group-hover:scale-125 transition-transform"></div>
+                        <span>Invisible</span>
+                    </button>
+                </div>
             </div>
 
-            <div class="border-t border-gray-700 my-1"></div>
+            <div class="border-t border-black/5 dark:border-white/10 my-1"></div>
 
-            <!-- Links -->
-            <div class="px-1 py-1">
+            <!-- Settings & Account -->
+            <div class="p-2 space-y-0.5">
                 <button
-                  v-if="auth.user?.role === 'system_admin' || auth.user?.role === 'org_admin'"
-                  @click="$router.push('/admin'); showUserMenu = false"
-                  class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center transition-colors"
+                  v-if="['system_admin', 'org_admin', 'admin', 'administrator'].includes(auth.user?.role)"
+                  @click="router.push('/admin'); showUserMenu = false"
+                  class="w-full text-left px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-primary/10 hover:text-primary rounded-xl flex items-center transition-standard focus-ring"
                 >
-                    <Shield class="w-4 h-4 mr-2" />
-                    System Console
+                    <Shield class="w-4.5 h-4.5 mr-2.5 opacity-60" />
+                    Admin Console
                 </button>
                 <button 
                   @click="ui.openSettings(); showUserMenu = false"
-                  class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center transition-colors"
+                  class="w-full text-left px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-primary/10 hover:text-primary rounded-xl flex items-center transition-standard focus-ring"
                 >
-                    <Settings class="w-4 h-4 mr-2" />
-                    Profile & Preferences
+                    <Settings class="w-4.5 h-4.5 mr-2.5 opacity-60" />
+                    Preferences
                 </button>
                 <button 
                     @click="auth.logout()"
-                     class="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-md flex items-center transition-colors"
+                     class="w-full text-left px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl flex items-center transition-standard focus-ring"
                 >
-                    <LogOut class="w-4 h-4 mr-2" />
-                    Sign out
+                    <LogOut class="w-4.5 h-4.5 mr-2.5 opacity-60" />
+                    Sign Out
                 </button>
             </div>
         </div>

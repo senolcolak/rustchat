@@ -137,6 +137,7 @@ async fn create_post_handler(
         root_post_id,
         props: Some(input.props),
         file_ids,
+        client_msg_id: None,
     };
 
     let client_msg_id = if !input.pending_post_id.is_empty() {

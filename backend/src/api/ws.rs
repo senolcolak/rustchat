@@ -93,11 +93,17 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
 
     // Add connection to hub
     let (connection_id, mut rx) = state.ws_hub.add_connection(user_id, username.clone()).await;
+    let connection_id_str = connection_id.to_string();
+    websocket_core::register_presence_connection(&state, user_id, &connection_id_str).await;
 
-    websocket_core::initialize_connection_state(&state, user_id, false).await;
+    websocket_core::initialize_connection_state(&state, user_id, true).await;
 
-    // Send hello message
-    let hello = WsEnvelope::hello(user_id);
+    // Send hello message with connection_id for reliable WebSocket support
+    let connection_uuid = uuid::Uuid::new_v4();
+    let hello = WsEnvelope::hello(
+        connection_uuid,
+        &format!("rustchat-{}", env!("CARGO_PKG_VERSION")),
+    );
     if let Ok(msg) = serde_json::to_string(&hello) {
         let _ = sender.send(Message::Text(msg.into())).await;
     }
@@ -114,10 +120,27 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
     // Handle incoming messages from client
     let state_for_receive = state.clone();
     let username_for_receive = username.clone();
+    let connection_id_for_receive = connection_id_str.clone();
     let receive_task = tokio::spawn(async move {
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(Message::Text(text)) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
+                            if crate::api::v4::calls_plugin::handle_ws_action(
+                                &state_for_receive,
+                                user_id,
+                                &connection_id_for_receive,
+                                action,
+                                value.get("data"),
+                            )
+                            .await
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
                     if !websocket_core::handle_client_envelope_message(
                         &state_for_receive,
                         user_id,
@@ -145,5 +168,5 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
 
     // Cleanup
     state.ws_hub.remove_connection(user_id, connection_id).await;
-    websocket_core::set_offline_if_last_connection(&state, user_id).await;
+    websocket_core::handle_disconnect(&state, user_id, &connection_id_str).await;
 }

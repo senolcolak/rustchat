@@ -209,9 +209,9 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
             channel_id: channelId,
             channel_id_raw: raw.channel_id_raw || channelId,
             start_at: raw.start_at || Date.now(),
-            owner_id: raw.owner_id || '',
+            owner_id: raw.owner_id_raw || raw.owner_id || '',
             owner_id_raw: raw.owner_id_raw || raw.owner_id || '',
-            host_id: raw.host_id || '',
+            host_id: raw.host_id_raw || raw.host_id || '',
             host_id_raw: raw.host_id_raw || raw.host_id || '',
             thread_id: raw.thread_id,
             screen_sharing_id: raw.screen_sharing_id,
@@ -238,9 +238,9 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
         channel_id: channelId,
         channel_id_raw: raw.channel_id_raw || channelId,
         start_at: raw.start_at || Date.now(),
-        owner_id: raw.owner_id || '',
+        owner_id: raw.owner_id_raw || raw.owner_id || '',
         owner_id_raw: raw.owner_id_raw || raw.owner_id || '',
-        host_id: raw.host_id || '',
+        host_id: raw.host_id_raw || raw.host_id || '',
         host_id_raw: raw.host_id_raw || raw.host_id || '',
         thread_id: raw.thread_id,
         screen_sharing_id: raw.screen_sharing_id,
@@ -252,6 +252,12 @@ function normalizeCallState(channelId: string, raw: CallStateWire): CallState {
 
 async function fetchCallForChannel(channelId: string): Promise<CallChannelState> {
     const response = await apiClient.get<CallStateWire>(`${CALLS_ROUTE}/calls/${channelId}?mobilev2=true`)
+    if (!response.data) {
+        return {
+            channel_id: channelId,
+            enabled: true,
+        }
+    }
     return {
         channel_id: channelId,
         enabled: true,

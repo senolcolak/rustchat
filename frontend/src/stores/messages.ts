@@ -4,6 +4,8 @@ import { postsApi, type Post } from '../api/posts'
 import { useChannelStore } from './channels'
 import { useUnreadStore } from './unreads'
 import { useAuthStore } from './auth'
+import { useTeamStore } from './teams'
+import { normalizeEntityId } from '../utils/idCompat'
 
 export interface Message {
     id: string
@@ -27,31 +29,111 @@ export interface Message {
     seq: number | string
 }
 
-function postToMessage(post: Post): Message {
+function toIsoTimestamp(value: unknown): string {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return new Date(value).toISOString()
+    }
+    if (typeof value === 'string' && value.length > 0) {
+        return value
+    }
+    return new Date().toISOString()
+}
+
+function toOptionalIsoTimestamp(value: unknown): string | undefined {
+    if (value === null || value === undefined || value === '') {
+        return undefined
+    }
+    return toIsoTimestamp(value)
+}
+
+function comparableId(value: unknown): string | undefined {
+    if (typeof value !== 'string' || value.length === 0) {
+        return undefined
+    }
+    return normalizeEntityId(value) ?? value
+}
+
+function idsMatch(left: unknown, right: unknown): boolean {
+    const lhs = comparableId(left)
+    const rhs = comparableId(right)
+    return !!lhs && !!rhs && lhs === rhs
+}
+
+function resolveAuthorDetails(rawPost: Post & { username?: string; avatar_url?: string; email?: string }): {
+    username: string
+    avatarUrl?: string
+    email?: string
+} {
+    const usernameFromPost = typeof rawPost.username === 'string' ? rawPost.username.trim() : ''
+    if (usernameFromPost) {
+        return {
+            username: usernameFromPost,
+            avatarUrl: rawPost.avatar_url,
+            email: rawPost.email,
+        }
+    }
+
+    const authStore = useAuthStore()
+    if (idsMatch(rawPost.user_id, authStore.user?.id)) {
+        return {
+            username: authStore.user?.display_name || authStore.user?.username || 'Unknown',
+            avatarUrl: rawPost.avatar_url || authStore.user?.avatar_url,
+            email: rawPost.email || authStore.user?.email,
+        }
+    }
+
+    const teamStore = useTeamStore()
+    const teamMember = teamStore.members.find((member) => idsMatch(member.user_id, rawPost.user_id))
+    if (teamMember) {
+        return {
+            username: teamMember.display_name || teamMember.username || 'Unknown',
+            avatarUrl: rawPost.avatar_url || teamMember.avatar_url,
+            email: rawPost.email,
+        }
+    }
+
     return {
-        id: post.id,
-        channelId: post.channel_id,
-        userId: post.user_id,
-        username: post.username || 'Unknown',
-        avatarUrl: post.avatar_url,
-        email: post.email,
-        content: post.message,
-        timestamp: post.created_at,
-        reactions: post.reactions?.map((r: any) => ({
+        username: 'Unknown',
+        avatarUrl: rawPost.avatar_url,
+        email: rawPost.email,
+    }
+}
+
+export function postToMessage(post: Post): Message {
+    const rawPost = post as Post & {
+        root_id?: string
+        create_at?: string | number
+        update_at?: string | number
+        pending_post_id?: string
+        last_reply_at?: string | number | null
+    }
+    const rootId = (rawPost.root_post_id ?? rawPost.root_id) || undefined
+    const author = resolveAuthorDetails(rawPost)
+
+    return {
+        id: rawPost.id,
+        channelId: rawPost.channel_id,
+        userId: rawPost.user_id,
+        username: author.username,
+        avatarUrl: author.avatarUrl,
+        email: author.email,
+        content: rawPost.message,
+        timestamp: toIsoTimestamp(rawPost.created_at ?? rawPost.create_at),
+        reactions: rawPost.reactions?.map((r: any) => ({
             emoji: r.emoji,
             count: r.count,
             users: r.users.map((u: any) => u.toString())
         })) || [],
-        rootId: post.root_post_id,
-        threadCount: post.reply_count || 0,
-        lastReplyAt: post.last_reply_at,
-        files: post.files || [],
-        isPinned: post.is_pinned,
-        isSaved: post.is_saved || false,
+        rootId,
+        threadCount: rawPost.reply_count || 0,
+        lastReplyAt: toOptionalIsoTimestamp(rawPost.last_reply_at),
+        files: rawPost.files || [],
+        isPinned: Boolean(rawPost.is_pinned),
+        isSaved: rawPost.is_saved || false,
         status: 'delivered',
-        clientMsgId: (post as any).client_msg_id,
-        props: post.props,
-        seq: post.seq,
+        clientMsgId: rawPost.client_msg_id ?? rawPost.pending_post_id,
+        props: rawPost.props,
+        seq: rawPost.seq ?? 0,
     }
 }
 
@@ -162,18 +244,37 @@ export const useMessageStore = defineStore('messages', () => {
     }
 
     function updateOptimisticMessage(clientMsgId: string, serverMsg: Message) {
-        const dest = serverMsg.rootId ? repliesByThread.value[serverMsg.rootId] : messagesByChannel.value[serverMsg.channelId]
-        if (!dest) return
+        const channelId = serverMsg.channelId
+        const rootId = serverMsg.rootId
 
-        const index = dest.findIndex(m => m.clientMsgId === clientMsgId)
-        if (index !== -1) {
-            dest[index] = serverMsg
+        if (rootId) {
+            const threadReplies = repliesByThread.value[rootId]
+            if (threadReplies) {
+                const index = threadReplies.findIndex(m => m.clientMsgId === clientMsgId || m.id === clientMsgId)
+                if (index !== -1) {
+                    threadReplies[index] = serverMsg
+                } else {
+                    threadReplies.push(serverMsg)
+                }
+            }
         } else {
-            dest.push(serverMsg)
+            const channelMessages = messagesByChannel.value[channelId]
+            if (channelMessages) {
+                const index = channelMessages.findIndex(m => m.clientMsgId === clientMsgId || m.id === clientMsgId)
+                if (index !== -1) {
+                    channelMessages[index] = serverMsg
+                } else {
+                    channelMessages.push(serverMsg)
+                }
+            }
         }
     }
 
     function handleNewMessage(post: Post) {
+        if (!post) {
+            return
+        }
+
         const message = postToMessage(post)
 
         if (message.rootId) {

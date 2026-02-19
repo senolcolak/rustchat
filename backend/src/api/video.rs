@@ -153,6 +153,7 @@ async fn create_meeting(
         file_ids: vec![],
         props: Some(props),
         root_post_id: None,
+        client_msg_id: None,
     };
 
     let _post_response = crate::services::posts::create_post(

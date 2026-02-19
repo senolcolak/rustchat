@@ -61,19 +61,19 @@ export const usePresenceStore = defineStore('presence', () => {
     }
 
     function updatePresenceFromEvent(userId: string, presence: Presence) {
+        const lowerPresence = presence.toLowerCase() as Presence
         if (self.value?.userId === userId) {
-            self.value.presence = presence
+            self.value.presence = lowerPresence
         } else {
             const user = presenceMap.value.get(userId)
             if (user) {
-                user.presence = presence
+                user.presence = lowerPresence
                 user.lastActiveAt = new Date().toISOString()
             } else {
-                // If we don't have the user yet, we might want to fetch or just ignore until they appear in a list
                 presenceMap.value.set(userId, {
                     userId,
-                    username: '', // Unknown for now
-                    presence,
+                    username: '',
+                    presence: lowerPresence,
                     lastActiveAt: new Date().toISOString()
                 })
             }

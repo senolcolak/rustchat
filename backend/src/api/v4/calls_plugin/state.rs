@@ -270,12 +270,37 @@ impl CallStateManager {
         .await;
     }
 
+    /// Set call thread root post ID.
+    pub async fn set_thread_id(&self, call_id: Uuid, thread_id: Option<Uuid>) {
+        self.mutate_call(call_id, |call| {
+            call.thread_id = thread_id;
+        })
+        .await;
+    }
+
+    /// Get call thread root post ID.
+    pub async fn get_thread_id(&self, call_id: Uuid) -> Option<Uuid> {
+        self.get_call(call_id)
+            .await
+            .map(|call| call.thread_id)
+            .flatten()
+    }
+
     /// Mark a user as having dismissed incoming call notifications.
     pub async fn dismiss_user_notification(&self, call_id: Uuid, user_id: Uuid) {
         self.mutate_call(call_id, |call| {
             call.dismissed_users.insert(user_id);
         })
         .await;
+    }
+
+    /// Check if a user has dismissed notifications for a call.
+    pub async fn is_notification_dismissed(&self, call_id: Uuid, user_id: Uuid) -> bool {
+        let calls = self.calls.read().await;
+        calls
+            .get(&call_id)
+            .map(|call| call.dismissed_users.contains(&user_id))
+            .unwrap_or(false)
     }
 
     /// Get all active calls (for cleanup/debugging)

@@ -66,6 +66,9 @@ pub struct SiteConfig {
     pub enable_custom_emoji: bool,
     #[serde(default)]
     pub enable_custom_brand: bool,
+    /// Enable push notifications for mobile (SendPushNotifications)
+    #[serde(default = "default_true")]
+    pub send_push_notifications: bool,
     #[serde(default = "default_true")]
     pub enable_mobile_file_download: bool,
     #[serde(default = "default_true")]
@@ -78,6 +81,15 @@ pub struct SiteConfig {
     pub default_locale: String,
     #[serde(default = "default_timezone")]
     pub default_timezone: String,
+    /// WebSocket URL (empty = use default)
+    #[serde(default)]
+    pub websocket_url: String,
+    /// WebSocket port (empty = use default)
+    #[serde(default)]
+    pub websocket_port: String,
+    /// WebSocket secure port (empty = use default)
+    #[serde(default)]
+    pub websocket_secure_port: String,
 }
 
 fn default_site_name() -> String {
@@ -263,6 +275,15 @@ pub struct ComplianceConfig {
 /// Email/SMTP configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmailConfig {
+    /// Enable email notifications (SendEmailNotifications)
+    #[serde(default = "default_true")]
+    pub send_email_notifications: bool,
+    /// Enable email batching (EnableEmailBatching)
+    #[serde(default)]
+    pub enable_email_batching: bool,
+    /// Email batching interval in seconds (default 15 minutes = 900)
+    #[serde(default = "default_email_batching_interval")]
+    pub email_batching_interval: i32,
     #[serde(default)]
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
@@ -271,16 +292,35 @@ pub struct EmailConfig {
     pub smtp_username: String,
     #[serde(default)]
     pub smtp_password_encrypted: String,
-    #[serde(default = "default_true")]
-    pub smtp_tls: bool,
+    /// SMTP connection security: "tls", "starttls", or "none"
+    #[serde(default = "default_smtp_security")]
+    pub smtp_security: String,
+    /// Skip SMTP certificate verification (for self-signed certs)
+    #[serde(default)]
+    pub smtp_skip_cert_verify: bool,
     #[serde(default)]
     pub from_address: String,
     #[serde(default = "default_site_name")]
     pub from_name: String,
+    /// Notification display content: "full", "generic", or "generic_with_subject"
+    #[serde(default = "default_email_notification_content")]
+    pub email_notification_content: String,
 }
 
 fn default_smtp_port() -> i32 {
     587
+}
+
+fn default_smtp_security() -> String {
+    "starttls".to_string()
+}
+
+fn default_email_batching_interval() -> i32 {
+    900 // 15 minutes
+}
+
+fn default_email_notification_content() -> String {
+    "full".to_string()
 }
 
 /// DTO for updating a specific config category

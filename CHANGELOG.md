@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- VoIP Push Notification support for call ringing on mobile devices.
+  - Push Proxy service with FCM (Android) and APNS (iOS) support.
+  - Data-only FCM messages for Android call notifications (high priority, direct boot).
+  - APNS VoIP push support for iOS CallKit integration (prepared, requires credentials).
+  - Backend integration with `sub_type: "calls"` for mobile app call identification.
+  - Call UUID generation for VoIP session tracking.
+- Documentation for mobile push notification architecture and implementation requirements.
+
+### Changed
+- Docker Compose configuration to include push-proxy service on port 3001.
+- Backend push notification service to route calls through push proxy.
+
 ## [0.3.1] - 2026-02-12
 
 ### Added

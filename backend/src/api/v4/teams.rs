@@ -17,6 +17,7 @@ use crate::mattermost_compat::{
 };
 use crate::models::channel::ChannelType;
 use crate::models::{Channel, Team, TeamMember};
+use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -217,11 +218,45 @@ async fn get_team_members(
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
     ensure_team_member(&state, team_id, auth.user_id).await?;
-    let members: Vec<TeamMember> = sqlx::query_as("SELECT * FROM team_members WHERE team_id = $1")
-        .bind(team_id)
-        .fetch_all(&state.db)
-        .await?;
-    Ok(Json(members.into_iter().map(map_team_member).collect()))
+
+    // Join with users table to get user information including presence
+    let rows: Vec<(Uuid, Uuid, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT
+            tm.team_id,
+            tm.user_id,
+            tm.role,
+            u.username,
+            u.display_name,
+            u.presence
+        FROM team_members tm
+        JOIN users u ON tm.user_id = u.id
+        WHERE tm.team_id = $1
+        ORDER BY u.username
+        "#,
+    )
+    .bind(team_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let members: Vec<mm::TeamMember> = rows
+        .into_iter()
+        .map(
+            |(team_id, user_id, role, _username, _display_name, presence)| {
+                map_team_member_with_presence(
+                    TeamMember {
+                        team_id,
+                        user_id,
+                        role,
+                        created_at: chrono::Utc::now(),
+                    },
+                    presence,
+                )
+            },
+        )
+        .collect();
+
+    Ok(Json(members))
 }
 
 #[derive(Deserialize)]
@@ -663,6 +698,7 @@ async fn get_team_member_me(
         scheme_guest: false,
         scheme_user: true,
         scheme_admin: member.role == "admin" || member.role == "team_admin",
+        presence: None,
     }))
 }
 
@@ -814,6 +850,20 @@ fn map_team_member(member: TeamMember) -> mm::TeamMember {
         scheme_guest: false,
         scheme_user: true,
         scheme_admin: member.role == "admin" || member.role == "team_admin",
+        presence: None,
+    }
+}
+
+fn map_team_member_with_presence(member: TeamMember, presence: Option<String>) -> mm::TeamMember {
+    mm::TeamMember {
+        team_id: encode_mm_id(member.team_id),
+        user_id: encode_mm_id(member.user_id),
+        roles: crate::mattermost_compat::mappers::map_team_role(&member.role),
+        delete_at: 0,
+        scheme_guest: false,
+        scheme_user: true,
+        scheme_admin: member.role == "admin" || member.role == "team_admin",
+        presence: presence.filter(|p| !p.is_empty()),
     }
 }
 

@@ -22,9 +22,14 @@ COPY src ./src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
-# Build the application
+# Build with cache mounts for faster rebuilds
+# BuildKit caches cargo registry and build artifacts between builds
 ENV SQLX_OFFLINE=true
-RUN touch src/main.rs && cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    touch src/main.rs && \
+    cargo build --release && \
+    cp /app/target/release/rustchat /tmp/rustchat
 
 # Runtime stage
 FROM alpine:3.20
@@ -41,12 +46,12 @@ LABEL org.opencontainers.image.title="rustchat-backend" \
       org.opencontainers.image.revision=$VCS_REF \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache ca-certificates libgcc
+RUN apk add --no-cache ca-certificates libgcc wget
 
 WORKDIR /app
 
-# Copy the binary
-COPY --from=builder /app/target/release/rustchat /usr/local/bin/rustchat
+# Copy the binary (from tmp since target is a cache mount)
+COPY --from=builder /tmp/rustchat /usr/local/bin/rustchat
 
 # Copy migrations for runtime
 COPY --from=builder /app/migrations ./migrations
