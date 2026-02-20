@@ -125,6 +125,17 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to, _from, next) => {
+    // Check for OAuth token in URL (e.g., ?token=xxx) - must happen before auth checks
+    const urlParams = new URLSearchParams(window.location.search)
+    const token = urlParams.get('token')
+    if (token) {
+        localStorage.setItem('token', token)
+        window.history.replaceState({}, document.title, window.location.pathname)
+        // Reload to reinitialize with new token
+        window.location.reload()
+        return
+    }
+
     const auth = useAuthStore()
 
     // Rehydrate user if token exists but user is null
