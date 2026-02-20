@@ -191,9 +191,28 @@ fn generate_nonce() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Get site URL from environment
-fn get_site_url() -> String {
-    std::env::var("RUSTCHAT_SITE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+/// Get site URL from database (server config) with fallback to environment variable
+async fn get_site_url(db: &sqlx::PgPool) -> String {
+    // Try to get from database first
+    let result: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT site FROM server_config WHERE id = 'default'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+    let db_url = result
+        .and_then(|(site,)| {
+            site.get("site_url")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+
+    // Fall back to environment variable if not set in database
+    db_url.unwrap_or_else(|| {
+        std::env::var("RUSTCHAT_SITE_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string())
+    })
 }
 
 /// List available OAuth providers for login
@@ -229,7 +248,7 @@ async fn list_providers(State(state): State<AppState>) -> ApiResult<Json<Vec<OAu
     .fetch_all(&state.db)
     .await?;
 
-    let site_url = get_site_url();
+    let site_url = get_site_url(&state.db).await;
     let providers: Vec<OAuthProviderInfo> = configs
         .into_iter()
         .map(|c| {
@@ -336,7 +355,7 @@ async fn oauth_login(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to store OAuth state: {}", e)))?;
 
-    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(), provider_key);
+    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(&state.db).await, provider_key);
     let scopes = if config.scopes.is_empty() {
         provider_type.default_scopes()
     } else {
@@ -519,7 +538,7 @@ async fn oauth_callback(
         }
     };
 
-    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(), provider_key);
+    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(&state.db).await, provider_key);
 
     // Exchange code for token and get user info based on provider type
     let (email, user_info) = match provider_type {
