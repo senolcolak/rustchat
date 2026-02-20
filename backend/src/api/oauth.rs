@@ -593,8 +593,9 @@ async fn oauth_callback(
     .map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
 
     // Mobile apps need custom URL scheme redirect
+    // Change 'rustchat' to your app's URL scheme
     let redirect_url = if stored_state.is_mobile {
-        format!("mattermost://oauth/complete?token={}", urlencoding::encode(&token))
+        format!("rustchat://oauth/complete?token={}", urlencoding::encode(&token))
     } else {
         append_token_query(&stored_state.redirect_after, &token)
     };

@@ -56,7 +56,10 @@ async function handleLogin() {
 function loginWithSSO(provider: SsoProviderInfo) {
   // Include redirect_uri to return to home after login
   const redirectUri = encodeURIComponent('/')
-  window.location.href = `${provider.login_url}?redirect_uri=${redirectUri}`
+  // Detect mobile devices (iOS/Android)
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  const mobileParam = isMobile ? '&mobile=true' : ''
+  window.location.href = `${provider.login_url}?redirect_uri=${redirectUri}${mobileParam}`
 }
 
 function getProviderIcon(providerType: string): string {
