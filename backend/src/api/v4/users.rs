@@ -667,7 +667,7 @@ async fn my_team_channels(
             SELECT c.* FROM channels c
             JOIN channel_members cm ON c.id = cm.channel_id
             WHERE c.team_id = $1 AND cm.user_id = $2
-              AND (c.deleted_at = 0 OR c.deleted_at >= $3)
+              AND (c.deleted_at IS NULL OR c.deleted_at >= $3)
             "#,
         )
         .bind(team_id)
@@ -681,7 +681,7 @@ async fn my_team_channels(
             r#"
             SELECT c.* FROM channels c
             JOIN channel_members cm ON c.id = cm.channel_id
-            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.deleted_at = 0
+            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.deleted_at IS NULL
             "#,
         )
         .bind(team_id)
