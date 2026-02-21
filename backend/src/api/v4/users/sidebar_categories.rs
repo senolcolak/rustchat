@@ -15,10 +15,31 @@ use crate::mattermost_compat::{
     models as mm,
 };
 use crate::models::channel::ChannelType;
+use crate::models::Team;
 
 #[derive(Deserialize)]
 pub(super) struct CategoriesPath {
     user_id: String,
+}
+
+/// Resolves a team identifier to a UUID.
+/// First tries to parse as UUID/mm-id, then falls back to looking up by team name.
+async fn resolve_team_id(state: &AppState, team_id_str: &str) -> ApiResult<Uuid> {
+    // First try to parse as UUID or Mattermost ID
+    if let Some(team_id) = parse_mm_or_uuid(team_id_str) {
+        return Ok(team_id);
+    }
+
+    // Fall back to looking up by team name
+    let team: Option<Team> = sqlx::query_as("SELECT * FROM teams WHERE name = $1")
+        .bind(team_id_str)
+        .fetch_optional(&state.db)
+        .await?;
+
+    match team {
+        Some(t) => Ok(t.id),
+        None => Err(AppError::NotFound("Team not found".to_string())),
+    }
 }
 
 pub(super) async fn get_categories(
@@ -31,8 +52,7 @@ pub(super) async fn get_categories(
     let team_id_str = query
         .get("team_id")
         .ok_or_else(|| AppError::BadRequest("Missing team_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(team_id_str)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, team_id_str).await?;
     get_categories_internal(state, user_id, team_id).await
 }
 
@@ -44,8 +64,7 @@ pub(super) async fn get_my_categories(
     let team_id_str = query
         .get("team_id")
         .ok_or_else(|| AppError::BadRequest("Missing team_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(team_id_str)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, team_id_str).await?;
     get_categories_internal(state, auth.user_id, team_id).await
 }
 
@@ -60,8 +79,7 @@ pub(super) async fn create_category(
     let team_id_str = query
         .get("team_id")
         .ok_or_else(|| AppError::BadRequest("Missing team_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(team_id_str)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, team_id_str).await?;
     create_category_internal(state, user_id, team_id, input).await
 }
 
@@ -76,8 +94,7 @@ pub(super) async fn update_categories(
     let team_id_str = query
         .get("team_id")
         .ok_or_else(|| AppError::BadRequest("Missing team_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(team_id_str)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, team_id_str).await?;
     update_categories_internal(state, user_id, team_id, input).await
 }
 
@@ -92,8 +109,7 @@ pub(super) async fn update_category_order(
     let team_id_str = query
         .get("team_id")
         .ok_or_else(|| AppError::BadRequest("Missing team_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(team_id_str)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, team_id_str).await?;
     update_category_order_internal(state, user_id, team_id, order).await
 }
 

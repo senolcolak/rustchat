@@ -608,14 +608,33 @@ struct MyTeamChannelsQuery {
     include_deleted: bool,
 }
 
+/// Resolves a team identifier to a UUID.
+/// First tries to parse as UUID/mm-id, then falls back to looking up by team name.
+async fn resolve_team_id(state: &AppState, team_id_str: &str) -> ApiResult<Uuid> {
+    // First try to parse as UUID or Mattermost ID
+    if let Some(team_id) = parse_mm_or_uuid(team_id_str) {
+        return Ok(team_id);
+    }
+
+    // Fall back to looking up by team name
+    let team: Option<Team> = sqlx::query_as("SELECT * FROM teams WHERE name = $1")
+        .bind(team_id_str)
+        .fetch_optional(&state.db)
+        .await?;
+
+    match team {
+        Some(t) => Ok(t.id),
+        None => Err(AppError::NotFound("Team not found".to_string())),
+    }
+}
+
 async fn my_team_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(team_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<MyTeamChannelsQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
 
     tracing::debug!(
         user_id = %auth.user_id,
@@ -692,8 +711,7 @@ async fn get_team_channels_for_user(
     Path((user_id, team_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let user_id = resolve_user_id(&user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
     let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
@@ -789,8 +807,7 @@ async fn my_team_channel_members(
     auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
     let members: Vec<ChannelMember> = sqlx::query_as(
         r#"
         SELECT cm.*, c.name as username, c.display_name, NULL as avatar_url, NULL as presence
@@ -836,8 +853,7 @@ async fn my_team_channels_not_members(
     Path(team_id): Path<String>,
     Query(query): Query<NotMembersQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
 
     let page = query.page.unwrap_or(0).max(0);
     let per_page = query.per_page.unwrap_or(60).clamp(1, 200);
@@ -885,14 +901,13 @@ async fn get_user_teams_unread(
 }
 
 async fn get_user_team_unread(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     _auth: MmAuthUser,
     Path((user_id, team_id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let _user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
     Ok(Json(serde_json::json!({
         "team_id": encode_mm_id(team_id),
         "msg_count": 0,
@@ -1196,8 +1211,7 @@ async fn autocomplete_users(
         .fetch_all(&state.db)
         .await?
     } else if let Some(team_id) = query.in_team {
-        let team_id = parse_mm_or_uuid(&team_id)
-            .ok_or_else(|| AppError::BadRequest("Invalid in_team".to_string()))?;
+        let team_id = resolve_team_id(&state, &team_id).await?;
 
         let is_member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
@@ -1300,8 +1314,7 @@ async fn search_users(
         .fetch_all(&state.db)
         .await?
     } else if let Some(team_id) = input.team_id {
-        let team_id = parse_mm_or_uuid(&team_id)
-            .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+        let team_id = resolve_team_id(&state, &team_id).await?;
 
         let is_member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
