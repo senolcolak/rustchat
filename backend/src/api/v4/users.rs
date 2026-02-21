@@ -617,13 +617,13 @@ async fn resolve_team_id(state: &AppState, team_id_str: &str) -> ApiResult<Uuid>
     }
 
     // Fall back to looking up by team name
-    let team: Option<Team> = sqlx::query_as("SELECT * FROM teams WHERE name = $1")
+    let team: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM teams WHERE name = $1")
         .bind(team_id_str)
         .fetch_optional(&state.db)
         .await?;
 
     match team {
-        Some(t) => Ok(t.id),
+        Some((id,)) => Ok(id),
         None => Err(AppError::NotFound("Team not found".to_string())),
     }
 }
@@ -667,7 +667,7 @@ async fn my_team_channels(
             SELECT c.* FROM channels c
             JOIN channel_members cm ON c.id = cm.channel_id
             WHERE c.team_id = $1 AND cm.user_id = $2
-              AND (c.delete_at = 0 OR c.delete_at >= $3)
+              AND (c.deleted_at = 0 OR c.deleted_at >= $3)
             "#,
         )
         .bind(team_id)
@@ -681,7 +681,7 @@ async fn my_team_channels(
             r#"
             SELECT c.* FROM channels c
             JOIN channel_members cm ON c.id = cm.channel_id
-            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.delete_at = 0
+            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.deleted_at = 0
             "#,
         )
         .bind(team_id)
