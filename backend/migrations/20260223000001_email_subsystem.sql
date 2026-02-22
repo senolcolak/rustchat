@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS notification_workflows (
             'security_alert',
             'announcements',
             'offline_messages',
-            'mention_notification',
+            'mention_notifications',
             'admin_invite',
             'weekly_digest'
         )
