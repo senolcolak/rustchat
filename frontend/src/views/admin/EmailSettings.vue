@@ -27,6 +27,20 @@ const testing = ref(false);
 const testSuccess = ref(false);
 const testError = ref('');
 
+function extractUiErrorMessage(e: any, fallback: string) {
+    if (!e?.response) {
+        return `${fallback}: cannot connect to the RustChat server. Check the server URL/network and try again.`;
+    }
+
+    return (
+        e.response?.data?.error?.message ||
+        e.response?.data?.message ||
+        e.response?.data?.error ||
+        e.message ||
+        fallback
+    );
+}
+
 onMounted(async () => {
     await adminStore.fetchConfig();
     if (adminStore.config?.email) {
@@ -66,7 +80,7 @@ const saveSettings = async () => {
         saveSuccess.value = true;
         setTimeout(() => saveSuccess.value = false, 3000);
     } catch (e: any) {
-        saveError.value = e.response?.data?.message || 'Failed to save settings';
+        saveError.value = extractUiErrorMessage(e, 'Failed to save email settings');
     } finally {
         saving.value = false;
     }
@@ -86,7 +100,7 @@ const sendTestEmail = async () => {
         testSuccess.value = true;
         setTimeout(() => testSuccess.value = false, 5000);
     } catch (e: any) {
-        testError.value = e.response?.data?.error?.message || e.response?.data?.error || e.message || 'Failed to send test email';
+        testError.value = extractUiErrorMessage(e, 'Failed to send test email');
     } finally {
         testing.value = false;
     }
