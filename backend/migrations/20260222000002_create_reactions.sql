@@ -1,6 +1,7 @@
 -- Migration: Create reactions table for post reactions
 -- This enables emoji reactions on posts
 
+-- Create table if not exists (with all columns)
 CREATE TABLE IF NOT EXISTS reactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -10,6 +11,17 @@ CREATE TABLE IF NOT EXISTS reactions (
     -- Ensure a user can only react once with the same emoji on a post
     UNIQUE(post_id, user_id, emoji_name)
 );
+
+-- Add create_at column if it doesn't exist (for tables created before this migration)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'reactions' AND column_name = 'create_at'
+    ) THEN
+        ALTER TABLE reactions ADD COLUMN create_at BIGINT NOT NULL DEFAULT extract(epoch from now()) * 1000;
+    END IF;
+END $$;
 
 -- Indexes for efficient queries
 CREATE INDEX IF NOT EXISTS idx_reactions_post_id ON reactions(post_id);
