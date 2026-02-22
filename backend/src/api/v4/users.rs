@@ -111,11 +111,6 @@ pub fn router() -> Router<AppState> {
         .route("/users/status/ids", post(get_statuses_by_ids))
         .route("/users/ids", post(get_users_by_ids))
         .route(
-            "/users/{user_id}/status",
-            get(get_status).put(update_status),
-        )
-        .route("/users/me/status", get(get_my_status).put(update_status))
-        .route(
             "/users/{user_id}/channels/{channel_id}/typing",
             post(user_typing),
         )
@@ -202,18 +197,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/users/{user_id}/reset_failed_attempts",
             post(reset_failed_attempts),
-        )
-        .route(
-            "/users/{user_id}/status/custom",
-            put(update_custom_status).delete(clear_custom_status),
-        )
-        .route(
-            "/users/{user_id}/status/custom/recent",
-            get(get_recent_custom_status),
-        )
-        .route(
-            "/users/{user_id}/status/custom/recent/delete",
-            post(delete_recent_custom_status),
         )
         .route(
             "/users/{user_id}/sidebar/categories",
@@ -2485,44 +2468,6 @@ async fn reset_failed_attempts(
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let _ = resolve_user_id(&user_id, &auth)?;
-    Ok(status_ok())
-}
-
-async fn update_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid custom status")?;
-    Ok(status_ok())
-}
-
-async fn clear_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    Ok(status_ok())
-}
-
-async fn get_recent_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    Ok(Json(vec![]))
-}
-
-async fn delete_recent_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid custom status")?;
     Ok(status_ok())
 }
 

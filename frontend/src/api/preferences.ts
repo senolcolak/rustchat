@@ -62,6 +62,14 @@ export interface ChannelNotificationSetting {
     mute_until: string | null
 }
 
+// Mattermost-compatible preference for favorites, etc.
+export interface Preference {
+    user_id: string
+    category: string
+    name: string
+    value: string
+}
+
 export const preferencesApi = {
     // User status
     getMyStatus: () => api.get<UserStatus>('/users/me/status'),
@@ -84,4 +92,13 @@ export const preferencesApi = {
         api.get<ChannelNotificationSetting | null>(`/channels/${channelId}/notifications`),
     updateChannelNotifications: (channelId: string, data: { notify_level?: string; is_muted?: boolean; mute_until?: string }) =>
         api.put<ChannelNotificationSetting>(`/channels/${channelId}/notifications`, data),
+    
+    // Mattermost-compatible preferences (for favorites)
+    getMyPreferencesMm: () => api.get<Preference[]>('/users/me/preferences'),
+    getPreferencesByCategory: (userId: string, category: string) =>
+        api.get<Preference[]>(`/users/${userId}/preferences/${category}`),
+    updatePreferences: (userId: string, preferences: Preference[]) =>
+        api.put(`/users/${userId}/preferences`, preferences),
+    deletePreferences: (userId: string, preferences: Preference[]) =>
+        api.delete(`/users/${userId}/preferences`, { data: preferences }),
 }

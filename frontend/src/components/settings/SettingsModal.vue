@@ -1,21 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { X, User, Camera, LogOut, Activity, Sliders, Check } from 'lucide-vue-next'
+import { ref, watch } from 'vue'
+import { X, Camera, LogOut, Bell, Monitor, Layout, Settings, Check } from 'lucide-vue-next'
 import BaseButton from '../atomic/BaseButton.vue'
 import BaseInput from '../atomic/BaseInput.vue'
+import DisplayTab from './display/DisplayTab.vue'
 import { useAuthStore } from '../../stores/auth'
 import { usersApi } from '../../api/users'
 import { filesApi } from '../../api/files'
 import api from '../../api/client'
-import {
-    useThemeStore,
-    THEME_OPTIONS,
-    FONT_OPTIONS,
-    FONT_SIZE_OPTIONS,
-    type ChatFont,
-    type ChatFontSize,
-    type Theme,
-} from '../../stores/theme'
+
 
 const props = defineProps<{
   isOpen: boolean
@@ -24,8 +17,7 @@ const props = defineProps<{
 const emit = defineEmits(['close'])
 
 const auth = useAuthStore()
-const themeStore = useThemeStore()
-const activeTab = ref('settings')
+const activeTab = ref('notifications')
 const loading = ref(false)
 const error = ref('')
 const success = ref('')
@@ -47,10 +39,12 @@ const statusText = ref('')
 const statusEmoji = ref('')
 const selectedPresence = ref('online')
 
+// Mattermost-style tabs
 const tabs = [
-  { id: 'settings', label: 'Settings', icon: User },
-  { id: 'status', label: 'Status', icon: Activity },
-  { id: 'preferences', label: 'Preferences', icon: Sliders },
+  { id: 'notifications', label: 'Notifications', icon: Bell },
+  { id: 'display', label: 'Display', icon: Monitor },
+  { id: 'sidebar', label: 'Sidebar', icon: Layout },
+  { id: 'advanced', label: 'Advanced', icon: Settings },
 ]
 
 // Security form fields
@@ -64,53 +58,6 @@ const presenceOptions = [
   { id: 'dnd', label: 'Do Not Disturb', color: 'bg-red-500' },
   { id: 'offline', label: 'Offline', color: 'bg-gray-400' },
 ]
-
-const themes = THEME_OPTIONS
-const fonts = FONT_OPTIONS
-const fontSizes = FONT_SIZE_OPTIONS
-
-const selectedTheme = computed(() => themeStore.theme)
-const selectedFont = computed(() => themeStore.chatFont)
-const selectedFontSize = computed(() => themeStore.chatFontSize)
-const selectedFontLabel = computed(
-    () => fonts.find((font) => font.id === themeStore.chatFont)?.label || 'Inter',
-)
-
-const filteredFonts = computed(() => {
-    const query = fontSearch.value.trim().toLowerCase()
-    if (!query) return fonts
-    return fonts.filter((font) => font.label.toLowerCase().includes(query))
-})
-
-const selectedFontSizeIndex = computed({
-    get: () => {
-        const idx = fontSizes.indexOf(themeStore.chatFontSize)
-        return idx >= 0 ? idx : 1
-    },
-    set: (index: number) => {
-        const safeIndex = Math.max(0, Math.min(fontSizes.length - 1, Number(index)))
-        const size = fontSizes[safeIndex]
-        themeStore.setChatFontSize(size as ChatFontSize)
-    },
-})
-
-function setThemeChoice(theme: Theme) {
-    themeStore.setTheme(theme)
-}
-
-function setFontChoice(font: ChatFont) {
-    themeStore.setChatFont(font)
-    showFontDropdown.value = false
-    fontSearch.value = ''
-}
-
-function setFontSizeChoice(size: ChatFontSize) {
-    themeStore.setChatFontSize(size)
-}
-
-function optionFontStyle(cssVar: string) {
-    return { fontFamily: cssVar }
-}
 
 // Fetch auth policy
 async function fetchPolicy() {
@@ -288,7 +235,7 @@ function requestNotifications() {
         
         <!-- Sidebar -->
         <div class="w-full sm:w-56 bg-gray-50 dark:bg-gray-900 border-b sm:border-b-0 sm:border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
-            <div class="p-4 sm:p-6 font-bold text-lg dark:text-white">User Settings</div>
+            <div class="p-4 sm:p-6 font-bold text-lg dark:text-white">Settings</div>
             <nav class="flex sm:flex-col gap-1 px-2 sm:px-3 pb-2 sm:pb-0 overflow-x-auto sm:overflow-x-visible">
                 <button
                     v-for="tab in tabs"
@@ -296,7 +243,7 @@ function requestNotifications() {
                     @click="activeTab = tab.id"
                     class="flex items-center px-3 py-2 text-sm font-medium rounded-md whitespace-nowrap"
                     :class="activeTab === tab.id 
-                        ? 'bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-white' 
+                        ? 'bg-white dark:bg-gray-800 text-primary shadow-sm border border-gray-200 dark:border-gray-700' 
                         : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'"
                 >
                     <component :is="tab.icon" class="mr-2 flex-shrink-0 h-4 w-4 sm:h-5 sm:w-5" />
@@ -318,8 +265,8 @@ function requestNotifications() {
         <!-- Content -->
         <div class="flex-1 flex flex-col min-w-0 min-h-0">
             <div class="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                <h3 class="text-base sm:text-lg font-medium leading-6 text-gray-900 dark:text-white capitalize">
-                    {{ activeTab }}
+                <h3 class="text-base sm:text-lg font-medium leading-6 text-gray-900 dark:text-white">
+                    {{ tabs.find(t => t.id === activeTab)?.label }}
                 </h3>
                 <button @click="$emit('close')" class="rounded-md bg-white dark:bg-gray-800 text-gray-400 hover:text-gray-500 focus:outline-none p-1">
                     <X class="h-5 w-5 sm:h-6 sm:w-6" />
@@ -335,11 +282,62 @@ function requestNotifications() {
                   {{ success }}
                 </div>
 
-                <!-- Settings Tab (Profile + Security) -->
-                <div v-if="activeTab === 'settings'" class="space-y-8">
-                    <!-- Profile Section -->
-                    <div class="space-y-6">
-                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-200 dark:border-gray-700 pb-2">Profile</h4>
+                <!-- Notifications Tab -->
+                <div v-if="activeTab === 'notifications'" class="space-y-6">
+                    <div class="text-sm text-gray-600 dark:text-gray-400">
+                        Configure how you receive notifications.
+                    </div>
+                    
+                    <!-- Desktop Notifications Row -->
+                    <div class="flex items-center justify-between py-4 px-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                        <div>
+                            <h4 class="text-base font-medium text-gray-900 dark:text-white">Desktop Notifications</h4>
+                            <p class="text-sm text-gray-500">Receive notifications for mentions and messages</p>
+                        </div>
+                        <BaseButton size="sm" variant="secondary" @click="requestNotifications">Enable</BaseButton>
+                    </div>
+
+                    <!-- Placeholder for future notification settings -->
+                    <div class="border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center">
+                        <p class="text-sm text-gray-500 dark:text-gray-400">
+                            More notification settings coming soon
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Display Tab -->
+                <div v-else-if="activeTab === 'display'">
+                    <div class="mb-4 text-sm text-gray-600 dark:text-gray-400">
+                        Customize your display preferences.
+                    </div>
+                    <DisplayTab />
+                </div>
+
+                <!-- Sidebar Tab -->
+                <div v-else-if="activeTab === 'sidebar'" class="space-y-6">
+                    <div class="text-sm text-gray-600 dark:text-gray-400">
+                        Configure your sidebar preferences.
+                    </div>
+                    
+                    <!-- Placeholder for sidebar settings -->
+                    <div class="border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center">
+                        <p class="text-sm text-gray-500 dark:text-gray-400">
+                            Sidebar settings coming in a future update
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Advanced Tab -->
+                <div v-else-if="activeTab === 'advanced'" class="space-y-6">
+                    <div class="text-sm text-gray-600 dark:text-gray-400">
+                        Advanced settings for power users.
+                    </div>
+                    
+                    <!-- Legacy Profile Section (moved here temporarily) -->
+                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
+                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
+                            Profile
+                        </h4>
                         
                         <div class="flex items-center space-x-4">
                             <div class="relative group">
@@ -387,9 +385,11 @@ function requestNotifications() {
                         </div>
                     </div>
 
-                    <!-- Security Section -->
-                    <div class="space-y-6">
-                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-200 dark:border-gray-700 pb-2">Security</h4>
+                    <!-- Legacy Security Section -->
+                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
+                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
+                            Security
+                        </h4>
                         
                         <div class="space-y-4">
                             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -411,146 +411,46 @@ function requestNotifications() {
                             </div>
                         </div>
                     </div>
-                </div>
 
-                <!-- Status Tab -->
-                <div v-else-if="activeTab === 'status'" class="space-y-6">
-                    <h4 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-200 dark:border-gray-700 pb-2">Status & Presence</h4>
-                    
-                    <div class="space-y-4">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Set Presence</label>
-                        <div class="grid grid-cols-2 gap-3">
-                            <button 
-                                v-for="opt in presenceOptions" 
-                                :key="opt.id"
-                                @click="selectedPresence = opt.id"
-                                class="flex items-center p-3 rounded-lg border transition-all"
-                                :class="selectedPresence === opt.id ? 'border-primary bg-primary/5 dark:bg-primary/10' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'"
-                            >
-                                <div class="w-3 h-3 rounded-full mr-3" :class="opt.color"></div>
-                                <span class="text-sm font-medium" :class="selectedPresence === opt.id ? 'text-primary' : 'text-gray-700 dark:text-gray-300'">{{ opt.label }}</span>
-                                <Check v-if="selectedPresence === opt.id" class="w-4 h-4 ml-auto text-primary" />
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="space-y-4">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Status Message</label>
-                        <div class="flex space-x-2">
-                            <div class="w-12">
-                                <BaseInput v-model="statusEmoji" placeholder="😀" class="text-center" />
-                            </div>
-                            <div class="flex-1">
-                                <BaseInput v-model="statusText" placeholder="What's your status?" />
-                            </div>
-                        </div>
-                        <p class="text-xs text-gray-500">Enter an emoji and a message to describe your status.</p>
-                    </div>
-
-                    <div class="flex justify-end pt-4">
-                        <BaseButton @click="handleSaveStatus" :loading="loading">Update Status</BaseButton>
-                    </div>
-                </div>
-
-                <!-- Preferences Tab -->
-                <div v-else-if="activeTab === 'preferences'" class="space-y-6">
-                    <div class="rounded-lg border border-border-1 bg-bg-surface-1 p-4 space-y-4">
-                        <div>
-                            <h4 class="text-sm font-semibold text-text-1">Theme Palette</h4>
-                            <p class="text-xs text-text-3">Select one of 8 app skins.</p>
-                        </div>
-
-                        <div class="grid grid-cols-4 gap-2">
-                            <button
-                                v-for="theme in themes"
-                                :key="theme.id"
-                                type="button"
-                                @click="setThemeChoice(theme.id)"
-                                class="flex flex-col items-center gap-1.5 py-1.5 transition-standard"
-                            >
-                                <span class="relative h-10 w-10 rounded-full border bg-bg-surface-1 overflow-hidden transition-standard"
-                                    :class="selectedTheme === theme.id ? 'border-brand ring-2 ring-brand/35 shadow-theme' : 'border-border-2 hover:border-border-1'">
-                                    <span class="absolute left-0 top-0 h-full w-1/2" :style="{ backgroundColor: theme.swatches.primary }"></span>
-                                    <span class="absolute right-0 top-0 h-1/2 w-1/2" :style="{ backgroundColor: theme.swatches.accent }"></span>
-                                    <span class="absolute right-0 bottom-0 h-1/2 w-1/2" :style="{ backgroundColor: theme.swatches.background }"></span>
-                                </span>
-                                <span class="text-[10px] font-medium text-text-2 text-center leading-tight">{{ theme.label }}</span>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="rounded-lg border border-border-1 bg-bg-surface-1 p-4 space-y-3 relative">
-                        <div>
-                            <h4 class="text-sm font-semibold text-text-1">Chat Font</h4>
-                            <p class="text-xs text-text-3">Search and preview the typeface before selecting.</p>
-                        </div>
-
-                        <button
-                            type="button"
-                            class="w-full rounded-lg border border-border-1 bg-bg-surface-2 px-3 py-2 text-left text-sm text-text-1 transition-standard hover:border-border-2"
-                            @click="showFontDropdown = !showFontDropdown"
-                            :style="optionFontStyle(fonts.find((f) => f.id === selectedFont)?.cssVar || 'var(--font-inter)')"
-                        >
-                            {{ selectedFontLabel }}
-                        </button>
-
-                        <div v-if="showFontDropdown" class="fixed inset-0 z-10" @click="showFontDropdown = false"></div>
-                        <div v-if="showFontDropdown" class="absolute left-4 right-4 top-[118px] z-20 rounded-lg border border-border-1 bg-bg-surface-1 shadow-theme p-2 space-y-2">
-                            <input
-                                v-model="fontSearch"
-                                type="text"
-                                placeholder="Search fonts..."
-                                class="w-full rounded-md border border-border-1 bg-bg-surface-2 px-2.5 py-1.5 text-xs text-text-1 placeholder:text-text-3 outline-none focus:ring-2 focus:ring-brand/25"
-                            />
-                            <div class="max-h-44 overflow-y-auto space-y-1 custom-scrollbar pr-1">
-                                <button
-                                    v-for="font in filteredFonts"
-                                    :key="font.id"
-                                    type="button"
-                                    class="w-full rounded-md px-2.5 py-1.5 text-left text-sm text-text-1 hover:bg-bg-surface-2 transition-standard"
-                                    :style="optionFontStyle(font.cssVar)"
-                                    @click="setFontChoice(font.id)"
+                    <!-- Legacy Status Section -->
+                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
+                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
+                            Status & Presence
+                        </h4>
+                        
+                        <div class="space-y-4">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Set Presence</label>
+                            <div class="grid grid-cols-2 gap-3">
+                                <button 
+                                    v-for="opt in presenceOptions" 
+                                    :key="opt.id"
+                                    @click="selectedPresence = opt.id"
+                                    class="flex items-center p-3 rounded-lg border transition-all"
+                                    :class="selectedPresence === opt.id ? 'border-primary bg-primary/5 dark:bg-primary/10' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'"
                                 >
-                                    {{ font.label }}
+                                    <div class="w-3 h-3 rounded-full mr-3" :class="opt.color"></div>
+                                    <span class="text-sm font-medium" :class="selectedPresence === opt.id ? 'text-primary' : 'text-gray-700 dark:text-gray-300'">{{ opt.label }}</span>
+                                    <Check v-if="selectedPresence === opt.id" class="w-4 h-4 ml-auto text-primary" />
                                 </button>
                             </div>
                         </div>
-                    </div>
 
-                    <div class="rounded-lg border border-border-1 bg-bg-surface-1 p-4 space-y-3">
-                        <div class="flex items-center justify-between">
-                            <h4 class="text-sm font-semibold text-text-1">Text Density / Size</h4>
-                            <span class="text-xs font-medium text-text-2">{{ selectedFontSize }}px</span>
+                        <div class="space-y-4">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Status Message</label>
+                            <div class="flex space-x-2">
+                                <div class="w-12">
+                                    <BaseInput v-model="statusEmoji" placeholder="😀" class="text-center" />
+                                </div>
+                                <div class="flex-1">
+                                    <BaseInput v-model="statusText" placeholder="What's your status?" />
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500">Enter an emoji and a message to describe your status.</p>
                         </div>
-                        <input
-                            v-model="selectedFontSizeIndex"
-                            type="range"
-                            min="0"
-                            :max="fontSizes.length - 1"
-                            step="1"
-                            class="w-full accent-brand"
-                        />
-                        <div class="grid grid-cols-5 gap-2">
-                            <button
-                                v-for="size in fontSizes"
-                                :key="size"
-                                type="button"
-                                class="rounded-md border px-1.5 py-1 text-[11px] font-medium transition-standard"
-                                :class="selectedFontSize === size ? 'border-brand bg-brand/10 text-brand' : 'border-border-1 text-text-2 hover:border-border-2'"
-                                @click="setFontSizeChoice(size)"
-                            >
-                                {{ size }}px
-                            </button>
-                        </div>
-                    </div>
 
-                    <h4 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-200 dark:border-gray-700 pb-2 mt-8">Notifications</h4>
-                    <div class="flex items-center justify-between py-4 px-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-                        <div>
-                            <h4 class="text-base font-medium text-gray-900 dark:text-white">Desktop Notifications</h4>
-                            <p class="text-sm text-gray-500">Receive notifications for mentions and messages</p>
+                        <div class="flex justify-end">
+                            <BaseButton @click="handleSaveStatus" :loading="loading">Update Status</BaseButton>
                         </div>
-                        <BaseButton size="sm" variant="secondary" @click="requestNotifications">Enable</BaseButton>
                     </div>
                 </div>
             </div>
