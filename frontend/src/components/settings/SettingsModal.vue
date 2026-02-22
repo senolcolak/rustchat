@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { X, LogOut, Bell, Monitor, Layout, Settings, Phone } from 'lucide-vue-next'
+import { X, LogOut, Bell, Monitor, Layout, Settings, Phone, User } from 'lucide-vue-next'
 import DisplayTab from './display/DisplayTab.vue'
 import SidebarTab from './sidebar/SidebarTab.vue'
 import AdvancedTab from './advanced/AdvancedTab.vue'
 import CallsTab from './calls/CallsTab.vue'
 import NotificationsTab from './notifications/NotificationsTab.vue'
+import ProfileTab from './profile/ProfileTab.vue'
 import { useAuthStore } from '../../stores/auth'
 
 const props = defineProps<{
@@ -19,8 +20,9 @@ const activeTab = ref('notifications')
 const error = ref('')
 const success = ref('')
 
-// Mattermost-style tabs
+// Settings tabs
 const tabs = [
+  { id: 'profile', label: 'Profile', icon: User },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'display', label: 'Display', icon: Monitor },
   { id: 'sidebar', label: 'Sidebar', icon: Layout },
@@ -99,8 +101,13 @@ function handleLogout() {
                   {{ success }}
                 </div>
 
+                <!-- Profile Tab -->
+                <div v-if="activeTab === 'profile'">
+                    <ProfileTab />
+                </div>
+
                 <!-- Notifications Tab -->
-                <div v-if="activeTab === 'notifications'">
+                <div v-else-if="activeTab === 'notifications'">
                     <NotificationsTab />
                 </div>
 

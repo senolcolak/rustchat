@@ -1,8 +1,8 @@
 <script lang="ts">
 import type { Theme } from '../../../stores/theme'
 
-// Mattermost-style theme options - defined outside script setup
-export const MM_THEME_OPTIONS: Array<{
+// Theme options - defined outside script setup
+export const THEME_EDITOR_OPTIONS: Array<{
   id: Theme | 'custom'
   label: string
   swatches: { primary: string; accent: string; background: string; sidebarBg?: string }
@@ -18,44 +18,114 @@ export const MM_THEME_OPTIONS: Array<{
 }> = [
   { 
     id: 'light', 
-    label: 'Mattermost Light', 
-    swatches: { primary: '#166de0', accent: '#166de0', background: '#ffffff', sidebarBg: '#1e325c' },
+    label: 'Light', 
+    swatches: { primary: '#2563eb', accent: '#0ea5e9', background: '#f6f8fb', sidebarBg: '#1e325c' },
     colors: {
       sidebarBg: '#1e325c',
       sidebarText: '#ffffff',
-      centerChannelBg: '#ffffff',
+      centerChannelBg: '#f6f8fb',
       centerChannelColor: '#3d3c40',
-      linkColor: '#166de0',
-      buttonBg: '#166de0',
+      linkColor: '#2563eb',
+      buttonBg: '#2563eb',
       buttonColor: '#ffffff',
     }
   },
   { 
     id: 'dark', 
-    label: 'Mattermost Dark', 
-    swatches: { primary: '#1e88e5', accent: '#1e88e5', background: '#1f222a', sidebarBg: '#1f222a' },
+    label: 'Dark', 
+    swatches: { primary: '#38bdf8', accent: '#22d3ee', background: '#0b1220', sidebarBg: '#1f222a' },
     colors: {
       sidebarBg: '#1f222a',
       sidebarText: '#ffffff',
-      centerChannelBg: '#2f3136',
+      centerChannelBg: '#0b1220',
       centerChannelColor: '#dddddd',
-      linkColor: '#1e88e5',
-      buttonBg: '#1e88e5',
+      linkColor: '#38bdf8',
+      buttonBg: '#38bdf8',
       buttonColor: '#ffffff',
     }
   },
   { 
     id: 'modern', 
-    label: 'RustChat Modern', 
-    swatches: { primary: '#6366f1', accent: '#8b5cf6', background: '#0f1115', sidebarBg: '#1a1d24' },
+    label: 'Modern', 
+    swatches: { primary: '#0f766e', accent: '#14b8a6', background: '#f3f7f6', sidebarBg: '#1a1d24' },
     colors: {
       sidebarBg: '#1a1d24',
       sidebarText: '#e2e8f0',
-      centerChannelBg: '#0f1115',
-      centerChannelColor: '#e2e8f0',
-      linkColor: '#6366f1',
-      buttonBg: '#6366f1',
+      centerChannelBg: '#f3f7f6',
+      centerChannelColor: '#0f172a',
+      linkColor: '#0f766e',
+      buttonBg: '#0f766e',
       buttonColor: '#ffffff',
+    }
+  },
+  { 
+    id: 'metallic', 
+    label: 'Metallic', 
+    swatches: { primary: '#475569', accent: '#d97706', background: '#e7eaee', sidebarBg: '#334155' },
+    colors: {
+      sidebarBg: '#334155',
+      sidebarText: '#f1f5f9',
+      centerChannelBg: '#e7eaee',
+      centerChannelColor: '#1e293b',
+      linkColor: '#d97706',
+      buttonBg: '#475569',
+      buttonColor: '#ffffff',
+    }
+  },
+  { 
+    id: 'futuristic', 
+    label: 'Futuristic', 
+    swatches: { primary: '#06b6d4', accent: '#22c55e', background: '#030712', sidebarBg: '#0f172a' },
+    colors: {
+      sidebarBg: '#0f172a',
+      sidebarText: '#22c55e',
+      centerChannelBg: '#030712',
+      centerChannelColor: '#06b6d4',
+      linkColor: '#22c55e',
+      buttonBg: '#06b6d4',
+      buttonColor: '#000000',
+    }
+  },
+  { 
+    id: 'high-contrast', 
+    label: 'High Contrast', 
+    swatches: { primary: '#00e5ff', accent: '#ffd400', background: '#000000', sidebarBg: '#000000' },
+    colors: {
+      sidebarBg: '#000000',
+      sidebarText: '#ffffff',
+      centerChannelBg: '#000000',
+      centerChannelColor: '#ffffff',
+      linkColor: '#00e5ff',
+      buttonBg: '#00e5ff',
+      buttonColor: '#000000',
+    }
+  },
+  { 
+    id: 'simple', 
+    label: 'Simple', 
+    swatches: { primary: '#0369a1', accent: '#16a34a', background: '#fafaf9', sidebarBg: '#44403c' },
+    colors: {
+      sidebarBg: '#44403c',
+      sidebarText: '#fafaf9',
+      centerChannelBg: '#fafaf9',
+      centerChannelColor: '#292524',
+      linkColor: '#0369a1',
+      buttonBg: '#16a34a',
+      buttonColor: '#ffffff',
+    }
+  },
+  { 
+    id: 'dynamic', 
+    label: 'Dynamic', 
+    swatches: { primary: '#e11d48', accent: '#f59e0b', background: '#111827', sidebarBg: '#1f2937' },
+    colors: {
+      sidebarBg: '#1f2937',
+      sidebarText: '#f9fafb',
+      centerChannelBg: '#111827',
+      centerChannelColor: '#e5e7eb',
+      linkColor: '#e11d48',
+      buttonBg: '#f59e0b',
+      buttonColor: '#000000',
     }
   },
   {
@@ -99,7 +169,7 @@ const customColors = ref({
 
 // Initialize from current theme
 watch(() => props.modelValue, (newTheme) => {
-  const matched = MM_THEME_OPTIONS.find(o => o.id === newTheme)
+  const matched = THEME_EDITOR_OPTIONS.find(o => o.id === newTheme)
   if (matched) {
     selectedOption.value = matched.id
     if (matched.colors) {
@@ -112,7 +182,7 @@ watch(() => props.modelValue, (newTheme) => {
 
 function selectTheme(themeId: Theme | 'custom') {
   selectedOption.value = themeId
-  const option = MM_THEME_OPTIONS.find(o => o.id === themeId)
+  const option = THEME_EDITOR_OPTIONS.find(o => o.id === themeId)
   if (option?.colors) {
     customColors.value = { ...option.colors }
   }
@@ -125,7 +195,7 @@ function handleSave() {
 
 function handleCancel() {
   // Reset to original
-  const matched = MM_THEME_OPTIONS.find(o => o.id === props.modelValue)
+  const matched = THEME_EDITOR_OPTIONS.find(o => o.id === props.modelValue)
   if (matched) {
     selectedOption.value = matched.id
     if (matched.colors) {
@@ -150,7 +220,7 @@ function updateCustomColor(key: keyof typeof customColors.value, value: string) 
       </h5>
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <button
-          v-for="theme in MM_THEME_OPTIONS.filter(t => t.id !== 'custom')"
+          v-for="theme in THEME_EDITOR_OPTIONS.filter(t => t.id !== 'custom')"
           :key="theme.id"
           type="button"
           @click="selectTheme(theme.id as Theme)"
@@ -294,20 +364,20 @@ function updateCustomColor(key: keyof typeof customColors.value, value: string) 
       <div 
         class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden h-24 flex"
         :style="{ 
-          backgroundColor: isCustom ? customColors.centerChannelBg : MM_THEME_OPTIONS.find(t => t.id === selectedOption)?.colors?.centerChannelBg || '#ffffff'
+          backgroundColor: isCustom ? customColors.centerChannelBg : THEME_EDITOR_OPTIONS.find(t => t.id === selectedOption)?.colors?.centerChannelBg || '#ffffff'
         }"
       >
         <!-- Sidebar preview -->
         <div 
           class="w-1/4 h-full flex flex-col p-2"
           :style="{ 
-            backgroundColor: isCustom ? customColors.sidebarBg : MM_THEME_OPTIONS.find(t => t.id === selectedOption)?.colors?.sidebarBg || '#1e325c'
+            backgroundColor: isCustom ? customColors.sidebarBg : THEME_EDITOR_OPTIONS.find(t => t.id === selectedOption)?.colors?.sidebarBg || '#1e325c'
           }"
         >
           <div 
             class="text-xs font-medium truncate"
             :style="{ 
-              color: isCustom ? customColors.sidebarText : MM_THEME_OPTIONS.find(t => t.id === selectedOption)?.colors?.sidebarText || '#ffffff'
+              color: isCustom ? customColors.sidebarText : THEME_EDITOR_OPTIONS.find(t => t.id === selectedOption)?.colors?.sidebarText || '#ffffff'
             }"
           >
             Channels
@@ -317,14 +387,14 @@ function updateCustomColor(key: keyof typeof customColors.value, value: string) 
         <div 
           class="flex-1 h-full p-2"
           :style="{ 
-            color: isCustom ? customColors.centerChannelColor : MM_THEME_OPTIONS.find(t => t.id === selectedOption)?.colors?.centerChannelColor || '#3d3c40'
+            color: isCustom ? customColors.centerChannelColor : THEME_EDITOR_OPTIONS.find(t => t.id === selectedOption)?.colors?.centerChannelColor || '#3d3c40'
           }"
         >
-          <div class="text-xs mb-1">Welcome to Mattermost</div>
+          <div class="text-xs mb-1">Welcome to our platform</div>
           <a 
             class="text-xs hover:underline"
             :style="{ 
-              color: isCustom ? customColors.linkColor : MM_THEME_OPTIONS.find(t => t.id === selectedOption)?.colors?.linkColor || '#166de0'
+              color: isCustom ? customColors.linkColor : THEME_EDITOR_OPTIONS.find(t => t.id === selectedOption)?.colors?.linkColor || '#166de0'
             }"
           >
             Click here to learn more
