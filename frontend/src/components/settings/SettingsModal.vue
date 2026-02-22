@@ -4,6 +4,8 @@ import { X, Camera, LogOut, Bell, Monitor, Layout, Settings, Check } from 'lucid
 import BaseButton from '../atomic/BaseButton.vue'
 import BaseInput from '../atomic/BaseInput.vue'
 import DisplayTab from './display/DisplayTab.vue'
+import SidebarTab from './sidebar/SidebarTab.vue'
+import AdvancedTab from './advanced/AdvancedTab.vue'
 import { useAuthStore } from '../../stores/auth'
 import { usersApi } from '../../api/users'
 import { filesApi } from '../../api/files'
@@ -314,17 +316,11 @@ function requestNotifications() {
                 </div>
 
                 <!-- Sidebar Tab -->
-                <div v-else-if="activeTab === 'sidebar'" class="space-y-6">
-                    <div class="text-sm text-gray-600 dark:text-gray-400">
+                <div v-else-if="activeTab === 'sidebar'">
+                    <div class="mb-4 text-sm text-gray-600 dark:text-gray-400">
                         Configure your sidebar preferences.
                     </div>
-                    
-                    <!-- Placeholder for sidebar settings -->
-                    <div class="border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center">
-                        <p class="text-sm text-gray-500 dark:text-gray-400">
-                            Sidebar settings coming in a future update
-                        </p>
-                    </div>
+                    <SidebarTab />
                 </div>
 
                 <!-- Advanced Tab -->
