@@ -394,7 +394,12 @@ pub async fn send_push_to_user(
         match send_push_notification(state, notification).await {
             Ok(_) => sent_count += 1,
             Err(PushNotificationError::NotConfigured) => {
-                // Push notifications not configured, skip silently
+                warn!(
+                    user_id = %user_id,
+                    device_platform = %device.platform,
+                    token_prefix = %&device.token[..20.min(device.token.len())],
+                    "Push notifications not configured; stopping send loop and returning sent_count=0"
+                );
                 return Ok(0);
             }
             Err(PushNotificationError::InvalidToken) => {

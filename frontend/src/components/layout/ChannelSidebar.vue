@@ -16,6 +16,7 @@ import BrowseTeamsModal from '../modals/BrowseTeamsModal.vue';
 import BrowseChannelsModal from '../modals/BrowseChannelsModal.vue';
 import ChannelContextMenu from '../channels/ChannelContextMenu.vue';
 import AddChannelMembersModal from '../modals/AddChannelMembersModal.vue';
+import ChannelSettingsModal from '../modals/ChannelSettingsModal.vue';
 import type { SidebarCategory } from '../../api/channels';
 import { channelRepository } from '../../features/channels/repositories/channelRepository';
 
@@ -47,6 +48,9 @@ const contextMenuChannel = ref<{
 const showMoveToModal = ref(false);
 const moveToCategories = ref<SidebarCategory[]>([]);
 const moveToChannelId = ref('');
+
+// Channel settings modal state
+const showChannelSettings = ref(false);
 
 // Reload channels when team changes
 watch(() => teamStore.currentTeamId, (teamId) => {
@@ -215,6 +219,15 @@ function handleOpenMoveTo(cats: SidebarCategory[]) {
     if (contextMenuChannel.value) {
         moveToChannelId.value = contextMenuChannel.value.id
         showMoveToModal.value = true
+    }
+}
+
+// Handle open channel details
+function handleOpenChannelDetails() {
+    if (contextMenuChannel.value) {
+        // Select the channel first so it's loaded in the store
+        channelStore.selectChannel(contextMenuChannel.value.id)
+        showChannelSettings.value = true
     }
 }
 
@@ -444,6 +457,7 @@ async function handleLeaveTeam() {
                  @action="handleContextMenuAction"
                  @open-add-members="handleOpenAddMembers"
                  @open-move-to="handleOpenMoveTo"
+                 @open-details="handleOpenChannelDetails"
                />
             </div>
           </div>
@@ -537,6 +551,13 @@ async function handleLeaveTeam() {
         </div>
       </div>
     </Teleport>
+
+    <!-- Channel Settings Modal -->
+    <ChannelSettingsModal
+      :isOpen="showChannelSettings"
+      :channel="channelStore.currentChannel"
+      @close="showChannelSettings = false"
+    />
     </div>
   </aside>
 </template>

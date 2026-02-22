@@ -9,7 +9,8 @@ import {
     Link, 
     UserPlus, 
     LogOut, 
-    Trash2
+    Trash2,
+    Info
 } from 'lucide-vue-next';
 import { useChannelPreferencesStore } from '../../stores/channelPreferences';
 import { useUnreadStore } from '../../stores/unreads';
@@ -42,6 +43,7 @@ const emit = defineEmits<{
     (e: 'action', action: string): void
     (e: 'open-add-members'): void
     (e: 'open-move-to', categories: SidebarCategory[]): void
+    (e: 'open-details'): void
 }>()
 
 const channelPrefsStore = useChannelPreferencesStore()
@@ -153,6 +155,12 @@ function handleAddMembers() {
     emit('close')
 }
 
+// Handle open channel details
+function handleOpenDetails() {
+    emit('open-details')
+    emit('close')
+}
+
 // Handle leave channel
 async function handleLeave() {
     if (!confirm(`Are you sure you want to leave #${props.channelName}?`)) {
@@ -234,7 +242,15 @@ const menuItems = computed<ChannelMenuItem[]>(() => {
     // Separator after Move to...
     items.push({ id: 'sep2', label: '', action: () => {}, separator: true })
 
-    // 5. Copy Link
+    // 5. Channel Details
+    items.push({
+        id: 'channel-details',
+        label: 'Channel Details',
+        icon: Info,
+        action: handleOpenDetails
+    })
+
+    // 6. Copy Link
     items.push({
         id: 'copy-link',
         label: 'Copy Link',
@@ -242,7 +258,7 @@ const menuItems = computed<ChannelMenuItem[]>(() => {
         action: handleCopyLink
     })
 
-    // 6. Add Members (not for DMs)
+    // 7. Add Members (not for DMs)
     if (props.channelType !== 'dm' && props.channelType !== 'group') {
         items.push({
             id: 'add-members',

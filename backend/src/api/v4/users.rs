@@ -1012,10 +1012,12 @@ async fn attach_device(
             has_token = resolved_token.is_some(),
             token_preview = %resolved_token.as_deref().map(|token| &token[..20.min(token.len())]).unwrap_or(""),
             platform = %platform,
+            device_notification_disabled = ?input.device_notification_disabled,
+            mobile_version = ?input.mobile_version,
             "Extracted token from device_id"
         );
 
-        let _ = sqlx::query(
+        match sqlx::query(
             r#"
             INSERT INTO user_devices (user_id, device_id, token, platform)
             VALUES ($1, $2, $3, $4)
@@ -1028,7 +1030,27 @@ async fn attach_device(
         .bind(resolved_token.as_deref())
         .bind(&platform)
         .execute(&state.db)
-        .await;
+        .await
+        {
+            Ok(result) => {
+                info!(
+                    user_id = %auth.user_id,
+                    device_id = %device_id_stored,
+                    rows_affected = result.rows_affected(),
+                    "attach_device stored device registration"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    user_id = %auth.user_id,
+                    device_id = %device_id_stored,
+                    platform = %platform,
+                    has_token = resolved_token.is_some(),
+                    error = %e,
+                    "attach_device failed to store device registration"
+                );
+            }
+        }
     }
 
     Ok(Json(serde_json::json!({"status": "OK"})))
