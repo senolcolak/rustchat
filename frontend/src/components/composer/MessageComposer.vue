@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { Smile, Paperclip, Send, X, File as FileIcon, Video, Phone } from 'lucide-vue-next';
+import { ref, onMounted, onUnmounted } from 'vue'
+import { Smile, Paperclip, Send, X, File as FileIcon, Video, Phone, Type } from 'lucide-vue-next';
 import { useToast } from '../../composables/useToast';
 import { filesApi, type FileUploadResponse } from '../../api/files';
 import FileUploader from '../atomic/FileUploader.vue';
@@ -25,6 +25,7 @@ const callsStore = useCallsStore()
 const channelStore = useChannelStore()
 
 const showMentionMenu = ref(false)
+const showFormatting = ref(true) // Formatting toolbar visible by default
 const attachedFiles = ref<{ 
     file: File; 
     uploading: boolean; 
@@ -35,6 +36,28 @@ const mentionQuery = ref('')
 
 let lastTypingEmit = 0
 const TYPING_ACTIVITY_INTERVAL_MS = 2000
+
+// Toggle formatting toolbar
+function toggleFormatting() {
+  showFormatting.value = !showFormatting.value
+}
+
+// Keyboard shortcut handler for formatting toggle
+function handleGlobalKeydown(event: KeyboardEvent) {
+  // Ctrl+Alt+T or Cmd+Opt+T
+  if ((event.ctrlKey || event.metaKey) && event.altKey && event.key === 't') {
+    event.preventDefault()
+    toggleFormatting()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+})
 
 // Slash command handling
 async function handleSlashCommand(command: string, args: string[]): Promise<boolean> {
@@ -324,6 +347,7 @@ function formatFileSize(bytes: number): string {
     <div class="relative rounded-2xl bg-surface dark:bg-surface-dim border border-border-dim dark:border-white/5 shadow-lg ring-1 ring-black/5 overflow-hidden transition-slow focus-within:ring-2 focus-within:ring-primary/5 focus-within:border-primary/50">
         <!-- Formatting Toolbar -->
         <FormattingToolbar 
+          v-if="showFormatting"
           :showPreview="showPreview"
           @format="applyFormat"
           @togglePreview="showPreview = !showPreview"
@@ -430,6 +454,16 @@ function formatFileSize(bytes: number): string {
                   />
                 </div>
 
+                <!-- Formatting Toggle -->
+                <button
+                  @click="toggleFormatting"
+                  class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-colors"
+                  :title="showFormatting ? 'Hide formatting (Ctrl+Alt+T)' : 'Show formatting (Ctrl+Alt+T)'"
+                  :class="{ 'text-primary bg-primary/10': showFormatting }"
+                >
+                    <Type class="w-4.5 h-4.5" />
+                </button>
+
                 <button
                   v-if="configStore.siteConfig.mirotalk_enabled"
                   @click="$emit('startCall')"
@@ -461,7 +495,8 @@ function formatFileSize(bytes: number): string {
             <div class="flex items-center space-x-4">
                  <div class="text-[10px] text-slate-500 hidden sm:block font-medium tracking-wide">
                     <span class="bg-white/10 px-1 py-0.5 rounded text-xs mr-1">⌘B</span> 
-                    <span class="bg-white/10 px-1 py-0.5 rounded text-xs">⌘I</span>
+                    <span class="bg-white/10 px-1 py-0.5 rounded text-xs mr-1">⌘I</span>
+                    <span class="bg-white/10 px-1 py-0.5 rounded text-xs">⌘⌥T</span>
                 </div>
                 <button 
                     @click="handleSend"

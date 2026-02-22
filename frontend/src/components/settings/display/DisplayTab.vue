@@ -5,7 +5,7 @@ import SettingItemMax from '../SettingItemMax.vue'
 import ThemeEditor from './ThemeEditor.vue'
 import { useThemeStore, THEME_OPTIONS, type Theme } from '../../../stores/theme'
 import { usePreferencesStore } from '../../../stores/preferences'
-import { Check } from 'lucide-vue-next'
+
 
 const themeStore = useThemeStore()
 const preferencesStore = usePreferencesStore()
@@ -146,7 +146,7 @@ function handleCancelTheme() {
 }
 
 // Generic save handler for preference rows
-async function savePreference(rowId: string, updates: Record<string, unknown>) {
+async function savePreference(_rowId: string, updates: Record<string, unknown>) {
   saving.value = true
   try {
     await preferencesStore.updatePreferences(updates)

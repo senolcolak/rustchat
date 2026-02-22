@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { X, Camera, LogOut, Bell, Monitor, Layout, Settings, Check } from 'lucide-vue-next'
-import BaseButton from '../atomic/BaseButton.vue'
-import BaseInput from '../atomic/BaseInput.vue'
+import { X, LogOut, Bell, Monitor, Layout, Settings, Phone } from 'lucide-vue-next'
 import DisplayTab from './display/DisplayTab.vue'
 import SidebarTab from './sidebar/SidebarTab.vue'
 import AdvancedTab from './advanced/AdvancedTab.vue'
+import CallsTab from './calls/CallsTab.vue'
+import NotificationsTab from './notifications/NotificationsTab.vue'
 import { useAuthStore } from '../../stores/auth'
-import { usersApi } from '../../api/users'
-import { filesApi } from '../../api/files'
-import api from '../../api/client'
-
 
 const props = defineProps<{
   isOpen: boolean
@@ -20,26 +16,8 @@ const emit = defineEmits(['close'])
 
 const auth = useAuthStore()
 const activeTab = ref('notifications')
-const loading = ref(false)
 const error = ref('')
 const success = ref('')
-const fileInput = ref<HTMLInputElement | null>(null)
-const showFontDropdown = ref(false)
-const fontSearch = ref('')
-
-// Profile form fields
-const username = ref('')
-const displayName = ref('')
-const avatarUrl = ref('')
-const firstName = ref('')
-const lastName = ref('')
-const nickname = ref('')
-const position = ref('')
-
-// Status fields
-const statusText = ref('')
-const statusEmoji = ref('')
-const selectedPresence = ref('online')
 
 // Mattermost-style tabs
 const tabs = [
@@ -47,183 +25,20 @@ const tabs = [
   { id: 'display', label: 'Display', icon: Monitor },
   { id: 'sidebar', label: 'Sidebar', icon: Layout },
   { id: 'advanced', label: 'Advanced', icon: Settings },
+  { id: 'calls', label: 'Calls', icon: Phone },
 ]
 
-// Security form fields
-const newPassword = ref('')
-const confirmPassword = ref('')
-const passwordPolicy = ref<any>(null)
-
-const presenceOptions = [
-  { id: 'online', label: 'Online', color: 'bg-green-500' },
-  { id: 'away', label: 'Away', color: 'bg-amber-500' },
-  { id: 'dnd', label: 'Do Not Disturb', color: 'bg-red-500' },
-  { id: 'offline', label: 'Offline', color: 'bg-gray-400' },
-]
-
-// Fetch auth policy
-async function fetchPolicy() {
-    try {
-        const { data } = await usersApi.getAuthPolicy()
-        passwordPolicy.value = data
-    } catch (e) {
-        console.error('Failed to fetch auth policy', e)
-    }
-}
-
-// Populate form when modal opens
+// Reset state when modal opens
 watch(() => props.isOpen, (isOpen) => {
-  if (isOpen && auth.user) {
-    username.value = auth.user.username || ''
-    displayName.value = auth.user.display_name || ''
-    avatarUrl.value = auth.user.avatar_url || ''
-    firstName.value = auth.user.first_name || ''
-    lastName.value = auth.user.last_name || ''
-    nickname.value = auth.user.nickname || ''
-    position.value = auth.user.position || ''
-    
-    statusText.value = auth.user.status_text || ''
-    statusEmoji.value = auth.user.status_emoji || ''
-    selectedPresence.value = (auth.user.presence as string) || 'online'
-
+  if (isOpen) {
     error.value = ''
     success.value = ''
-    
-    // Fetch policy if not loaded
-    if (!passwordPolicy.value) fetchPolicy()
-    showFontDropdown.value = false
-    fontSearch.value = ''
   }
 })
-
-async function handleFileUpload(event: Event) {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    const file = input.files[0]
-    
-    if (!file.type.startsWith('image/')) {
-        error.value = 'Please select a valid image file'
-        return
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-        error.value = 'Image size must be less than 5MB'
-        return
-    }
-
-    loading.value = true
-    error.value = ''
-    
-    try {
-        const response = await filesApi.upload(file)
-        avatarUrl.value = response.data.url
-        success.value = 'Avatar uploaded successfully! Click Save to apply.'
-    } catch (e: any) {
-        error.value = e.response?.data?.message || 'Failed to upload avatar'
-    } finally {
-        loading.value = false
-        input.value = ''
-    }
-  }
-}
-
-async function handlePasswordChange() {
-    if (!auth.user) return
-    
-    if (newPassword.value !== confirmPassword.value) {
-        error.value = 'New passwords do not match'
-        return
-    }
-
-    loading.value = true
-    error.value = ''
-    success.value = ''
-
-    try {
-        await usersApi.changePassword(auth.user.id, {
-            new_password: newPassword.value,
-        })
-        success.value = 'Password changed successfully!'
-        newPassword.value = ''
-        confirmPassword.value = ''
-    } catch (e: any) {
-        error.value = e.response?.data?.message || 'Failed to change password'
-    } finally {
-        loading.value = false
-    }
-}
-
-async function handleSaveStatus() {
-    loading.value = true
-    try {
-        await auth.updateStatus({
-            presence: selectedPresence.value,
-            text: statusText.value,
-            emoji: statusEmoji.value
-        })
-        success.value = 'Status updated'
-        setTimeout(() => success.value = '', 3000)
-    } catch (e: any) {
-        error.value = 'Failed to update status'
-    } finally {
-        loading.value = false
-    }
-}
-
-async function handleSaveProfile() {
-  if (!auth.user) return
-  
-  loading.value = true
-  error.value = ''
-  success.value = ''
-
-  try {
-    const firstNameValue = firstName.value.trim()
-    const lastNameValue = lastName.value.trim()
-    const nicknameValue = nickname.value.trim()
-    const positionValue = position.value.trim()
-
-    await api.put('/users/me/patch', {
-      first_name: firstNameValue || undefined,
-      last_name: lastNameValue || undefined,
-      nickname: nicknameValue || undefined,
-      position: positionValue || undefined,
-    }, {
-      baseURL: '/api/v4',
-    })
-
-    const response = await usersApi.update(auth.user.id, {
-      username: username.value.trim() || undefined,
-      display_name: displayName.value.trim() || undefined,
-      avatar_url: avatarUrl.value.trim() || undefined,
-    })
-    
-    auth.user = {
-      ...auth.user,
-      first_name: firstNameValue,
-      last_name: lastNameValue,
-      nickname: nicknameValue,
-      position: positionValue,
-      username: response.data.username,
-      display_name: response.data.display_name,
-      avatar_url: response.data.avatar_url,
-    }
-    success.value = 'Profile updated successfully!'
-    setTimeout(() => success.value = '', 3000)
-  } catch (e: any) {
-    error.value = e.response?.data?.message || 'Failed to update profile'
-  } finally {
-    loading.value = false
-  }
-}
 
 function handleLogout() {
   emit('close')
   auth.logout()
-}
-
-function requestNotifications() {
-  window.Notification.requestPermission()
 }
 </script>
 
@@ -285,26 +100,8 @@ function requestNotifications() {
                 </div>
 
                 <!-- Notifications Tab -->
-                <div v-if="activeTab === 'notifications'" class="space-y-6">
-                    <div class="text-sm text-gray-600 dark:text-gray-400">
-                        Configure how you receive notifications.
-                    </div>
-                    
-                    <!-- Desktop Notifications Row -->
-                    <div class="flex items-center justify-between py-4 px-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-                        <div>
-                            <h4 class="text-base font-medium text-gray-900 dark:text-white">Desktop Notifications</h4>
-                            <p class="text-sm text-gray-500">Receive notifications for mentions and messages</p>
-                        </div>
-                        <BaseButton size="sm" variant="secondary" @click="requestNotifications">Enable</BaseButton>
-                    </div>
-
-                    <!-- Placeholder for future notification settings -->
-                    <div class="border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center">
-                        <p class="text-sm text-gray-500 dark:text-gray-400">
-                            More notification settings coming soon
-                        </p>
-                    </div>
+                <div v-if="activeTab === 'notifications'">
+                    <NotificationsTab />
                 </div>
 
                 <!-- Display Tab -->
@@ -324,130 +121,16 @@ function requestNotifications() {
                 </div>
 
                 <!-- Advanced Tab -->
-                <div v-else-if="activeTab === 'advanced'" class="space-y-6">
-                    <div class="text-sm text-gray-600 dark:text-gray-400">
-                        Advanced settings for power users.
+                <div v-else-if="activeTab === 'advanced'">
+                    <AdvancedTab />
+                </div>
+
+                <!-- Calls Tab -->
+                <div v-else-if="activeTab === 'calls'">
+                    <div class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                        Configure your audio and video devices for calls.
                     </div>
-                    
-                    <!-- Legacy Profile Section (moved here temporarily) -->
-                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
-                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
-                            Profile
-                        </h4>
-                        
-                        <div class="flex items-center space-x-4">
-                            <div class="relative group">
-                              <div class="h-16 w-16 sm:h-20 sm:w-20 rounded-full bg-primary flex items-center justify-center text-xl sm:text-2xl text-white font-bold overflow-hidden ring-2 ring-transparent group-hover:ring-primary/50 transition-all">
-                                <img v-if="avatarUrl" :src="avatarUrl" alt="Avatar" class="w-full h-full object-cover" />
-                                <span v-else>{{ auth.user?.username?.charAt(0).toUpperCase() || 'U' }}</span>
-                              </div>
-                              <button 
-                                type="button"
-                                @click="fileInput?.click()"
-                                class="absolute bottom-0 right-0 w-6 h-6 sm:w-7 sm:h-7 bg-gray-800 dark:bg-gray-600 rounded-full flex items-center justify-center border-2 border-white dark:border-gray-800 hover:bg-gray-700 dark:hover:bg-gray-500 transition-colors"
-                              >
-                                <Camera class="w-3 h-3 sm:w-3.5 sm:h-3.5 text-white" />
-                              </button>
-                              <input ref="fileInput" type="file" accept="image/*" class="hidden" @change="handleFileUpload" />
-                            </div>
-                            <div>
-                              <p class="text-sm font-medium text-gray-900 dark:text-white">{{ auth.user?.username }}</p>
-                              <p class="text-xs text-gray-500">
-                                 <button type="button" @click="fileInput?.click()" class="text-primary hover:underline">Click to upload</button>
-                              </p>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 gap-4">
-                            <BaseInput label="Username" v-model="username" placeholder="your_username" :disabled="loading" />
-                            <BaseInput label="Display Name" v-model="displayName" placeholder="Your Name" :disabled="loading" />
-                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                              <BaseInput label="First Name" v-model="firstName" placeholder="John" :disabled="loading" />
-                              <BaseInput label="Last Name" v-model="lastName" placeholder="Doe" :disabled="loading" />
-                            </div>
-                            <BaseInput label="Nickname" v-model="nickname" placeholder="Johnny" :disabled="loading" />
-                            <BaseInput label="Position" v-model="position" placeholder="Software Engineer" :disabled="loading" />
-                            <BaseInput label="Avatar URL" v-model="avatarUrl" placeholder="https://example.com/avatar.jpg" :disabled="loading" />
-                            <div class="space-y-1">
-                              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
-                              <div class="px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-600 dark:text-gray-400 text-sm break-all">
-                                {{ auth.user?.email }}
-                              </div>
-                            </div>
-                        </div>
-                        
-                        <div class="flex justify-end">
-                            <BaseButton @click="handleSaveProfile" :loading="loading">Save Profile</BaseButton>
-                        </div>
-                    </div>
-
-                    <!-- Legacy Security Section -->
-                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
-                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
-                            Security
-                        </h4>
-                        
-                        <div class="space-y-4">
-                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <BaseInput label="New Password" v-model="newPassword" type="password" placeholder="••••••••" :disabled="loading" />
-                                <BaseInput label="Confirm Password" v-model="confirmPassword" type="password" placeholder="••••••••" :disabled="loading" />
-                            </div>
-
-                            <div v-if="passwordPolicy" class="p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg">
-                                <p class="text-xs font-medium text-indigo-700 dark:text-indigo-300 mb-2">Password Requirements:</p>
-                                <ul class="text-[11px] space-y-1 text-indigo-600 dark:text-indigo-400">
-                                    <li class="flex items-center"><div class="w-1 h-1 rounded-full bg-indigo-400 mr-2"></div>Min length: {{ passwordPolicy.password_min_length }}</li>
-                                    <li v-if="passwordPolicy.password_require_uppercase" class="flex items-center"><div class="w-1 h-1 rounded-full bg-indigo-400 mr-2"></div>Uppercase letter</li>
-                                    <li v-if="passwordPolicy.password_require_number" class="flex items-center"><div class="w-1 h-1 rounded-full bg-indigo-400 mr-2"></div>Number</li>
-                                </ul>
-                            </div>
-
-                            <div class="flex justify-end">
-                                <BaseButton size="sm" @click="handlePasswordChange" :loading="loading" :disabled="!newPassword || !confirmPassword">Update Password</BaseButton>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Legacy Status Section -->
-                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
-                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700 pb-2">
-                            Status & Presence
-                        </h4>
-                        
-                        <div class="space-y-4">
-                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Set Presence</label>
-                            <div class="grid grid-cols-2 gap-3">
-                                <button 
-                                    v-for="opt in presenceOptions" 
-                                    :key="opt.id"
-                                    @click="selectedPresence = opt.id"
-                                    class="flex items-center p-3 rounded-lg border transition-all"
-                                    :class="selectedPresence === opt.id ? 'border-primary bg-primary/5 dark:bg-primary/10' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'"
-                                >
-                                    <div class="w-3 h-3 rounded-full mr-3" :class="opt.color"></div>
-                                    <span class="text-sm font-medium" :class="selectedPresence === opt.id ? 'text-primary' : 'text-gray-700 dark:text-gray-300'">{{ opt.label }}</span>
-                                    <Check v-if="selectedPresence === opt.id" class="w-4 h-4 ml-auto text-primary" />
-                                </button>
-                            </div>
-                        </div>
-
-                        <div class="space-y-4">
-                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Status Message</label>
-                            <div class="flex space-x-2">
-                                <div class="w-12">
-                                    <BaseInput v-model="statusEmoji" placeholder="😀" class="text-center" />
-                                </div>
-                                <div class="flex-1">
-                                    <BaseInput v-model="statusText" placeholder="What's your status?" />
-                                </div>
-                            </div>
-                            <p class="text-xs text-gray-500">Enter an emoji and a message to describe your status.</p>
-                        </div>
-
-                        <div class="flex justify-end">
-                            <BaseButton @click="handleSaveStatus" :loading="loading">Update Status</BaseButton>
-                        </div>
-                    </div>
+                    <CallsTab />
                 </div>
             </div>
         </div>
