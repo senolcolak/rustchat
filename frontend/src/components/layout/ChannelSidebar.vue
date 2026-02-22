@@ -1,23 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import {
-  Hash, Lock, ChevronDown, ChevronRight, Plus, MessageCircle, Settings, Compass, Shield, Check, LogOut
-} from 'lucide-vue-next';import { useTeamStore } from '../../stores/teams';
+  Hash, Lock, ChevronDown, ChevronRight, Plus, MessageCircle, Settings, Compass, Shield, Check, LogOut, MoreVertical
+} from 'lucide-vue-next';
+import { useTeamStore } from '../../stores/teams';
 import { useChannelStore } from '../../stores/channels';
 import { useAuthStore } from '../../stores/auth';
 import { usePresenceStore } from '../../features/presence';
 import { useUnreadStore } from '../../stores/unreads';
+import { useChannelPreferencesStore } from '../../stores/channelPreferences';
 import CreateChannelModal from '../modals/CreateChannelModal.vue';
 import DirectMessageModal from '../modals/DirectMessageModal.vue';
 import TeamSettingsModal from '../modals/TeamSettingsModal.vue';
 import BrowseTeamsModal from '../modals/BrowseTeamsModal.vue';
 import BrowseChannelsModal from '../modals/BrowseChannelsModal.vue';
+import ChannelContextMenu from '../channels/ChannelContextMenu.vue';
+import AddChannelMembersModal from '../modals/AddChannelMembersModal.vue';
+import type { SidebarCategory } from '../../api/channels';
+import { channelRepository } from '../../features/channels/repositories/channelRepository';
 
 const teamStore = useTeamStore();
 const channelStore = useChannelStore();
 const authStore = useAuthStore();
 const presenceStore = usePresenceStore();
 const unreadStore = useUnreadStore();
+const channelPrefsStore = useChannelPreferencesStore();
 
 const showCreateModal = ref(false);
 const showDirectMessageModal = ref(false);
@@ -25,6 +32,21 @@ const showTeamSettings = ref(false);
 const showTeamMenu = ref(false);
 const showBrowseTeams = ref(false);
 const showBrowseChannels = ref(false);
+const showAddMembersModal = ref(false);
+const addMembersChannelId = ref('');
+const addMembersChannelName = ref('');
+
+// Context menu state
+const contextMenuChannel = ref<{
+    id: string;
+    name: string;
+    type: 'public' | 'private' | 'dm' | 'group';
+    unread: number;
+    isOwner: boolean;
+} | null>(null);
+const showMoveToModal = ref(false);
+const moveToCategories = ref<SidebarCategory[]>([]);
+const moveToChannelId = ref('');
 
 // Reload channels when team changes
 watch(() => teamStore.currentTeamId, (teamId) => {
@@ -36,85 +58,181 @@ watch(() => teamStore.currentTeamId, (teamId) => {
     }
 }, { immediate: true });
 
-const categories = computed(() => {
-    // Helper to deduplicate channels by ID
-    const dedupe = (channels: any[]) => {
-        const unique = new Map();
-        channels.forEach(c => {
-            if (!unique.has(c.id)) {
-                unique.set(c.id, c);
-            }
-        });
-        const result = Array.from(unique.values());
-        console.log('Deduped DMs:', result.map(c => ({ id: c.id, name: c.name })));
-        return result;
-    };
+// Helper to deduplicate channels by ID
+function dedupeChannels(channels: any[]) {
+    const unique = new Map();
+    channels.forEach(c => {
+        if (!unique.has(c.id)) {
+            unique.set(c.id, c);
+        }
+    });
+    return Array.from(unique.values());
+}
 
-    return [
+const categories = computed(() => {
+    const allChannels = dedupeChannels([
+        ...channelStore.publicChannels,
+        ...channelStore.privateChannels,
+        ...channelStore.directMessages
+    ]);
+
+    // Separate favorites
+    const favoriteChannels = allChannels.filter(c => channelPrefsStore.isFavorite(c.id));
+    const nonFavoritePublic = channelStore.publicChannels.filter(c => !channelPrefsStore.isFavorite(c.id));
+    const nonFavoritePrivate = channelStore.privateChannels.filter(c => !channelPrefsStore.isFavorite(c.id));
+    const nonFavoriteDMs = channelStore.directMessages.filter(c => !channelPrefsStore.isFavorite(c.id));
+
+    const result = [];
+
+    // Favorites category (if any favorites)
+    if (favoriteChannels.length > 0) {
+        result.push({
+            id: 'favorites',
+            name: 'Favorites',
+            collapsed: false,
+            channels: favoriteChannels.map(c => normalizeChannelForDisplay(c)),
+        });
+    }
+
+    // Regular categories
+    result.push(
         {
             id: 'channels',
             name: 'Channels',
             collapsed: false,
-            channels: dedupe(channelStore.publicChannels).map(c => ({
-                id: c.id,
-                name: c.display_name || c.name,
-                type: 'public',
-                unread: unreadStore.getChannelUnreadCount(c.id),
-                mention: (unreadStore.channelMentions[c.id] || 0) > 0,
-            })),
+            channels: dedupeChannels(nonFavoritePublic).map(c => normalizeChannelForDisplay(c)),
         },
         {
             id: 'private',
             name: 'Private Channels',
             collapsed: false,
-            channels: dedupe(channelStore.privateChannels).map(c => ({
-                id: c.id,
-                name: c.display_name || c.name,
-                type: 'private',
-                unread: unreadStore.getChannelUnreadCount(c.id),
-                mention: (unreadStore.channelMentions[c.id] || 0) > 0,
-            })),
+            channels: dedupeChannels(nonFavoritePrivate).map(c => normalizeChannelForDisplay(c)),
         },
         {
             id: 'dms',
             name: 'Direct Messages',
             collapsed: false,
-            channels: dedupe(channelStore.directMessages).map(c => {
-                let DisplayName = c.display_name || c.name;
-                let otherId = '';
-                
-                // If it's a DM channel with a generated name, try to resolve the other user's name
-                if (c.name.startsWith('dm_')) {
-                    const parts = c.name.split('_');
-                    if (parts.length === 3) {
-                        otherId = parts[1] === authStore.user?.id ? parts[2] : parts[1];
-                        const member = teamStore.members.find(m => m.user_id === otherId);
-                        if (member) {
-                            DisplayName = member.display_name || member.username;
-                        }
-                    }
-                }
-                
-                // Prefer live WS presence, then fallback to team member snapshot from API.
-                const memberPresence = otherId
-                    ? teamStore.members.find(m => m.user_id === otherId)?.presence
-                    : undefined;
-                const status = otherId
-                    ? (presenceStore.presenceMap.get(otherId)?.presence || memberPresence || 'offline')
-                    : 'offline';
-                
-                return {
-                    id: c.id,
-                    name: DisplayName,
-                    type: 'dm',
-                    status: status,
-                    unread: unreadStore.getChannelUnreadCount(c.id),
-                    mention: (unreadStore.channelMentions[c.id] || 0) > 0,
-                } as any;
-            }),
+            channels: dedupeChannels(nonFavoriteDMs).map(c => normalizeChannelForDisplay(c)),
         }
-    ];
+    );
+
+    return result;
 });
+
+function normalizeChannelForDisplay(c: any) {
+    let displayName = c.display_name || c.name;
+    let otherId = '';
+    let status = 'offline';
+    
+    // Handle DM channels
+    if (c.channel_type === 'direct' || c.name?.startsWith('dm_')) {
+        const parts = c.name.split('_');
+        if (parts.length === 3) {
+            otherId = parts[1] === authStore.user?.id ? parts[2] : parts[1];
+            const member = teamStore.members.find(m => m.user_id === otherId);
+            if (member) {
+                displayName = member.display_name || member.username;
+            }
+        }
+        
+        // Get presence status
+        const memberPresence = otherId
+            ? teamStore.members.find(m => m.user_id === otherId)?.presence
+            : undefined;
+        status = otherId
+            ? (presenceStore.presenceMap.get(otherId)?.presence || memberPresence || 'offline')
+            : 'offline';
+    }
+    
+    const channelType = c.channel_type === 'direct' ? 'dm' : 
+                        c.channel_type === 'group' ? 'group' :
+                        c.channel_type === 'private' ? 'private' : 'public';
+    
+    return {
+        id: c.id,
+        name: displayName,
+        type: channelType,
+        status: status,
+        unread: unreadStore.getChannelUnreadCount(c.id),
+        mention: (unreadStore.channelMentions[c.id] || 0) > 0,
+        creator_id: c.creator_id,
+    };
+}
+
+// Check if user is channel owner
+function isChannelOwner(channel: any): boolean {
+    return channel.creator_id === authStore.user?.id
+}
+
+// Check if user is admin
+function isUserAdmin(): boolean {
+    return ['system_admin', 'org_admin', 'admin'].includes(authStore.user?.role || '')
+}
+
+// Open context menu for a channel
+function openContextMenu(channel: any, event: MouseEvent) {
+    event.stopPropagation()
+    const channelType = channel.type === 'dm' || channel.type === 'group' || channel.type === 'public' || channel.type === 'private'
+        ? channel.type 
+        : 'public'
+    contextMenuChannel.value = {
+        id: channel.id,
+        name: channel.name,
+        type: channelType,
+        unread: channel.unread,
+        isOwner: isChannelOwner(channel)
+    }
+}
+
+// Close context menu
+function closeContextMenu() {
+    contextMenuChannel.value = null
+}
+
+// Handle context menu action
+function handleContextMenuAction(action: string) {
+    console.log('Context menu action:', action)
+    if (action === 'leave' || action === 'delete') {
+        // Channel will be removed from store, refresh
+        if (teamStore.currentTeamId) {
+            channelStore.fetchChannels(teamStore.currentTeamId)
+        }
+    }
+}
+
+// Handle open add members modal
+function handleOpenAddMembers() {
+    if (contextMenuChannel.value) {
+        addMembersChannelId.value = contextMenuChannel.value.id
+        addMembersChannelName.value = contextMenuChannel.value.name
+        showAddMembersModal.value = true
+    }
+}
+
+// Handle open move to modal
+function handleOpenMoveTo(cats: SidebarCategory[]) {
+    moveToCategories.value = cats
+    if (contextMenuChannel.value) {
+        moveToChannelId.value = contextMenuChannel.value.id
+        showMoveToModal.value = true
+    }
+}
+
+// Handle move to category
+async function handleMoveToCategory(cat: SidebarCategory) {
+    if (!authStore.user?.id || !teamStore.currentTeamId) return
+    try {
+        await channelRepository.updateCategories(authStore.user.id, teamStore.currentTeamId, [cat])
+        showMoveToModal.value = false
+    } catch (e) {
+        console.error('Failed to move channel:', e)
+    }
+}
+
+// Fetch preferences on mount
+onMounted(() => {
+    channelPrefsStore.fetchPreferences()
+})
 
 function selectChannel(channelId: string) {
     channelStore.selectChannel(channelId);
@@ -303,6 +421,30 @@ async function handleLeaveTeam() {
                <div v-if="channel.unread > 0" class="shrink-0 px-2 h-5 flex items-center justify-center rounded-full bg-bg-surface-1 text-[10px] font-bold text-text-1 border border-border-1" :class="{ 'bg-white/20 border-none text-white': channelStore.currentChannelId === channel.id }">
                  {{ channel.unread > 99 ? '99+' : channel.unread }}
                </div>
+
+               <!-- Context Menu Trigger (3-dot) -->
+               <button
+                 @click.stop="openContextMenu(channel, $event)"
+                 class="opacity-0 group-hover/item:opacity-100 flex items-center justify-center w-6 h-6 hover:bg-bg-surface-1 rounded transition-opacity"
+                 title="More actions"
+               >
+                 <MoreVertical class="w-4 h-4 text-text-3" />
+               </button>
+
+               <!-- Context Menu -->
+               <ChannelContextMenu
+                 v-if="contextMenuChannel?.id === channel.id"
+                 :channel-id="contextMenuChannel!.id"
+                 :channel-name="contextMenuChannel!.name"
+                 :channel-type="contextMenuChannel!.type"
+                 :is-owner="contextMenuChannel!.isOwner"
+                 :is-admin="isUserAdmin()"
+                 :unread-count="channel.unread"
+                 @close="closeContextMenu"
+                 @action="handleContextMenuAction"
+                 @open-add-members="handleOpenAddMembers"
+                 @open-move-to="handleOpenMoveTo"
+               />
             </div>
           </div>
           
@@ -364,6 +506,37 @@ async function handleLeaveTeam() {
       :open="showBrowseChannels"
       @close="showBrowseChannels = false"
     />
+
+    <!-- Add Members Modal -->
+    <AddChannelMembersModal
+      :show="showAddMembersModal"
+      :channel-id="addMembersChannelId"
+      :channel-name="addMembersChannelName"
+      @close="showAddMembersModal = false"
+    />
+
+    <!-- Move to Category Modal -->
+    <Teleport to="body" v-if="showMoveToModal">
+      <div class="fixed inset-0 z-50 flex items-center justify-center">
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" @click="showMoveToModal = false"></div>
+        <div class="relative bg-bg-surface-1 rounded-r-2 shadow-2xl w-64 py-2 border border-border-1">
+          <div class="px-3 py-2 text-xs font-bold text-text-3 uppercase tracking-wider border-b border-border-1 mb-1">
+            Move to...
+          </div>
+          <button
+            v-for="cat in moveToCategories"
+            :key="cat.id"
+            @click="handleMoveToCategory(cat)"
+            class="w-full px-4 py-2 text-left text-sm text-text-2 hover:bg-bg-surface-2 hover:text-text-1 transition-standard"
+          >
+            {{ cat.display_name }}
+          </button>
+          <div v-if="moveToCategories.length === 0" class="px-4 py-3 text-sm text-text-3 text-center">
+            No categories available
+          </div>
+        </div>
+      </div>
+    </Teleport>
     </div>
   </aside>
 </template>

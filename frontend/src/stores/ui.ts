@@ -3,10 +3,12 @@ import { ref } from 'vue'
 
 export type RhsView = 'thread' | 'search' | 'info' | 'saved' | 'pinned' | 'members' | null
 export type Density = 'comfortable' | 'compact'
+export type SettingsTab = 'profile' | 'notifications' | 'display' | 'sidebar' | 'advanced' | 'security'
 
 export const useUIStore = defineStore('ui', () => {
     const isRhsOpen = ref(false)
     const isSettingsOpen = ref(false)
+    const settingsTab = ref<SettingsTab>('profile')
     const rhsView = ref<RhsView>(null)
     const rhsContextId = ref<string | null>(null)
 
@@ -14,7 +16,8 @@ export const useUIStore = defineStore('ui', () => {
     const isVideoCallOpen = ref(false)
     const density = ref<Density>((localStorage.getItem('density') as Density) || 'comfortable')
 
-    function openSettings() {
+    function openSettings(tab: SettingsTab = 'profile') {
+        settingsTab.value = tab
         isSettingsOpen.value = true
     }
 

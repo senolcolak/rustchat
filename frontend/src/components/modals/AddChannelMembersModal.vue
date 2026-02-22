@@ -2,7 +2,6 @@
 import { ref, computed, watch } from 'vue';
 import { X, Search, User, UserPlus } from 'lucide-vue-next';
 import { useTeamStore } from '../../stores/teams';
-import { useChannelStore } from '../../stores/channels';
 import { useAuthStore } from '../../stores/auth';
 import BaseButton from '../atomic/BaseButton.vue';
 import { channelRepository } from '../../features/channels/repositories/channelRepository';
@@ -19,11 +18,9 @@ const emit = defineEmits<{
 }>()
 
 const teamStore = useTeamStore()
-const channelStore = useChannelStore()
 const authStore = useAuthStore()
 
 const search = ref('')
-const loading = ref(false)
 const addingMembers = ref<Set<string>>(new Set())
 const error = ref('')
 const success = ref('')

@@ -66,7 +66,6 @@ pub fn router() -> Router<AppState> {
         .merge(plugins::router())
         .merge(categories::router())
         .merge(posts::router())
-        .merge(reactions::router())
         .merge(status::router())
         .merge(channel_bookmarks::router())
         .merge(files::router())

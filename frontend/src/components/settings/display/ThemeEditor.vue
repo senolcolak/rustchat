@@ -1,9 +1,7 @@
-<script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { Check } from 'lucide-vue-next'
+<script lang="ts">
 import type { Theme } from '../../../stores/theme'
 
-// Mattermost-style theme options
+// Mattermost-style theme options - defined outside script setup
 export const MM_THEME_OPTIONS: Array<{
   id: Theme | 'custom'
   label: string
@@ -48,33 +46,31 @@ export const MM_THEME_OPTIONS: Array<{
   },
   { 
     id: 'modern', 
-    label: 'Mattermost', 
-    swatches: { primary: '#145dbf', accent: '#145dbf', background: '#f3f3f3', sidebarBg: '#145dbf' },
+    label: 'RustChat Modern', 
+    swatches: { primary: '#6366f1', accent: '#8b5cf6', background: '#0f1115', sidebarBg: '#1a1d24' },
     colors: {
-      sidebarBg: '#145dbf',
-      sidebarText: '#ffffff',
-      centerChannelBg: '#ffffff',
-      centerChannelColor: '#3d3c40',
-      linkColor: '#145dbf',
-      buttonBg: '#145dbf',
+      sidebarBg: '#1a1d24',
+      sidebarText: '#e2e8f0',
+      centerChannelBg: '#0f1115',
+      centerChannelColor: '#e2e8f0',
+      linkColor: '#6366f1',
+      buttonBg: '#6366f1',
       buttonColor: '#ffffff',
     }
   },
-  { 
-    id: 'custom', 
-    label: 'Custom', 
-    swatches: { primary: '#166de0', accent: '#166de0', background: '#ffffff', sidebarBg: '#1e325c' },
-    colors: {
-      sidebarBg: '#1e325c',
-      sidebarText: '#ffffff',
-      centerChannelBg: '#ffffff',
-      centerChannelColor: '#3d3c40',
-      linkColor: '#166de0',
-      buttonBg: '#166de0',
-      buttonColor: '#ffffff',
-    }
-  },
+  {
+    id: 'custom',
+    label: 'Custom',
+    swatches: { primary: '#6366f1', accent: '#8b5cf6', background: '#ffffff' },
+  }
 ]
+</script>
+
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import { Check } from 'lucide-vue-next'
+
+// Theme type already imported in module script
 
 const props = defineProps<{
   modelValue: Theme

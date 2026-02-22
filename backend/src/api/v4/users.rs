@@ -108,7 +108,6 @@ pub fn router() -> Router<AppState> {
             "/users/{user_id}/preferences/{category}/name/{preference_name}",
             get(get_preference_by_category_and_name),
         )
-        .route("/users/status/ids", post(get_statuses_by_ids))
         .route("/users/ids", post(get_users_by_ids))
         .route(
             "/users/{user_id}/channels/{channel_id}/typing",
@@ -1346,42 +1345,6 @@ async fn search_users(
     Ok(Json(mm_users))
 }
 
-async fn get_statuses_by_ids(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<Vec<mm::Status>>> {
-    let ids: Vec<String> = parse_body(&headers, &body, "Invalid status ids body")?;
-    let uuids: Vec<Uuid> = ids.iter().filter_map(|id| parse_mm_or_uuid(id)).collect();
-
-    if uuids.is_empty() {
-        return Ok(Json(vec![]));
-    }
-
-    let users: Vec<(Uuid, String, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT id, presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = ANY($1)",
-    )
-            .bind(&uuids)
-            .fetch_all(&state.db)
-            .await?;
-
-    let statuses = users
-        .into_iter()
-        .map(|(id, presence, manual, last_login)| mm::Status {
-            user_id: encode_mm_id(id),
-            status: if presence.is_empty() {
-                "offline".to_string()
-            } else {
-                presence
-            },
-            manual,
-            last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-        })
-        .collect();
-
-    Ok(Json(statuses))
-}
-
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum UsersByIdsRequest {
@@ -1439,60 +1402,6 @@ fn parse_body<T: DeserializeOwned>(
     }
 }
 
-async fn get_status(
-    State(state): State<AppState>,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<mm::Status>> {
-    let user_id = parse_mm_or_uuid(&user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    Ok(Json(mm::Status {
-        user_id: encode_mm_id(user_id),
-        status: if presence.is_empty() {
-            "offline".to_string()
-        } else {
-            presence
-        },
-        manual,
-        last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-    }))
-}
-
-async fn get_my_status(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-) -> ApiResult<Json<mm::Status>> {
-    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    Ok(Json(mm::Status {
-        user_id: encode_mm_id(auth.user_id),
-        status: if presence.is_empty() {
-            "offline".to_string()
-        } else {
-            presence
-        },
-        manual,
-        last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-    }))
-}
-
-#[derive(Deserialize)]
-struct UpdateStatusRequest {
-    user_id: String,
-    status: String,
-}
-
 #[derive(Deserialize)]
 struct PatchMeRequest {
     nickname: Option<String>,
@@ -1529,41 +1438,6 @@ fn parse_timezone_for_update(timezone: Option<&serde_json::Value>) -> Option<Str
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-async fn update_status(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<mm::Status>> {
-    let input: UpdateStatusRequest = parse_body(&headers, &body, "Invalid status update request")?;
-
-    let input_user_id = parse_mm_or_uuid(&input.user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    if input_user_id != auth.user_id {
-        return Err(AppError::Forbidden(
-            "Cannot update other user's status".to_string(),
-        ));
-    }
-
-    let manual = crate::api::websocket_core::status_is_manual(&input.status);
-    crate::api::websocket_core::persist_presence_and_broadcast(
-        &state,
-        auth.user_id,
-        &input.status,
-        manual,
-    )
-    .await;
-
-    let status = mm::Status {
-        user_id: encode_mm_id(auth.user_id),
-        status: input.status.clone(),
-        manual,
-        last_activity_at: Utc::now().timestamp_millis(),
-    };
-
-    Ok(Json(status))
 }
 
 async fn patch_me(

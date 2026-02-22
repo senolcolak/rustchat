@@ -220,7 +220,7 @@ async fn update_my_status(
     // Handle presence status update if provided
     if let Some(presence) = body.status {
         let dnd_end_time = body.dnd_end_time;
-        update_user_status_internal(&state, auth.user_id, presence, dnd_end_time).await?;
+        let _ = update_user_status_internal(&state, auth.user_id, presence, dnd_end_time).await?;
     }
     
     // Handle custom status update if provided
@@ -371,7 +371,7 @@ async fn update_custom_status_internal(
             "duration": cs.duration,
             "expires_at": cs.expires_at.map(|t| t.to_rfc3339()),
         });
-        (Some(cs.text), Some(cs.emoji), cs.expires_at, json)
+        (Some(cs.text.clone()), Some(cs.emoji.clone()), cs.expires_at, json)
     } else {
         (None::<String>, None::<String>, None::<DateTime<Utc>>, serde_json::json!(null))
     };

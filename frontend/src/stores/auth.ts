@@ -57,21 +57,24 @@ export const useAuthStore = defineStore('auth', () => {
         router.push('/login')
     }
 
-    async function updateStatus(status: { presence?: string, text?: string, emoji?: string, duration_minutes?: number }) {
+    async function updateStatus(status: { presence?: string, text?: string, emoji?: string, duration?: string, duration_minutes?: number }) {
         if (!token.value) return
         try {
             const { data } = await client.put('/users/me/status', status)
             if (user.value) {
                 if (data.presence) user.value.presence = data.presence
+                if (data.status) user.value.presence = data.status
                 user.value.status_text = data.text
                 user.value.status_emoji = data.emoji
                 user.value.status_expires_at = data.expires_at
 
                 // Also update the nested object to stay in sync
-                user.value.custom_status = {
-                    text: data.text,
-                    emoji: data.emoji,
-                    expires_at: data.expires_at
+                if (data.text !== undefined || data.emoji !== undefined) {
+                    user.value.custom_status = {
+                        text: data.text,
+                        emoji: data.emoji,
+                        expires_at: data.expires_at
+                    }
                 }
             }
         } catch (e) {
