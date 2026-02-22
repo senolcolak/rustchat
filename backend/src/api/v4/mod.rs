@@ -14,6 +14,7 @@ pub mod bots;
 pub mod brand;
 pub mod calls_plugin;
 pub mod categories;
+pub mod channel_bookmarks;
 pub mod channels;
 pub mod cloud;
 pub mod cluster;
@@ -37,7 +38,9 @@ pub mod ldap;
 pub mod oauth;
 pub mod plugins;
 pub mod posts;
+pub mod reactions;
 pub mod recaps;
+pub mod status;
 pub mod reports;
 pub mod roles;
 pub mod saml;
@@ -63,6 +66,9 @@ pub fn router() -> Router<AppState> {
         .merge(plugins::router())
         .merge(categories::router())
         .merge(posts::router())
+        .merge(reactions::router())
+        .merge(status::router())
+        .merge(channel_bookmarks::router())
         .merge(files::router())
         .merge(system::router())
         .merge(config_client::router())

@@ -25,7 +25,7 @@ mod preferences;
 mod sidebar_categories;
 
 use preferences::{
-    delete_preferences_for_user, get_preference_by_category_and_name, get_preferences,
+    delete_preferences_for_user, get_my_preferences_by_category, get_preference_by_category_and_name, get_preferences,
     get_preferences_by_category, get_preferences_for_user, update_preferences,
     update_preferences_for_user,
 };
@@ -87,6 +87,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/users/me/preferences",
             get(get_preferences).put(update_preferences),
+        )
+        .route(
+            "/users/me/preferences/{category}",
+            get(get_my_preferences_by_category),
         )
         .route(
             "/users/{user_id}/preferences",

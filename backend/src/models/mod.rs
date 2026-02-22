@@ -15,6 +15,7 @@ pub mod organization;
 pub mod playbook;
 pub mod post;
 pub mod preferences;
+pub mod reaction;
 pub mod scheduled_post;
 pub mod server_config;
 pub mod team;
