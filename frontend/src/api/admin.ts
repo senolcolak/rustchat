@@ -101,6 +101,9 @@ export interface AdminUser {
     is_active: boolean;
     is_bot: boolean;
     last_login_at: string | null;
+    deleted_at?: string | null;
+    deleted_by?: string | null;
+    delete_reason?: string | null;
     created_at: string;
 }
 
@@ -284,6 +287,7 @@ export const adminApi = {
         status?: 'active' | 'inactive' | 'all';
         role?: string;
         search?: string;
+        include_deleted?: boolean;
     }) => api.get<{ users: AdminUser[]; total: number }>('/admin/users', { params }),
 
     getUser: (id: string) => api.get<AdminUser>(`/admin/users/${id}`),
@@ -293,6 +297,8 @@ export const adminApi = {
         api.patch<AdminUser>(`/admin/users/${id}`, data),
     deactivateUser: (id: string) => api.post(`/admin/users/${id}/deactivate`),
     reactivateUser: (id: string) => api.post(`/admin/users/${id}/reactivate`),
+    deleteUser: (id: string, data: { confirm: string; reason?: string }) =>
+        api.delete(`/admin/users/${id}`, { data }),
     resetPassword: (id: string) => api.post(`/admin/users/${id}/reset-password`),
 
     // Audit Logs

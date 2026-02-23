@@ -3,6 +3,7 @@ import { ref, onMounted, watch } from 'vue';
 import { useAdminStore } from '../../stores/admin';
 import { Mail, Send, Save, AlertCircle, CheckCircle } from 'lucide-vue-next';
 import api from '../../api/client';
+import EmailAdminWorkbench from '../../components/admin/EmailAdminWorkbench.vue';
 
 const adminStore = useAdminStore();
 
@@ -256,5 +257,7 @@ const sendTestEmail = async () => {
                 </button>
             </div>
         </div>
+
+        <EmailAdminWorkbench />
     </div>
 </template>
