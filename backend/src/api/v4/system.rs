@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn can_receive_notifications_response_reports_unknown_when_push_is_configured() {
+    fn can_receive_notifications_response_reports_verified_when_push_is_configured() {
         let diagnostics = PushDiagnostics {
             has_push_proxy_url: true,
             has_fcm_db_config: false,
@@ -816,7 +816,7 @@ mod tests {
         };
         assert_eq!(
             can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
-            Some("unknown".to_string())
+            Some("true".to_string())
         );
     }
 }
