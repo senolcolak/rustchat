@@ -147,11 +147,11 @@ services:
       - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
       - GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-key.json
       # APNS (iOS VoIP) - JWT-based authentication (disabled if APNS_KEY_ID not set)
-      - APNS_KEY_PATH=${APNS_KEY_PATH:-}
-      - APNS_KEY_ID=${APNS_KEY_ID:-}
-      - APNS_TEAM_ID=${APNS_TEAM_ID:-}
-      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-}
-      - APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
+      #- APNS_KEY_PATH=${APNS_KEY_PATH:-}
+        #- APNS_KEY_ID=${APNS_KEY_ID:-}
+        #- APNS_TEAM_ID=${APNS_TEAM_ID:-}
+        #- APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-}
+        #- APNS_USE_PRODUCTION=${APNS_USE_PRODUCTION:-false}
       # General
       - RUSTCHAT_PUSH_PORT=3000
       - RUST_LOG=push_proxy=info,tower_http=info

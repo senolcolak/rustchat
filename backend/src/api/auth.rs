@@ -11,7 +11,7 @@ use super::AppState;
 use crate::auth::{create_token, hash_password, verify_password, AuthUser};
 use crate::error::{ApiResult, AppError};
 use crate::models::{AuthResponse, CreateUser, LoginRequest, User, UserResponse};
-use crate::services::password_reset::{PasswordResetError, request_password_reset, reset_password, validate_token};
+use crate::services::password_reset::{PasswordResetError, request_password_reset, reset_password, validate_token, send_password_setup_email};
 
 /// Build auth routes
 pub fn router() -> Router<AppState> {
@@ -36,20 +36,19 @@ async fn get_auth_policy(
 }
 
 /// Register a new user
+/// 
+/// If password is provided, user is registered with that password.
+/// If password is not provided, a password setup email is sent and user must set password via email link.
 async fn register(
     State(state): State<AppState>,
     Json(input): Json<CreateUser>,
-) -> ApiResult<Json<AuthResponse>> {
+) -> ApiResult<Json<serde_json::Value>> {
     // Validate input
     if input.username.len() < 3 {
         return Err(AppError::Validation(
             "Username must be at least 3 characters".to_string(),
         ));
     }
-
-    // Enforce password complexity
-    let config = crate::services::auth_config::get_password_rules(&state.db).await?;
-    crate::services::auth_config::validate_password(&input.password, &config)?;
 
     if !input.email.contains('@') {
         return Err(AppError::Validation("Invalid email format".to_string()));
@@ -75,10 +74,19 @@ async fn register(
         return Err(AppError::Conflict("Username already taken".to_string()));
     }
 
-    // Hash password
-    let password_hash = hash_password(&input.password)?;
+    // Determine if this is passwordless registration
+    let has_password = input.password.is_some() && !input.password.as_ref().unwrap().is_empty();
+    
+    // Validate password if provided
+    let password_hash = if has_password {
+        let config = crate::services::auth_config::get_password_rules(&state.db).await?;
+        crate::services::auth_config::validate_password(input.password.as_ref().unwrap(), &config)?;
+        Some(hash_password(input.password.as_ref().unwrap())?)
+    } else {
+        None
+    };
 
-    // Insert user (email_verified defaults to false)
+    // Insert user (email_verified defaults to false, password_hash may be NULL for passwordless)
     let user: User = sqlx::query_as(
         r#"
         INSERT INTO users (username, email, password_hash, display_name, org_id, role, email_verified)
@@ -97,7 +105,6 @@ async fn register(
     // Seed default preferences for the new user
     seed_default_preferences(&state.db, user.id).await?;
 
-    // Send verification email if provider is configured
     // Fetch site_url from server_config
     let site_url: Option<String> = sqlx::query_scalar(
         "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
@@ -109,44 +116,100 @@ async fn register(
     .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
     
     if let Some(site_url) = site_url {
-        let verification_base_url = format!("{}/verify-email", site_url);
-        match crate::services::email_verification::send_verification_email(
-            &state.db,
-            user.id,
-            &user.username,
-            &user.email,
-            &verification_base_url,
-        )
-        .await
-        {
-            Ok(_) => {
-                tracing::info!("Verification email sent to {}", user.email);
+        if has_password {
+            // Send verification email for users who provided password
+            let verification_base_url = format!("{}/verify-email", site_url);
+            match crate::services::email_verification::send_verification_email(
+                &state.db,
+                user.id,
+                &user.username,
+                &user.email,
+                &verification_base_url,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!("Verification email sent to {}", user.email);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send verification email: {}", e);
+                }
             }
-            Err(e) => {
-                // Log but don't fail registration - user can resend later
-                tracing::warn!("Failed to send verification email: {}", e);
+            
+            // Generate token for immediate login
+            let token = create_token(
+                user.id,
+                &user.email,
+                &user.role,
+                user.org_id,
+                &state.jwt_secret,
+                state.jwt_expiry_hours,
+            )?;
+            
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Registration successful. Please check your email to verify your account.",
+                "requires_password_setup": false,
+                "token": token,
+                "user": UserResponse::from(user)
+            })));
+        } else {
+            // Passwordless registration: send password setup email
+            match crate::services::password_reset::send_password_setup_email(
+                &state.db,
+                user.id,
+                &user.username,
+                &user.email,
+                &site_url,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!("Password setup email sent to {}", user.email);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send password setup email: {}", e);
+                    // Don't fail registration, but inform user
+                }
             }
+            
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Registration successful. Please check your email to set your password.",
+                "requires_password_setup": true,
+                "email": user.email
+            })));
         }
     } else {
-        tracing::warn!("site_url not configured, skipping verification email");
+        tracing::warn!("site_url not configured, skipping email sending");
+        
+        if has_password {
+            // Generate token for immediate login
+            let token = create_token(
+                user.id,
+                &user.email,
+                &user.role,
+                user.org_id,
+                &state.jwt_secret,
+                state.jwt_expiry_hours,
+            )?;
+            
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Registration successful.",
+                "requires_password_setup": false,
+                "token": token,
+                "user": UserResponse::from(user)
+            })));
+        } else {
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Registration successful. Please contact administrator to set your password.",
+                "requires_password_setup": true,
+                "email": user.email
+            })));
+        }
     }
-
-    // Generate token
-    let token = create_token(
-        user.id,
-        &user.email,
-        &user.role,
-        user.org_id,
-        &state.jwt_secret,
-        state.jwt_expiry_hours,
-    )?;
-
-    Ok(Json(AuthResponse {
-        token,
-        token_type: "Bearer".to_string(),
-        expires_in: state.jwt_expiry_hours * 3600,
-        user: UserResponse::from(user),
-    }))
 }
 
 /// Login with email and password
@@ -163,9 +226,19 @@ async fn login(
         .await?
         .ok_or_else(|| AppError::Unauthorized("Invalid email or password".to_string()))?;
 
-    // Verify password (OAuth users without password cannot login with password)
+    // Verify password (OAuth users or users pending password setup cannot login with password)
     let password_hash = user.password_hash.as_deref()
-        .ok_or_else(|| AppError::Unauthorized("Please use SSO to login".to_string()))?;
+        .ok_or_else(|| {
+            if user.email_verified {
+                AppError::Unauthorized(
+                    "Please set your password using the link sent to your email.".to_string()
+                )
+            } else {
+                AppError::Unauthorized(
+                    "Please verify your email and set your password first.".to_string()
+                )
+            }
+        })?;
     
     if !verify_password(&input.password, password_hash)? {
         return Err(AppError::Unauthorized(

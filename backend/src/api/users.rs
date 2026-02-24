@@ -3,7 +3,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::AppState;
@@ -11,12 +11,38 @@ use crate::auth::{hash_password, AuthUser};
 use crate::error::{ApiResult, AppError};
 use crate::models::{ChangePassword, UpdateUser, User, UserResponse};
 
+/// User status response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserStatusResponse {
+    pub user_id: String,
+    pub status: String,
+    pub manual: bool,
+    pub last_activity_at: i64,
+}
+
+/// Update status request
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStatusRequest {
+    pub status: String,
+    #[serde(default)]
+    pub dnd_end_time: Option<i64>,
+}
+
+/// Bulk status request
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkStatusRequest {
+    pub user_ids: Vec<String>,
+}
+
 /// Build users routes
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_users))
         .route("/{id}", get(get_user).put(update_user))
         .route("/{id}/password", axum::routing::post(change_password))
+        .route("/me/status", get(get_my_status).put(update_my_status).delete(delete_my_status))
+        .route("/{id}/status", get(get_user_status))
+        .route("/status/ids", axum::routing::post(get_statuses_by_ids))
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,4 +260,152 @@ async fn change_password(
     Ok(Json(
         serde_json::json!({ "status": "success", "message": "Password updated successfully" }),
     ))
+}
+
+/// Get current user's status
+/// GET /api/v1/users/me/status
+async fn get_my_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<UserStatusResponse>> {
+    get_user_status_by_id(&state, auth.user_id).await
+}
+
+/// Get user status by ID
+/// GET /api/v1/users/{id}/status
+async fn get_user_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<UserStatusResponse>> {
+    get_user_status_by_id(&state, id).await
+}
+
+/// Internal: Get user status by UUID
+async fn get_user_status_by_id(
+    state: &AppState,
+    user_id: Uuid,
+) -> ApiResult<Json<UserStatusResponse>> {
+    let result: (String, bool, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        r#"
+        SELECT presence, COALESCE(presence_manual, false), last_login_at
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let (presence, manual, last_login) = result;
+
+    Ok(Json(UserStatusResponse {
+        user_id: user_id.to_string(),
+        status: if presence.is_empty() {
+            "offline".to_string()
+        } else {
+            presence
+        },
+        manual,
+        last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
+    }))
+}
+
+/// Update my status
+/// PUT /api/v1/users/me/status
+async fn update_my_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<UpdateStatusRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Validate status
+    let valid_statuses = ["online", "away", "dnd", "offline"];
+    if !valid_statuses.contains(&body.status.as_str()) {
+        return Err(AppError::Validation(format!(
+            "Invalid status: {}. Must be one of: online, away, dnd, offline",
+            body.status
+        )));
+    }
+
+    // Determine if this is a manual status
+    let manual = body.status != "online";
+
+    // Update user presence
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET presence = $2, presence_manual = $3
+        WHERE id = $1
+        "#,
+    )
+    .bind(auth.user_id)
+    .bind(&body.status)
+    .bind(manual)
+    .execute(&state.db)
+    .await?;
+
+    // Broadcast status change via WebSocket
+    let event = crate::realtime::events::WsEnvelope::event(
+        crate::realtime::events::EventType::UserPresence,
+        serde_json::json!({
+            "user_id": auth.user_id.to_string(),
+            "status": &body.status,
+            "manual": manual,
+        }),
+        None,
+    );
+    state.ws_hub.broadcast(event).await;
+
+    Ok(Json(serde_json::json!({"status": body.status})))
+}
+
+/// Delete/clear my status (custom status text/emoji)
+/// DELETE /api/v1/users/me/status
+async fn delete_my_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query(
+        "UPDATE users SET status_text = NULL, status_emoji = NULL, status_expires_at = NULL, updated_at = NOW() WHERE id = $1"
+    )
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({"status": "cleared"})))
+}
+
+/// Get statuses for multiple users
+/// POST /api/v1/users/status/ids
+async fn get_statuses_by_ids(
+    State(state): State<AppState>,
+    Json(body): Json<BulkStatusRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let user_ids: Vec<Uuid> = body
+        .user_ids
+        .iter()
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect();
+
+    if user_ids.is_empty() {
+        return Ok(Json(serde_json::json!({})));
+    }
+
+    let statuses: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, presence
+        FROM users
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&user_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Build response map
+    let mut result = serde_json::Map::new();
+    for (user_id, status) in statuses {
+        result.insert(user_id.to_string(), serde_json::json!(status));
+    }
+
+    Ok(Json(serde_json::Value::Object(result)))
 }

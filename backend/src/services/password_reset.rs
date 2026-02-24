@@ -597,6 +597,84 @@ pub async fn request_password_setup(
     }
 }
 
+/// Send password setup email for new registrations (simplified interface)
+pub async fn send_password_setup_email(
+    db: &PgPool,
+    user_id: Uuid,
+    username: &str,
+    email: &str,
+    site_url: &str,
+) -> Result<(), PasswordResetError> {
+    // Check rate limits
+    check_rate_limits(db, email, None).await?;
+
+    // Create token
+    let token = generate_secure_token();
+    let token_hash = hash_token(&token);
+    let expires_at = Utc::now() + Duration::minutes(TOKEN_VALIDITY_MINUTES);
+
+    // Store token
+    sqlx::query(
+        r#"
+        INSERT INTO password_reset_tokens 
+            (token_hash, user_id, email, purpose, expires_at, created_ip, user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(&token_hash)
+    .bind(user_id)
+    .bind(email)
+    .bind("password_setup")
+    .bind(expires_at)
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .execute(db)
+    .await
+    .map_err(|e| {
+        error!("Failed to store setup token: {}", e);
+        PasswordResetError::Internal("Failed to create setup token".to_string())
+    })?;
+
+    let setup_link = format!("{}/set-password?token={}", site_url, token);
+    
+    let email_service = EmailService::new(db.clone());
+    let payload = serde_json::json!({
+        "username": username,
+        "email": email,
+        "setup_link": setup_link,
+        "expiry_minutes": TOKEN_VALIDITY_MINUTES,
+        "site_name": "RustChat",
+    });
+
+    match email_service
+        .enqueue_email(
+            "password_reset", // Uses same workflow
+            email,
+            Some(user_id),
+            payload,
+            EnqueueOptions {
+                priority: EmailPriority::High,
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(outbox_id) => {
+            info!(
+                "Password setup email enqueued: outbox_id={}, user_id={}",
+                outbox_id, user_id
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to enqueue password setup email: {}", e);
+            Err(PasswordResetError::Internal(
+                "Failed to send setup email".to_string(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

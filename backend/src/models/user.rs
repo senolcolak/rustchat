@@ -158,7 +158,7 @@ impl From<User> for UserResponse {
 pub struct CreateUser {
     pub username: String,
     pub email: String,
-    pub password: String,
+    pub password: Option<String>,
     pub display_name: Option<String>,
     pub org_id: Option<Uuid>,
 }

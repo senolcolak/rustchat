@@ -21,11 +21,6 @@ use crate::realtime::{EventType, PresenceEvent, WsEnvelope};
 /// Build preferences routes
 pub fn router() -> Router<AppState> {
     Router::new()
-        // User status
-        .route("/users/me/status", get(get_my_status))
-        .route("/users/me/status", put(update_my_status))
-        .route("/users/me/status", axum::routing::delete(clear_my_status))
-        .route("/users/{user_id}/status", get(get_user_status))
         // User preferences
         .route("/users/me/preferences", get(get_my_preferences))
         .route("/users/me/preferences", put(update_my_preferences))
@@ -61,6 +56,7 @@ fn to_system_time(last_activity: Option<chrono::DateTime<Utc>>) -> SystemTime {
 }
 
 /// Get current user's status
+#[allow(dead_code)]
 async fn get_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -94,6 +90,7 @@ async fn get_my_status(
 }
 
 /// Update current user's status
+#[allow(dead_code)]
 async fn update_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -200,6 +197,7 @@ async fn update_my_status(
 }
 
 /// Clear current user's status
+#[allow(dead_code)]
 async fn clear_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -254,6 +252,7 @@ async fn clear_my_status(
 }
 
 /// Get another user's status
+#[allow(dead_code)]
 async fn get_user_status(
     State(state): State<AppState>,
     _auth: AuthUser,
