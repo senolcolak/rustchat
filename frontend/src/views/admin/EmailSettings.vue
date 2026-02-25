@@ -37,7 +37,7 @@ const form = ref<CreateMailProviderRequest>({
 
 function extractUiErrorMessage(e: any, fallback: string) {
     // Handle plain Error objects (e.g., thrown from test response)
-    if (e instanceof Error && e.message && !e.response) {
+    if (e instanceof Error && e.message && !(e as any).response) {
         return e.message;
     }
     if (!e?.response) {

@@ -9,7 +9,7 @@ import adminEmailApi, {
     type EmailOutboxDetails,
     type EmailEventResponse,
 } from '../../api/adminEmail'
-import { RefreshCw, Mailbox, ListChecks, FileText, Clock3, Activity, Plus, Save, Trash2, Star, Send, Eye } from 'lucide-vue-next'
+import { RefreshCw, Mailbox, ListChecks, FileText, Clock3, Activity, Trash2, Star, Eye } from 'lucide-vue-next'
 
 type TabKey = 'providers' | 'workflows' | 'templates' | 'outbox' | 'events'
 
@@ -38,24 +38,6 @@ const eventFilters = ref({
     event_type: '',
 })
 
-const providerForm = ref({
-    provider_type: 'smtp',
-    host: '',
-    port: 587,
-    username: '',
-    password: '',
-    tls_mode: 'starttls',
-    skip_cert_verify: false,
-    from_address: '',
-    from_name: 'RustChat',
-    reply_to: '',
-    max_emails_per_minute: 60,
-    max_emails_per_hour: 1000,
-    enabled: true,
-    is_default: false,
-})
-const editingProviderId = ref<string | null>(null)
-const providerTestRecipient = ref('')
 const providerTestStatus = ref<Record<string, string>>({})
 
 const familyForm = ref({
@@ -74,16 +56,7 @@ const versionForm = ref({
     body_html: '',
 })
 
-const subsystemTestForm = ref({
-    provider_id: '',
-    to_email: '',
-    workflow_key: '',
-    template_family_id: '',
-    locale: 'en',
-    subject: '',
-    body_text: '',
-})
-const subsystemTestResult = ref<any>(null)
+
 
 const tabs: Array<{ key: TabKey; label: string; icon: any }> = [
     { key: 'providers', label: 'Providers', icon: Mailbox },
@@ -177,73 +150,11 @@ async function loadEvents() {
     events.value = data
 }
 
-function resetProviderForm() {
-    providerForm.value = {
-        provider_type: 'smtp',
-        host: '',
-        port: 587,
-        username: '',
-        password: '',
-        tls_mode: 'starttls',
-        skip_cert_verify: false,
-        from_address: '',
-        from_name: 'RustChat',
-        reply_to: '',
-        max_emails_per_minute: 60,
-        max_emails_per_hour: 1000,
-        enabled: true,
-        is_default: false,
-    }
-    editingProviderId.value = null
-}
-
-function startEditProvider(provider: MailProviderResponse) {
-    editingProviderId.value = provider.id
-    providerForm.value = {
-        provider_type: provider.provider_type,
-        host: provider.host,
-        port: provider.port,
-        username: provider.username,
-        password: '',
-        tls_mode: provider.tls_mode,
-        skip_cert_verify: provider.skip_cert_verify,
-        from_address: provider.from_address,
-        from_name: provider.from_name,
-        reply_to: provider.reply_to || '',
-        max_emails_per_minute: provider.max_emails_per_minute,
-        max_emails_per_hour: provider.max_emails_per_hour,
-        enabled: provider.enabled,
-        is_default: provider.is_default,
-    }
-}
-
-async function saveProvider() {
-    try {
-        if (editingProviderId.value) {
-            const body: any = { ...providerForm.value }
-            if (!body.password) delete body.password
-            const { data } = await adminEmailApi.updateProvider(editingProviderId.value, body)
-            const idx = providers.value.findIndex(p => p.id === data.id)
-            if (idx >= 0) providers.value[idx] = data
-            setMessage('Provider updated')
-        } else {
-            const { data } = await adminEmailApi.createProvider(providerForm.value)
-            providers.value.unshift(data)
-            setMessage('Provider created')
-        }
-        resetProviderForm()
-        await refreshAll()
-    } catch (e: any) {
-        setMessage(extractError(e, 'Failed to save provider'), 'error')
-    }
-}
-
 async function deleteProvider(id: string) {
     if (!confirm('Delete this email provider?')) return
     try {
         await adminEmailApi.deleteProvider(id)
         providers.value = providers.value.filter(p => p.id !== id)
-        if (editingProviderId.value === id) resetProviderForm()
         setMessage('Provider deleted')
     } catch (e: any) {
         setMessage(extractError(e, 'Failed to delete provider'), 'error')
@@ -261,14 +172,13 @@ async function setDefaultProvider(id: string) {
 }
 
 async function testProvider(id: string) {
-    const to = providerTestRecipient.value.trim()
-    if (!to) {
-        setMessage('Enter a test recipient email for provider testing', 'error')
-        return
-    }
+    // Prompt for test email recipient
+    const to = prompt('Enter test recipient email address:')
+    if (!to || !to.trim()) return
+    
     providerTestStatus.value = { ...providerTestStatus.value, [id]: 'Testing...' }
     try {
-        const { data } = await adminEmailApi.testProvider(id, to)
+        const { data } = await adminEmailApi.testProvider(id, to.trim())
         providerTestStatus.value = {
             ...providerTestStatus.value,
             [id]: data.success
@@ -434,25 +344,7 @@ async function refreshEvents() {
     }
 }
 
-async function sendSubsystemTest() {
-    try {
-        const { data } = await adminEmailApi.sendTestEmail({
-            provider_id: subsystemTestForm.value.provider_id || null,
-            to_email: subsystemTestForm.value.to_email.trim(),
-            workflow_key: subsystemTestForm.value.workflow_key || null,
-            template_family_id: subsystemTestForm.value.template_family_id || null,
-            locale: subsystemTestForm.value.locale || null,
-            subject: subsystemTestForm.value.subject || null,
-            body_text: subsystemTestForm.value.body_text || null,
-        })
-        subsystemTestResult.value = data
-        setMessage('Subsystem test email request submitted')
-        await Promise.all([loadOutbox(), loadEvents()])
-    } catch (e: any) {
-        subsystemTestResult.value = null
-        setMessage(extractError(e, 'Failed to send subsystem test email'), 'error')
-    }
-}
+
 
 onMounted(() => {
     refreshAll()
@@ -497,81 +389,8 @@ onMounted(() => {
         </div>
 
         <div v-if="activeTab === 'providers'" class="space-y-6">
+            <!-- Note: Provider creation/editing is handled in EmailSettings.vue -->
             <div class="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
-                <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">
-                    {{ editingProviderId ? 'Edit Provider' : 'Create Provider' }}
-                </h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Host</label>
-                        <input v-model="providerForm.host" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Port</label>
-                        <input v-model.number="providerForm.port" type="number" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Username</label>
-                        <input v-model="providerForm.username" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Password {{ editingProviderId ? '(leave blank to keep)' : '' }}</label>
-                        <input v-model="providerForm.password" type="password" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">TLS Mode</label>
-                        <select v-model="providerForm.tls_mode" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900">
-                            <option value="starttls">STARTTLS</option>
-                            <option value="implicit_tls">Implicit TLS</option>
-                            <option value="none">None</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">From Address</label>
-                        <input v-model="providerForm.from_address" type="email" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">From Name</label>
-                        <input v-model="providerForm.from_name" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Reply-To</label>
-                        <input v-model="providerForm.reply_to" type="email" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                </div>
-                <div class="mt-4 flex flex-wrap gap-4 text-sm">
-                    <label class="inline-flex items-center gap-2 text-gray-700 dark:text-gray-300">
-                        <input v-model="providerForm.skip_cert_verify" type="checkbox" class="w-4 h-4 rounded" />
-                        Skip cert verification
-                    </label>
-                    <label class="inline-flex items-center gap-2 text-gray-700 dark:text-gray-300">
-                        <input v-model="providerForm.enabled" type="checkbox" class="w-4 h-4 rounded" />
-                        Enabled
-                    </label>
-                    <label class="inline-flex items-center gap-2 text-gray-700 dark:text-gray-300">
-                        <input v-model="providerForm.is_default" type="checkbox" class="w-4 h-4 rounded" />
-                        Set as default
-                    </label>
-                </div>
-                <div class="mt-4 flex gap-3">
-                    <button @click="saveProvider" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white">
-                        <Save class="w-4 h-4" />
-                        {{ editingProviderId ? 'Update Provider' : 'Create Provider' }}
-                    </button>
-                    <button v-if="editingProviderId" @click="resetProviderForm" class="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200">
-                        Cancel Edit
-                    </button>
-                </div>
-            </div>
-
-            <div class="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
-                <div class="flex items-end gap-3 mb-4">
-                    <div class="flex-1">
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Provider Test Recipient</label>
-                        <input v-model="providerTestRecipient" type="email" placeholder="test@example.com" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400 pb-2">Used by “Test” buttons below</div>
-                </div>
                 <div class="overflow-x-auto">
                     <table class="min-w-full text-sm">
                         <thead class="text-left text-gray-500 dark:text-gray-400">
@@ -606,7 +425,6 @@ onMounted(() => {
                                     <div class="inline-flex items-center gap-2">
                                         <button @click="testProvider(provider.id)" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-xs">Test</button>
                                         <button @click="setDefaultProvider(provider.id)" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-xs"><Star class="w-3 h-3 inline mr-1" />Default</button>
-                                        <button @click="startEditProvider(provider)" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-xs">Edit</button>
                                         <button @click="deleteProvider(provider.id)" class="px-2 py-1 rounded border border-rose-300 text-rose-700 dark:border-rose-800 dark:text-rose-300 text-xs"><Trash2 class="w-3 h-3 inline mr-1" />Delete</button>
                                     </div>
                                 </td>
@@ -616,55 +434,6 @@ onMounted(() => {
                 </div>
             </div>
 
-            <div class="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
-                <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-3">Send Subsystem Test Email</h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Recipient</label>
-                        <input v-model="subsystemTestForm.to_email" type="email" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Provider (optional)</label>
-                        <select v-model="subsystemTestForm.provider_id" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900">
-                            <option value="">Default provider</option>
-                            <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.host }}:{{ p.port }}{{ p.is_default ? ' (default)' : '' }}</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Workflow (optional)</label>
-                        <select v-model="subsystemTestForm.workflow_key" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900">
-                            <option value="">Raw subject/body</option>
-                            <option v-for="wf in workflows" :key="wf.id" :value="wf.workflow_key">{{ wf.workflow_key }}</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Template Family (optional)</label>
-                        <select v-model="subsystemTestForm.template_family_id" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900">
-                            <option value="">Auto/default</option>
-                            <option v-for="f in templateFamilies" :key="f.id" :value="f.id">{{ f.key }}</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Locale</label>
-                        <input v-model="subsystemTestForm.locale" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                    <div>
-                        <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Subject (optional)</label>
-                        <input v-model="subsystemTestForm.subject" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                    </div>
-                </div>
-                <div class="mt-4">
-                    <label class="block text-sm mb-1 text-gray-700 dark:text-gray-300">Body text (optional)</label>
-                    <textarea v-model="subsystemTestForm.body_text" rows="3" class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-slate-900" />
-                </div>
-                <div class="mt-4">
-                    <button @click="sendSubsystemTest" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white">
-                        <Send class="w-4 h-4" />
-                        Send Subsystem Test
-                    </button>
-                </div>
-                <pre v-if="subsystemTestResult" class="mt-4 p-3 rounded-lg bg-slate-900 text-slate-100 text-xs overflow-auto">{{ JSON.stringify(subsystemTestResult, null, 2) }}</pre>
-            </div>
         </div>
 
         <div v-else-if="activeTab === 'workflows'" class="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
