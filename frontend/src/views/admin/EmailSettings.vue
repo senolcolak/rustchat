@@ -36,6 +36,10 @@ const form = ref<CreateMailProviderRequest>({
 });
 
 function extractUiErrorMessage(e: any, fallback: string) {
+    // Handle plain Error objects (e.g., thrown from test response)
+    if (e instanceof Error && e.message && !e.response) {
+        return e.message;
+    }
     if (!e?.response) {
         return `${fallback}: cannot connect to the RustChat server. Check the server URL/network and try again.`;
     }
@@ -157,7 +161,13 @@ const sendTestEmail = async () => {
             to_email: testEmail.value 
         });
         if (!data?.success) {
-            throw new Error(data?.error || 'SMTP test failed');
+            // Build detailed error message from response
+            let errorMsg = data?.error || 'SMTP test failed';
+            if (data?.stage) {
+                errorMsg = `[${data.stage}] ${errorMsg}`;
+            }
+            testError.value = errorMsg;
+            return;
         }
         testSuccess.value = true;
         setTimeout(() => testSuccess.value = false, 5000);
