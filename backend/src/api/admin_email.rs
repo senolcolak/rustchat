@@ -73,16 +73,31 @@ async fn list_providers(
 ) -> ApiResult<Json<Vec<MailProviderResponse>>> {
     require_admin(&auth)?;
 
-    let providers: Vec<MailProviderSettings> = sqlx::query_as(
-        r#"
-        SELECT * FROM mail_provider_settings
-        WHERE tenant_id = $1 OR (tenant_id IS NULL AND $1 IS NULL)
-        ORDER BY is_default DESC, created_at ASC
-        "#,
-    )
-    .bind(query.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+    // Admin users can see all providers:
+    // - If tenant_id is specified in query, filter by that tenant
+    // - Otherwise, return ALL providers (both global with NULL tenant and org-specific)
+    let providers: Vec<MailProviderSettings> = if let Some(tenant_id) = query.tenant_id {
+        sqlx::query_as(
+            r#"
+            SELECT * FROM mail_provider_settings
+            WHERE tenant_id = $1
+            ORDER BY is_default DESC, created_at ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        // Return ALL providers for admin (both global NULL tenant and org-specific)
+        sqlx::query_as(
+            r#"
+            SELECT * FROM mail_provider_settings
+            ORDER BY is_default DESC, created_at ASC
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await?
+    };
 
     let responses: Vec<MailProviderResponse> = providers.into_iter().map(Into::into).collect();
     Ok(Json(responses))
