@@ -215,8 +215,10 @@ async fn get_user_status_by_id(
 async fn update_my_status(
     State(state): State<AppState>,
     auth: MmAuthUser,
-    Json(body): Json<UpdateMyStatusRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let body: UpdateMyStatusRequest = parse_body(&headers, &body, "Invalid status body")?;
     // Handle presence status update if provided
     if let Some(presence) = body.status {
         let dnd_end_time = body.dnd_end_time;
@@ -304,7 +306,8 @@ async fn update_user_status(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(user_id): Path<String>,
-    Json(body): Json<UpdateStatusRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let target_user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
@@ -316,7 +319,8 @@ async fn update_user_status(
         ));
     }
 
-    update_user_status_internal(&state, target_user_id, body.status, body.dnd_end_time).await
+    let req: UpdateStatusRequest = parse_body(&headers, &body, "Invalid status body")?;
+    update_user_status_internal(&state, target_user_id, req.status, req.dnd_end_time).await
 }
 
 /// Internal: Update user presence status
@@ -637,6 +641,32 @@ async fn get_statuses_by_ids(
     }
 
     Ok(Json(serde_json::Value::Object(result)))
+}
+
+/// Parse request body helper - handles both JSON and form-urlencoded, and is
+/// lenient about Content-Type header (for Mattermost mobile compatibility)
+fn parse_body<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: &Bytes,
+    message: &str,
+) -> ApiResult<T> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if content_type.starts_with("application/json") {
+        serde_json::from_slice(body)
+            .map_err(|_| AppError::BadRequest(message.to_string()))
+    } else if content_type.starts_with("application/x-www-form-urlencoded") {
+        serde_urlencoded::from_bytes(body)
+            .map_err(|_| AppError::BadRequest(message.to_string()))
+    } else {
+        // Try JSON first, then fall back to url-encoded (handles missing content-type)
+        serde_json::from_slice(body)
+            .or_else(|_| serde_urlencoded::from_bytes(body))
+            .map_err(|_| AppError::BadRequest(message.to_string()))
+    }
 }
 
 /// Broadcast status change via WebSocket
