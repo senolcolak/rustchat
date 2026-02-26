@@ -3,7 +3,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        ConnectInfo, Query, State,
     },
     http::HeaderMap,
     response::Response,
@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
+use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::realtime::WsEnvelope;
 
 /// Build WebSocket routes
@@ -30,16 +31,50 @@ pub struct WsQuery {
 /// WebSocket upgrade handler
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
     headers: HeaderMap,
 ) -> Response {
+    // Check rate limiting if enabled
+    if state.config.security.rate_limit_enabled {
+        let config = RateLimitConfig::websocket_default();
+        let ip = rate_limit::extract_client_ip(&addr, &headers);
+        
+        match rate_limit::check_rate_limit(&state.redis, &config, &ip).await {
+            Ok(rate_result) if !rate_result.allowed => {
+                tracing::warn!(
+                    ip = %ip,
+                    "Rate limit exceeded for WebSocket connection"
+                );
+                return Response::builder()
+                    .status(429)
+                    .body("Too many connection attempts. Please try again later.".into())
+                    .unwrap();
+            }
+            Err(e) => {
+                tracing::error!("Rate limit check failed: {}", e);
+                // Continue anyway - don't block connections due to Redis issues
+            }
+            _ => {}
+        }
+    }
+
     let requested_protocol = websocket_core::requested_protocol(&headers);
-    let token = websocket_core::resolve_auth_token(
+    
+    // Use security configuration from app config
+    let token_config = if state.config.security.ws_allow_query_token {
+        websocket_core::TokenResolutionConfig::default()
+    } else {
+        websocket_core::TokenResolutionConfig::secure()
+    };
+    
+    let token = websocket_core::resolve_auth_token_with_config(
         query.token.as_deref(),
         &headers,
         requested_protocol.as_deref(),
         true,
+        &token_config,
     );
 
     tracing::info!(

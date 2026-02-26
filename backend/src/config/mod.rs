@@ -5,6 +5,8 @@
 use anyhow::anyhow;
 use serde::Deserialize;
 
+pub mod security;
+
 /// Application configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -22,6 +24,10 @@ pub struct Config {
 
     /// PostgreSQL database URL
     pub database_url: String,
+    
+    /// Database connection pool configuration
+    #[serde(default)]
+    pub db_pool: DbPoolConfig,
 
     /// Redis connection URL
     #[serde(default = "default_redis_url")]
@@ -85,6 +91,10 @@ pub struct Config {
     /// Calls plugin configuration
     #[serde(default)]
     pub calls: CallsConfig,
+    
+    /// Security policy configuration
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Calls plugin configuration
@@ -193,6 +203,141 @@ fn default_stun_servers() -> Vec<String> {
 
 fn default_calls_state_backend() -> String {
     "auto".to_string()
+}
+
+/// Database connection pool configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbPoolConfig {
+    /// Maximum number of connections in the pool
+    #[serde(default = "default_db_pool_max_connections")]
+    pub max_connections: u32,
+    
+    /// Minimum number of connections to maintain
+    #[serde(default = "default_db_pool_min_connections")]
+    pub min_connections: u32,
+    
+    /// Connection timeout in seconds
+    #[serde(default = "default_db_pool_acquire_timeout")]
+    pub acquire_timeout_secs: u64,
+    
+    /// Idle connection timeout in seconds
+    #[serde(default = "default_db_pool_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    
+    /// Max connection lifetime in seconds
+    #[serde(default = "default_db_pool_max_lifetime")]
+    pub max_lifetime_secs: u64,
+}
+
+impl Default for DbPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_db_pool_max_connections(),
+            min_connections: default_db_pool_min_connections(),
+            acquire_timeout_secs: default_db_pool_acquire_timeout(),
+            idle_timeout_secs: default_db_pool_idle_timeout(),
+            max_lifetime_secs: default_db_pool_max_lifetime(),
+        }
+    }
+}
+
+fn default_db_pool_max_connections() -> u32 {
+    // Default: 20 connections (increased from conservative defaults)
+    // Adjust based on your database capacity and load
+    std::env::var("DB_POOL_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+}
+
+fn default_db_pool_min_connections() -> u32 {
+    // Default: 5 connections maintained
+    std::env::var("DB_POOL_MIN_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+fn default_db_pool_acquire_timeout() -> u64 {
+    // Default: 3 seconds to acquire a connection
+    std::env::var("DB_POOL_ACQUIRE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+fn default_db_pool_idle_timeout() -> u64 {
+    // Default: 10 minutes
+    std::env::var("DB_POOL_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600)
+}
+
+fn default_db_pool_max_lifetime() -> u64 {
+    // Default: 30 minutes
+    std::env::var("DB_POOL_MAX_LIFETIME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800)
+}
+
+/// Security policy configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    /// Allow WebSocket authentication via query parameter (token=...)
+    /// Set to false in production to prevent token leakage via logs/referrers
+    #[serde(default = "default_ws_allow_query_token")]
+    pub ws_allow_query_token: bool,
+    
+    /// OAuth token delivery method: "query" (legacy/insecure) or "cookie" (secure)
+    #[serde(default = "default_oauth_token_delivery")]
+    pub oauth_token_delivery: String,
+    
+    /// Enable global rate limiting for auth endpoints
+    #[serde(default = "default_rate_limit_enabled")]
+    pub rate_limit_enabled: bool,
+    
+    /// Rate limit: requests per minute per IP for auth endpoints
+    #[serde(default = "default_rate_limit_auth_per_minute")]
+    pub rate_limit_auth_per_minute: u32,
+    
+    /// Rate limit: WebSocket connection attempts per minute per IP
+    #[serde(default = "default_rate_limit_ws_per_minute")]
+    pub rate_limit_ws_per_minute: u32,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            ws_allow_query_token: default_ws_allow_query_token(),
+            oauth_token_delivery: default_oauth_token_delivery(),
+            rate_limit_enabled: default_rate_limit_enabled(),
+            rate_limit_auth_per_minute: default_rate_limit_auth_per_minute(),
+            rate_limit_ws_per_minute: default_rate_limit_ws_per_minute(),
+        }
+    }
+}
+
+fn default_ws_allow_query_token() -> bool {
+    // Default to true for backward compatibility, but production should set to false
+    true
+}
+
+fn default_oauth_token_delivery() -> String {
+    "query".to_string() // TODO: Change to "cookie" in next major version
+}
+
+fn default_rate_limit_enabled() -> bool {
+    true
+}
+
+fn default_rate_limit_auth_per_minute() -> u32 {
+    10
+}
+
+fn default_rate_limit_ws_per_minute() -> u32 {
+    30
 }
 
 /// Cloudflare Turnstile configuration
@@ -348,7 +493,41 @@ impl Config {
         let config = builder.build()?;
         let mut settings: Config = config.try_deserialize()?;
         settings.apply_calls_env_overrides()?;
+        
+        // Validate security settings
+        settings.validate_security()?;
+        
         Ok(settings)
+    }
+    
+    /// Validate security-critical configuration
+    fn validate_security(&self) -> anyhow::Result<()> {
+        let validation = security::validate_secrets(self);
+        
+        // Log all warnings
+        for warning in &validation.warnings {
+            tracing::warn!("Security configuration warning: {}", warning);
+        }
+        
+        if self.is_production() {
+            // In production, fail fast on security issues
+            if !validation.is_valid {
+                for error in &validation.errors {
+                    tracing::error!("Security configuration error: {}", error);
+                }
+                anyhow::bail!(
+                    "Security validation failed with {} error(s). Fix the issues above before starting in production mode.",
+                    validation.errors.len()
+                );
+            }
+        } else {
+            // In development, log errors but continue
+            for error in &validation.errors {
+                tracing::warn!("Security configuration issue (allowed in dev): {}", error);
+            }
+        }
+        
+        Ok(())
     }
 
     pub fn is_production(&self) -> bool {

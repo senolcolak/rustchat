@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use super::AppState;
 use crate::auth::{create_token, hash_password, verify_password, AuthUser};
 use crate::error::{ApiResult, AppError};
+use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{AuthResponse, CreateUser, LoginRequest, User, UserResponse};
 use crate::services::password_reset::{PasswordResetError, request_password_reset, reset_password, validate_token, send_password_setup_email};
 use crate::services::turnstile;
@@ -60,6 +61,29 @@ async fn register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(input): Json<CreateUser>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Check rate limiting if enabled
+    if state.config.security.rate_limit_enabled {
+        let config = RateLimitConfig {
+            max_requests: 5, // Stricter limit for registration
+            window_seconds: 3600, // Per hour
+            key_prefix: "ratelimit:register".to_string(),
+        };
+        let ip = addr.ip().to_string();
+        
+        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
+        
+        if !rate_result.allowed {
+            tracing::warn!(
+                ip = %ip,
+                email = %input.email,
+                "Rate limit exceeded for registration"
+            );
+            return Err(AppError::TooManyRequests(
+                "Too many registration attempts from this IP. Please try again later.".to_string()
+            ));
+        }
+    }
+
     // Check honeypot - if filled, likely a bot
     if let Some(ref honeypot) = input.honeypot {
         if !honeypot.is_empty() {
@@ -257,8 +281,54 @@ async fn register(
 /// Login with email and password
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(input): Json<LoginRequest>,
 ) -> ApiResult<Json<AuthResponse>> {
+    // Check rate limiting if enabled
+    if state.config.security.rate_limit_enabled {
+        let config = RateLimitConfig::auth_default();
+        let ip = addr.ip().to_string();
+        
+        // Try to find user ID for user-based limiting
+        let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL"
+        )
+        .bind(&input.email)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        
+        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
+        
+        if !rate_result.allowed {
+            tracing::warn!(
+                ip = %ip,
+                email = %input.email,
+                "Rate limit exceeded for login"
+            );
+            return Err(AppError::TooManyRequests(
+                "Too many login attempts. Please try again later.".to_string()
+            ));
+        }
+        
+        // Also check user-based rate limit if user exists
+        if let Some(uid) = user_id {
+            let user_key = format!("user:{}", uid);
+            let user_result = rate_limit::check_rate_limit(&state.redis, &config, &user_key).await?;
+            
+            if !user_result.allowed {
+                tracing::warn!(
+                    user_id = %uid,
+                    "Rate limit exceeded for user login"
+                );
+                return Err(AppError::TooManyRequests(
+                    "Too many login attempts. Please try again later.".to_string()
+                ));
+            }
+        }
+    }
+
     // Find user by email
     let user: User = sqlx::query_as(
         "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",

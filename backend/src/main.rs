@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting rustchat server v{}", env!("CARGO_PKG_VERSION"));
 
     // Connect to database and run migrations
-    let db_pool = db::connect(&config.database_url).await?;
+    let db_pool = db::connect_with_config(&config.database_url, &config.db_pool).await?;
     info!("Database connected and migrations applied");
 
     // Seed admin user if configured

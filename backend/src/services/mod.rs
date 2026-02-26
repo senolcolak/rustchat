@@ -5,6 +5,7 @@ pub mod email_provider;
 pub mod email_service;
 pub mod email_verification;
 pub mod mirotalk;
+pub mod oauth_token_exchange;
 pub mod password_reset;
 pub mod oidc_discovery;
 pub mod posts;

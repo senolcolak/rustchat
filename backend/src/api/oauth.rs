@@ -8,7 +8,7 @@
 use axum::{
     extract::{Path, Query, State},
     response::Redirect,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use deadpool_redis::redis::AsyncCommands;
@@ -19,6 +19,7 @@ use super::AppState;
 use crate::crypto;
 use crate::error::{ApiResult, AppError};
 use crate::models::{OAuthProviderInfo, SsoConfig, SsoProviderType};
+use crate::services::oauth_token_exchange::create_exchange_code;
 use crate::services::oidc_discovery::{find_signing_key, OidcDiscoveryService};
 
 const OAUTH_STATE_PREFIX: &str = "rustchat:oauth:state:";
@@ -134,6 +135,77 @@ pub fn router() -> Router<AppState> {
         .route("/oauth2/{provider_key}/login", get(oauth_login))
         .route("/oauth2/{provider_key}/callback", get(oauth_callback))
         .route("/oauth2/providers", get(list_providers))
+        .route("/oauth2/exchange", post(exchange_token))
+}
+
+/// Request to exchange a code for a token
+#[derive(Debug, serde::Deserialize)]
+pub struct ExchangeRequest {
+    code: String,
+}
+
+/// Response containing the JWT token
+#[derive(Debug, serde::Serialize)]
+pub struct ExchangeResponse {
+    token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+/// Exchange a one-time code for a JWT token
+async fn exchange_token(
+    State(state): State<AppState>,
+    Json(input): Json<ExchangeRequest>,
+) -> ApiResult<Json<ExchangeResponse>> {
+    use crate::services::oauth_token_exchange::{exchange_code, ExchangeError};
+
+    // Validate code length to prevent unnecessary Redis calls
+    if input.code.len() < 10 {
+        return Err(AppError::BadRequest("Invalid exchange code".to_string()));
+    }
+
+    // Exchange the code for user data
+    let payload = match exchange_code(&state.redis, &input.code).await {
+        Ok(payload) => payload,
+        Err(ExchangeError::InvalidCode) => {
+            return Err(AppError::BadRequest(
+                "Invalid or already used exchange code".to_string()
+            ));
+        }
+        Err(ExchangeError::CodeExpired) => {
+            return Err(AppError::BadRequest(
+                "Exchange code has expired".to_string()
+            ));
+        }
+        Err(ExchangeError::Internal(msg)) => {
+            tracing::error!("Exchange code error: {}", msg);
+            return Err(AppError::Internal(
+                "Failed to process exchange code".to_string()
+            ));
+        }
+    };
+
+    // Generate JWT token
+    let token = crate::auth::create_token(
+        payload.user_id,
+        &payload.email,
+        &payload.role,
+        payload.org_id,
+        &state.jwt_secret,
+        state.jwt_expiry_hours,
+    ).map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
+
+    tracing::info!(
+        user_id = %payload.user_id,
+        email = %payload.email,
+        "OAuth token exchanged successfully"
+    );
+
+    Ok(Json(ExchangeResponse {
+        token,
+        token_type: "Bearer".to_string(),
+        expires_in: state.jwt_expiry_hours * 3600,
+    }))
 }
 
 /// Generate Redis key for OAuth state
@@ -167,6 +239,16 @@ fn append_token_query(path: &str, token: &str) -> String {
         format!("{}&token={}", path, encoded_token)
     } else {
         format!("{}?token={}", path, encoded_token)
+    }
+}
+
+/// Append exchange code to redirect URL
+fn append_exchange_code(path: &str, code: &str) -> String {
+    let encoded_code = urlencoding::encode(code);
+    if path.contains('?') {
+        format!("{}&code={}", path, encoded_code)
+    } else {
+        format!("{}?code={}", path, encoded_code)
     }
 }
 
@@ -581,26 +663,45 @@ async fn oauth_callback(
     // Find or create user
     let _user = find_or_create_user(&state, &email, &user_info, &config, &provider_key).await?;
 
-    // Generate JWT
-    let token = crate::auth::create_token(
-        _user.id,
-        &_user.email,
-        &_user.role,
-        _user.org_id,
-        &state.jwt_secret,
-        state.jwt_expiry_hours,
-    )
-    .map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
+    // Determine token delivery method
+    let use_secure_delivery = state.config.security.oauth_token_delivery == "cookie";
 
-    // Mobile apps need custom URL scheme redirect
-    // Change 'rustchat' to your app's URL scheme
-    let redirect_url = if stored_state.is_mobile {
-        format!("rustchat://oauth/complete?token={}", urlencoding::encode(&token))
+    let redirect_url = if use_secure_delivery && !stored_state.is_mobile {
+        // Secure mode: use one-time exchange code
+        let exchange_code = create_exchange_code(
+            &state.redis,
+            _user.id,
+            _user.email.clone(),
+            _user.role.clone(),
+            _user.org_id,
+        ).await?;
+        
+        tracing::info!(
+            user_id = %_user.id,
+            "OAuth callback using secure exchange code"
+        );
+        
+        append_exchange_code(&stored_state.redirect_after, &exchange_code)
     } else {
-        append_token_query(&stored_state.redirect_after, &token)
+        // Legacy mode: direct token in URL (for mobile apps or when configured)
+        let token = crate::auth::create_token(
+            _user.id,
+            &_user.email,
+            &_user.role,
+            _user.org_id,
+            &state.jwt_secret,
+            state.jwt_expiry_hours,
+        )
+        .map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
+
+        if stored_state.is_mobile {
+            format!("rustchat://oauth/complete?token={}", urlencoding::encode(&token))
+        } else {
+            append_token_query(&stored_state.redirect_after, &token)
+        }
     };
 
-    // Redirect with token
+    // Redirect with code or token
     Ok(Redirect::temporary(&redirect_url))
 }
 
