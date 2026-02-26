@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_t
 
 INSERT INTO email_template_families (id, key, name, description, workflow_key, is_system) VALUES
     ('00000000-0000-0000-0000-000000000106'::uuid, 'password_reset_default', 'Default Password Reset', 'Standard password reset template', 'password_reset', true)
-ON CONFLICT (tenant_id, key) DO NOTHING;
+ON CONFLICT (id) DO NOTHING;
 
 UPDATE notification_workflows 
     SET selected_template_family_id = '00000000-0000-0000-0000-000000000106'::uuid 
