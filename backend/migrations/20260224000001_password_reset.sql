@@ -44,7 +44,7 @@ SELECT
     'published'::varchar as status,
     'en'::varchar as locale,
     'Reset your password' as subject,
-    E'Hello {{username}},
+    E'Hello {{user_name}},
 
 We received a request to reset your password. Click the link below to create a new password:
 
@@ -57,7 +57,7 @@ If you did not request this password reset, please ignore this email. Your passw
 Best regards,
 {{site_name}}' as body_text,
     E'<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-<h2>Hello {{username}},</h2>
+<h2>Hello {{user_name}},</h2>
 <p>We received a request to reset your password. Click the link below to create a new password:</p>
 <p style="margin: 20px 0;">
 <a href="{{reset_link}}" style="background: #00FFC2; color: #121213; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">Reset Password</a>
@@ -67,7 +67,7 @@ Best regards,
 <br>
 <p>Best regards,<br>{{site_name}}</p>
 </body></html>' as body_html,
-    '[{"name":"username","required":true,"description":"User username"},{"name":"email","required":true,"description":"User email"},{"name":"reset_link","required":true,"description":"Password reset URL"},{"name":"expiry_minutes","required":true,"description":"Expiry in minutes"},{"name":"site_name","required":true,"description":"Site name"}]'::jsonb as variables_schema_json,
+    '[{"name":"user_name","required":true,"description":"User display name"},{"name":"email","required":true,"description":"User email"},{"name":"reset_link","required":true,"description":"Password reset URL"},{"name":"expiry_minutes","required":true,"description":"Expiry in minutes"},{"name":"site_name","required":true,"description":"Site name"}]'::jsonb as variables_schema_json,
     false as is_compiled_from_mjml,
     NULL::uuid as created_by,
     NOW() as published_at,

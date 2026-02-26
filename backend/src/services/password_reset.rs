@@ -285,7 +285,7 @@ pub async fn request_password_reset(
             
             let email_service = EmailService::new(db.clone());
             let payload = serde_json::json!({
-                "username": username,
+                "user_name": username,
                 "email": user_email,
                 "reset_link": reset_link,
                 "expiry_minutes": TOKEN_VALIDITY_MINUTES,
@@ -561,7 +561,7 @@ pub async fn request_password_setup(
     
     let email_service = EmailService::new(db.clone());
     let payload = serde_json::json!({
-        "username": username,
+        "user_name": username,
         "email": email,
         "setup_link": setup_link,
         "expiry_minutes": TOKEN_VALIDITY_MINUTES,
@@ -639,7 +639,7 @@ pub async fn send_password_setup_email(
     
     let email_service = EmailService::new(db.clone());
     let payload = serde_json::json!({
-        "username": username,
+        "user_name": username,
         "email": email,
         "setup_link": setup_link,
         "expiry_minutes": TOKEN_VALIDITY_MINUTES,
