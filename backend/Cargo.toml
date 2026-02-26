@@ -35,6 +35,7 @@ dotenvy = "0.15"
 # Logging & Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = { version = "0.13", features = ["process"] }
 
 # Auth
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }

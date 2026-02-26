@@ -1,43 +1,122 @@
 # Contributing to rustchat
 
-Thank you for your interest in contributing to rustchat!
+Thank you for contributing to rustchat.
+
+## Prerequisites
+
+- Rust `1.92+` (see `backend/Cargo.toml`)
+- Node.js `24+` (see `frontend/package.json` engines)
+- Docker + Docker Compose
 
 ## Development Setup
 
-1. Install Rust 1.93+ via [rustup](https://rustup.rs/)
-2. Install Docker and Docker Compose
-3. Clone the repository
-4. Run `docker compose up -d` for dependencies
-5. Copy `.env.example` to `.env`
-6. Run `cargo build` in the `backend/` directory
+1. Clone your fork and enter the repository.
+2. Copy environment defaults:
+   ```bash
+   cp .env.example .env
+   ```
+3. Set required secrets in `.env`:
+   - `RUSTCHAT_JWT_SECRET`
+   - `RUSTCHAT_ENCRYPTION_KEY`
+4. Start local dependencies:
+   ```bash
+   docker compose up -d postgres redis rustfs
+   ```
+5. Run backend and frontend locally (separate terminals):
+   ```bash
+   cd backend && cargo run
+   cd frontend && npm ci && npm run dev
+   ```
 
-## Code Style
+For full containerized startup, use:
 
-- Run `cargo fmt` before committing
-- Run `cargo clippy` and fix warnings
-- Write tests for new functionality
-- Keep functions focused and small
+```bash
+docker compose up -d --build
+```
+
+## Project Structure
+
+- `backend/`: Rust API server and websocket layer
+- `frontend/`: Vue 3 + TypeScript client
+- `push-proxy/`: push notification proxy service
+- `scripts/`: smoke and utility scripts
+- `tools/mm-compat/`: API compatibility tooling
+
+## Code Quality Requirements
+
+Before opening a PR, run these checks.
+
+### Backend
+
+```bash
+cd backend
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo check
+cargo test --no-fail-fast -- --nocapture
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+### Compatibility Smoke Tests
+
+Run these when touching v4 API/websocket/compatibility-sensitive behavior:
+
+```bash
+./scripts/mm_compat_smoke.sh
+./scripts/mm_mobile_smoke.sh
+```
+
+## Coding Guidelines
+
+- Keep code and documentation in English.
+- Keep functions focused and avoid unrelated refactors in the same PR.
+- Add or update tests for bug fixes and behavior changes whenever feasible.
+- Preserve API and websocket contract behavior unless the change explicitly targets it.
 
 ## Pull Request Process
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Make your changes
-4. Run tests (`cargo test`)
-5. Commit with clear messages
-6. Push and open a Pull Request
+1. Create a branch from `main` (for example: `feature/my-change` or `fix/my-change`).
+2. Make focused changes with clear commits.
+3. Run the required checks listed above.
+4. Open a PR with:
+   - concise summary
+   - verification steps/commands run
+   - compatibility impact (if any)
+5. Address review feedback and keep history clean.
 
 ## Commit Messages
 
-Follow conventional commits:
+Use Conventional Commit style:
 
-```
+```text
 feat: add user registration endpoint
 fix: correct JWT expiry calculation
 docs: update API documentation
 test: add channel permission tests
 ```
 
-## Questions?
+## Compatibility-Sensitive Changes
 
-Open an issue or start a discussion.
+If your change affects API v4 contracts, mobile/desktop client compatibility, websocket events, or calls behavior:
+
+1. Analyze upstream behavior first in `../mattermost` and `../mattermost-mobile`.
+2. Document findings in a new folder under `previous-analyses/YYYY-MM-DD-<topic>/`.
+3. Use templates from `previous-analyses/_TEMPLATE/`.
+
+## Security Notes
+
+- Never commit secrets, credentials, or private keys.
+- For production hardening guidance, see:
+  - `docs/security-deployment-guide.md`
+  - `docs/security-zero-trust-guide.md`
+
+## Questions
+
+Open an issue or start a discussion in the repository.

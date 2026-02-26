@@ -25,7 +25,9 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    token: Option<String>,
+    // Note: token in query is no longer supported for security
+    // Use Authorization header or Sec-WebSocket-Protocol instead
+    _legacy_token: Option<String>,
 }
 
 /// WebSocket upgrade handler
@@ -33,7 +35,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
-    Query(query): Query<WsQuery>,
+    Query(_query): Query<WsQuery>,
     headers: HeaderMap,
 ) -> Response {
     // Check rate limiting if enabled
@@ -62,19 +64,10 @@ async fn ws_handler(
 
     let requested_protocol = websocket_core::requested_protocol(&headers);
     
-    // Use security configuration from app config
-    let token_config = if state.config.security.ws_allow_query_token {
-        websocket_core::TokenResolutionConfig::default()
-    } else {
-        websocket_core::TokenResolutionConfig::secure()
-    };
-    
-    let token = websocket_core::resolve_auth_token_with_config(
-        query.token.as_deref(),
+    // ALWAYS use secure mode - never accept token from query params
+    let token = websocket_core::resolve_auth_token_secure(
         &headers,
         requested_protocol.as_deref(),
-        true,
-        &token_config,
     );
 
     tracing::info!(

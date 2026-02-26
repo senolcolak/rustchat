@@ -74,8 +74,20 @@ async fn main() -> anyhow::Result<()> {
         config.s3_secret_key.clone(),
         config.s3_region.clone(),
     );
-    let _ = s3_client.ensure_bucket().await;
-    info!("S3 client initialized");
+    
+    // Ensure S3 bucket exists - fail fast if storage is misconfigured
+    match s3_client.ensure_bucket().await {
+        Ok(()) => info!("S3 bucket verified/created successfully"),
+        Err(e) => {
+            // In production, storage is critical - fail startup
+            if config.is_production() {
+                anyhow::bail!("Failed to initialize S3 storage: {}. Check your S3 configuration.", e);
+            } else {
+                // In dev, log warning but continue
+                tracing::warn!("S3 bucket initialization failed (dev mode): {}", e);
+            }
+        }
+    }
 
     // Spawn background jobs
     rustchat::jobs::spawn_retention_job(db_pool.clone());

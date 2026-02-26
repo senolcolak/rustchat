@@ -232,16 +232,6 @@ fn sanitize_redirect_path(redirect_uri: Option<String>) -> String {
     }
 }
 
-/// Append token to redirect URL
-fn append_token_query(path: &str, token: &str) -> String {
-    let encoded_token = urlencoding::encode(token);
-    if path.contains('?') {
-        format!("{}&token={}", path, encoded_token)
-    } else {
-        format!("{}?token={}", path, encoded_token)
-    }
-}
-
 /// Append exchange code to redirect URL
 fn append_exchange_code(path: &str, code: &str) -> String {
     let encoded_code = urlencoding::encode(code);
@@ -663,45 +653,28 @@ async fn oauth_callback(
     // Find or create user
     let _user = find_or_create_user(&state, &email, &user_info, &config, &provider_key).await?;
 
-    // Determine token delivery method
-    let use_secure_delivery = state.config.security.oauth_token_delivery == "cookie";
-
-    let redirect_url = if use_secure_delivery && !stored_state.is_mobile {
-        // Secure mode: use one-time exchange code
-        let exchange_code = create_exchange_code(
-            &state.redis,
-            _user.id,
-            _user.email.clone(),
-            _user.role.clone(),
-            _user.org_id,
-        ).await?;
-        
-        tracing::info!(
-            user_id = %_user.id,
-            "OAuth callback using secure exchange code"
-        );
-        
-        append_exchange_code(&stored_state.redirect_after, &exchange_code)
+    // ALWAYS use secure exchange code - never put token in URL
+    let exchange_code = create_exchange_code(
+        &state.redis,
+        _user.id,
+        _user.email.clone(),
+        _user.role.clone(),
+        _user.org_id,
+    ).await?;
+    
+    tracing::info!(
+        user_id = %_user.id,
+        "OAuth callback using secure exchange code"
+    );
+    
+    let redirect_url = if stored_state.is_mobile {
+        // Mobile apps also use exchange codes
+        format!("rustchat://oauth/complete?code={}", urlencoding::encode(&exchange_code))
     } else {
-        // Legacy mode: direct token in URL (for mobile apps or when configured)
-        let token = crate::auth::create_token(
-            _user.id,
-            &_user.email,
-            &_user.role,
-            _user.org_id,
-            &state.jwt_secret,
-            state.jwt_expiry_hours,
-        )
-        .map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
-
-        if stored_state.is_mobile {
-            format!("rustchat://oauth/complete?token={}", urlencoding::encode(&token))
-        } else {
-            append_token_query(&stored_state.redirect_after, &token)
-        }
+        append_exchange_code(&stored_state.redirect_after, &exchange_code)
     };
 
-    // Redirect with code or token
+    // Redirect with exchange code (never token)
     Ok(Redirect::temporary(&redirect_url))
 }
 

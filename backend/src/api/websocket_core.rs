@@ -165,30 +165,33 @@ pub async fn enforce_connection_limit(
 ) -> Result<(), ConnectionLimitExceeded> {
     let max = get_max_simultaneous_connections(state).await;
     
-    // Check cluster-aware connection limit
-    match crate::realtime::check_cluster_connection_limit(state, user_id, max).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            // Get the actual count for error reporting
-            let current = match crate::realtime::get_global_connection_count(state, user_id).await {
-                Ok(count) => count,
-                Err(_) => state.ws_hub.user_connection_count(user_id).await,
-            };
-            Err(ConnectionLimitExceeded { current, max })
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id = %user_id,
-                error = %e,
-                "Cluster limit check failed, falling back to local-only"
-            );
-            // Fallback to local-only check
-            let current = state.ws_hub.user_connection_count(user_id).await;
+    // ALWAYS use cluster-aware connection count from Redis
+    match crate::realtime::get_global_connection_count(state, user_id).await {
+        Ok(current) => {
             if current >= max {
+                tracing::warn!(
+                    user_id = %user_id,
+                    current = current,
+                    max = max,
+                    "Connection limit exceeded (cluster-wide)"
+                );
                 Err(ConnectionLimitExceeded { current, max })
             } else {
                 Ok(())
             }
+        }
+        Err(e) => {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "Failed to get cluster connection count - cannot enforce limit"
+            );
+            // When Redis is unavailable, we cannot safely allow connections
+            // as we don't know the true count. Fail closed.
+            Err(ConnectionLimitExceeded { 
+                current: max, // Assume at limit when we can't verify
+                max 
+            })
         }
     }
 }
@@ -284,7 +287,7 @@ pub fn resolve_auth_token_with_config(
     allow_protocol_fallback: bool,
     config: &TokenResolutionConfig,
 ) -> Option<String> {
-    // Try query parameter token (if allowed)
+    // Try query parameter token (if allowed) - DEPRECATED, will be removed
     if config.allow_query_token {
         if let Some(token) = query_token.and_then(normalize_auth_token) {
             return Some(token);
@@ -308,6 +311,30 @@ pub fn resolve_auth_token_with_config(
             if protocol.len() > 20 || protocol.contains('.') {
                 return Some(protocol);
             }
+        }
+    }
+
+    None
+}
+
+/// Resolve auth token using ONLY secure methods (no query params)
+/// This is the recommended method for production use
+pub fn resolve_auth_token_secure(
+    headers: &HeaderMap,
+    protocol_token: Option<&str>,
+) -> Option<String> {
+    // Only Authorization header - never query params
+    if let Some(auth_header) = headers.get("Authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(token) = normalize_auth_token(auth_header) {
+            return Some(token);
+        }
+    }
+
+    // Sec-WebSocket-Protocol header as fallback
+    if let Some(protocol) = protocol_token.and_then(normalize_auth_token) {
+        // Only accept if it looks like a JWT (contains dot and reasonable length)
+        if protocol.len() > 20 && protocol.contains('.') {
+            return Some(protocol);
         }
     }
 

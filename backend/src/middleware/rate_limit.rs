@@ -159,7 +159,7 @@ pub fn extract_client_ip(addr: &SocketAddr, headers: &axum::http::HeaderMap) -> 
     addr.ip().to_string()
 }
 
-/// Rate limiting layer for Tower
+/// Rate limiting layer for Tower - requires Redis
 #[derive(Debug, Clone)]
 pub struct RateLimitLayer {
     config: RateLimitConfig,
@@ -182,7 +182,9 @@ impl<S> Layer<S> for RateLimitLayer {
     }
 }
 
-/// Rate limiting service
+/// Rate limiting service - placeholder for global middleware
+/// Note: Full implementation requires AppState access for Redis
+/// Currently rate limiting is implemented at handler level
 #[derive(Debug, Clone)]
 pub struct RateLimitService<S> {
     inner: S,
@@ -206,12 +208,11 @@ where
     }
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
-        let _config = self.config.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            // Note: Full implementation would check Redis here
-            // For now, pass through and let handler-level limits work
+            // Global rate limiting is implemented at handler level
+            // due to Redis dependency requirement
             inner.call(req).await
         })
     }

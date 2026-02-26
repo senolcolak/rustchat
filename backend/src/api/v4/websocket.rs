@@ -44,8 +44,9 @@ use crate::realtime::{
 /// WebSocket query parameters
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    /// Authentication token
-    pub token: Option<String>,
+    /// Authentication token - DEPRECATED, do not use
+    /// Use Authorization header or Sec-WebSocket-Protocol instead
+    pub _token: Option<String>,
     /// Connection ID for session resumption
     pub connection_id: Option<String>,
     /// Last sequence number received by client
@@ -101,19 +102,10 @@ pub async fn handle_websocket(
         }
     };
 
-    // Use security configuration from app config
-    let token_config = if state.config.security.ws_allow_query_token {
-        websocket_core::TokenResolutionConfig::default()
-    } else {
-        websocket_core::TokenResolutionConfig::secure()
-    };
-    
-    let token = websocket_core::resolve_auth_token_with_config(
-        query.token.as_deref(),
+    // ALWAYS use secure token resolution - never accept token from query params
+    let token = websocket_core::resolve_auth_token_secure(
         &headers,
         requested_protocol.as_deref(),
-        true,
-        &token_config,
     );
     let sequence_number = query.sequence_number;
     let connection_id = query.connection_id.and_then(|value| {
