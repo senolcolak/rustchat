@@ -35,6 +35,10 @@ services:
       - TURN_SERVER_CREDENTIAL=${TURN_SERVER_CREDENTIAL:-}
       # Push Notification Proxy
       - RUSTCHAT_PUSH_PROXY_URL=${RUSTCHAT_PUSH_PROXY_URL:-http://push-proxy:3000}
+      # Cloudflare Turnstile (Bot Protection)
+      - RUSTCHAT_TURNSTILE_ENABLED=${RUSTCHAT_TURNSTILE_ENABLED:-false}
+      - RUSTCHAT_TURNSTILE_SITE_KEY=${RUSTCHAT_TURNSTILE_SITE_KEY:-}
+      - RUSTCHAT_TURNSTILE_SECRET_KEY=${RUSTCHAT_TURNSTILE_SECRET_KEY:-}
     ports:
       - "3000:3000"
       - "8443:8443/tcp" # WebRTC SFU TCP fallback

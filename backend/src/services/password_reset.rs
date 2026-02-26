@@ -251,7 +251,7 @@ pub async fn request_password_reset(
         r#"
         INSERT INTO password_reset_tokens 
             (token_hash, user_id, email, purpose, expires_at, created_ip, user_agent)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
         "#,
     )
     .bind(&token_hash)
@@ -525,7 +525,7 @@ pub async fn request_password_setup(
         r#"
         INSERT INTO password_reset_tokens 
             (token_hash, user_id, email, purpose, expires_at, created_ip, user_agent)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
         "#,
     )
     .bind(&token_hash)
@@ -618,7 +618,7 @@ pub async fn send_password_setup_email(
         r#"
         INSERT INTO password_reset_tokens 
             (token_hash, user_id, email, purpose, expires_at, created_ip, user_agent)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
         "#,
     )
     .bind(&token_hash)
