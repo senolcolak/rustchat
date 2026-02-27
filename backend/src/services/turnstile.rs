@@ -2,8 +2,20 @@
 //!
 //! Provides bot protection for public forms like registration and password reset.
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
+
+use crate::middleware::reliability::{
+    with_resilience, CircuitBreaker, CircuitError, RetryCondition, RetryConfig,
+};
+
+static TURNSTILE_CIRCUIT_BREAKER: Lazy<std::sync::Arc<CircuitBreaker>> =
+    Lazy::new(|| CircuitBreaker::default_config("turnstile"));
+static TURNSTILE_RETRY_CONFIG: Lazy<RetryConfig> = Lazy::new(|| RetryConfig {
+    retry_if: RetryCondition::Default,
+    ..Default::default()
+});
 
 /// Turnstile verification error
 #[derive(Debug, Clone, PartialEq)]
@@ -69,25 +81,53 @@ pub async fn verify_token(
         return Err(TurnstileError::InvalidToken);
     }
 
-    let client = reqwest::Client::new();
-    let request = VerifyRequest {
-        secret: secret_key,
-        response: token,
-        remoteip: remote_ip,
-    };
-
-    let response = client
-        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
-        .form(&request)
-        .send()
-        .await
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
         .map_err(|e| {
-            error!("Turnstile verification request failed: {}", e);
+            error!("Failed to build Turnstile HTTP client: {}", e);
             TurnstileError::InternalError
         })?;
+    let secret = secret_key.to_string();
+    let response_token = token.to_string();
+    let remote_ip_owned = remote_ip.map(|ip| ip.to_string());
+
+    let response = with_resilience(&TURNSTILE_CIRCUIT_BREAKER, &TURNSTILE_RETRY_CONFIG, {
+        let client = client.clone();
+        let secret = secret.clone();
+        let response_token = response_token.clone();
+        let remote_ip_owned = remote_ip_owned.clone();
+        move || {
+            let client = client.clone();
+            let secret = secret.clone();
+            let response_token = response_token.clone();
+            let remote_ip_owned = remote_ip_owned.clone();
+            async move {
+                let request = VerifyRequest {
+                    secret: &secret,
+                    response: &response_token,
+                    remoteip: remote_ip_owned.as_deref(),
+                };
+                client
+                    .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+                    .form(&request)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        error!("Turnstile verification request failed: {}", e);
+                        TurnstileError::InternalError
+                    })
+            }
+        }
+    })
+    .await
+    .map_err(map_circuit_error)?;
 
     if !response.status().is_success() {
-        error!("Turnstile returned non-success status: {}", response.status());
+        error!(
+            "Turnstile returned non-success status: {}",
+            response.status()
+        );
         return Err(TurnstileError::InternalError);
     }
 
@@ -102,7 +142,7 @@ pub async fn verify_token(
     } else {
         let error_codes = result.error_codes.unwrap_or_default();
         warn!("Turnstile verification failed: {:?}", error_codes);
-        
+
         // Map error codes to our error types
         for code in error_codes {
             return Err(match code.as_str() {
@@ -119,7 +159,17 @@ pub async fn verify_token(
 
 /// Check if Turnstile is properly configured
 pub fn is_configured(secret_key: &str) -> bool {
-    !secret_key.is_empty()
+    !secret_key.trim().is_empty()
+}
+
+fn map_circuit_error(err: CircuitError<TurnstileError>) -> TurnstileError {
+    match err {
+        CircuitError::Open => {
+            error!("Turnstile circuit breaker is open");
+            TurnstileError::Timeout
+        }
+        CircuitError::Inner(inner) => inner,
+    }
 }
 
 #[cfg(test)]

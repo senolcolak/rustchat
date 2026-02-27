@@ -81,7 +81,9 @@ impl EmailWorker {
             self.config.poll_interval_secs, self.config.batch_size
         );
 
-        let mut interval = interval(tokio::time::Duration::from_secs(self.config.poll_interval_secs));
+        let mut interval = interval(tokio::time::Duration::from_secs(
+            self.config.poll_interval_secs,
+        ));
 
         loop {
             interval.tick().await;
@@ -135,8 +137,9 @@ impl EmailWorker {
 
             // Small delay to respect rate limits
             tokio::time::sleep(tokio::time::Duration::from_millis(
-                (1000.0 / self.config.rate_limit_per_second) as u64
-            )).await;
+                (1000.0 / self.config.rate_limit_per_second) as u64,
+            ))
+            .await;
         }
 
         Ok(stats)
@@ -174,15 +177,18 @@ impl EmailWorker {
     /// Process a single email
     async fn process_email(&self, email: EmailOutbox) -> Result<(), WorkerError> {
         // Mark as sending
-        self.update_status(email.id, EmailStatus::Sending, None, None).await?;
+        self.update_status(email.id, EmailStatus::Sending, None, None)
+            .await?;
 
         // Get provider
-        let provider = self.get_or_create_provider(email.provider_id, email.tenant_id).await?;
+        let provider = self
+            .get_or_create_provider(email.provider_id, email.tenant_id)
+            .await?;
 
         // Build addresses
         let from = EmailAddress::with_name(
             &email.recipient_email, // This should come from provider settings
-            "RustChat"
+            "RustChat",
         );
         let to = EmailAddress::new(&email.recipient_email);
 
@@ -199,7 +205,10 @@ impl EmailWorker {
             Ok(result) => {
                 // Success
                 self.mark_sent(email.id, &result.server_response).await?;
-                info!("Email sent: id={}, recipient={}", email.id, email.recipient_email);
+                info!(
+                    "Email sent: id={}, recipient={}",
+                    email.id, email.recipient_email
+                );
                 Ok(())
             }
             Err(e) => {
@@ -214,7 +223,8 @@ impl EmailWorker {
                         self.config.retry_max_delay_secs,
                     );
 
-                    self.schedule_retry(email.id, &error_category, &error_msg, next_attempt).await?;
+                    self.schedule_retry(email.id, &error_category, &error_msg, next_attempt)
+                        .await?;
                     warn!(
                         "Email failed, scheduled retry: id={}, attempt={}/{}, next_attempt={}",
                         email.id,
@@ -224,7 +234,8 @@ impl EmailWorker {
                     );
                 } else {
                     // Max retries exceeded
-                    self.mark_failed(email.id, &error_category, &error_msg).await?;
+                    self.mark_failed(email.id, &error_category, &error_msg)
+                        .await?;
                     error!(
                         "Email failed permanently: id={}, attempts={}, error={}",
                         email.id, email.attempt_count, error_msg
@@ -251,7 +262,8 @@ impl EmailWorker {
             self.get_default_provider(tenant_id).await?
         };
 
-        let settings = settings.ok_or_else(|| WorkerError::Configuration("No mail provider available".to_string()))?;
+        let settings = settings
+            .ok_or_else(|| WorkerError::Configuration("No mail provider available".to_string()))?;
 
         // Check cache
         {
@@ -277,19 +289,24 @@ impl EmailWorker {
     }
 
     /// Get provider settings by ID
-    async fn get_provider_settings(&self, id: Uuid) -> Result<Option<MailProviderSettings>, sqlx::Error> {
-        let settings: Option<MailProviderSettings> = sqlx::query_as(
-            "SELECT * FROM mail_provider_settings WHERE id = $1 AND enabled = true"
-        )
-        .bind(id)
-        .fetch_optional(&self.db)
-        .await?;
+    async fn get_provider_settings(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<MailProviderSettings>, sqlx::Error> {
+        let settings: Option<MailProviderSettings> =
+            sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1 AND enabled = true")
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await?;
 
         Ok(settings)
     }
 
     /// Get default provider for tenant
-    async fn get_default_provider(&self, tenant_id: Option<Uuid>) -> Result<Option<MailProviderSettings>, sqlx::Error> {
+    async fn get_default_provider(
+        &self,
+        tenant_id: Option<Uuid>,
+    ) -> Result<Option<MailProviderSettings>, sqlx::Error> {
         let settings: Option<MailProviderSettings> = sqlx::query_as(
             r#"
             SELECT * FROM mail_provider_settings
@@ -371,7 +388,8 @@ impl EmailWorker {
         .await?;
 
         // Record event
-        self.record_event(id, EmailEventType::Sent, None, None).await?;
+        self.record_event(id, EmailEventType::Sent, None, None)
+            .await?;
 
         Ok(())
     }
@@ -404,7 +422,13 @@ impl EmailWorker {
         .await?;
 
         // Record failure event
-        self.record_event(id, EmailEventType::Failed, Some(error_category), Some(error_message)).await?;
+        self.record_event(
+            id,
+            EmailEventType::Failed,
+            Some(error_category),
+            Some(error_message),
+        )
+        .await?;
 
         Ok(())
     }
@@ -433,7 +457,13 @@ impl EmailWorker {
         .await?;
 
         // Record failure event
-        self.record_event(id, EmailEventType::Failed, Some(error_category), Some(error_message)).await?;
+        self.record_event(
+            id,
+            EmailEventType::Failed,
+            Some(error_category),
+            Some(error_message),
+        )
+        .await?;
 
         Ok(())
     }
@@ -447,12 +477,10 @@ impl EmailWorker {
         error_message: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         // Get outbox info first
-        let outbox: EmailOutbox = sqlx::query_as(
-            "SELECT * FROM email_outbox WHERE id = $1"
-        )
-        .bind(outbox_id)
-        .fetch_one(&self.db)
-        .await?;
+        let outbox: EmailOutbox = sqlx::query_as("SELECT * FROM email_outbox WHERE id = $1")
+            .bind(outbox_id)
+            .fetch_one(&self.db)
+            .await?;
 
         sqlx::query(
             r#"
@@ -519,18 +547,18 @@ fn calculate_backoff(
 ) -> chrono::DateTime<Utc> {
     let delay = base_delay_secs * (2_i64.pow(attempt_count as u32));
     let delay = delay.min(max_delay_secs);
-    
+
     // Add some jitter (±10%)
     let jitter = (delay as f64 * 0.1) as i64;
     let delay = delay + rand::random::<i64>().rem_euclid(jitter * 2) - jitter;
-    
+
     Utc::now() + Duration::seconds(delay)
 }
 
 /// Classify an error message
 fn classify_error(error: &str) -> String {
     let lower = error.to_lowercase();
-    
+
     if lower.contains("authentication") || lower.contains("auth") || lower.contains("535") {
         "auth_failed".to_string()
     } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {

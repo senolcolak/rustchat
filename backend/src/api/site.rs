@@ -36,9 +36,17 @@ async fn get_site_info(State(state): State<AppState>) -> ApiResult<Json<PublicCo
         sqlx::query_as("SELECT authentication FROM server_config WHERE id = 'default'")
             .fetch_one(&state.db)
             .await?;
-    
-    let enable_sso = auth.0.get("enable_sso").and_then(|v| v.as_bool()).unwrap_or(false);
-    let require_sso = auth.0.get("require_sso").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let enable_sso = auth
+        .0
+        .get("enable_sso")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let require_sso = auth
+        .0
+        .get("require_sso")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     Ok(Json(PublicConfig {
         site_name: config.0.site_name.clone(),

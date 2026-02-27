@@ -143,18 +143,17 @@ async fn test_notifications(
 
     info!(user_id = %auth.user_id, "Test notification requested");
 
-    let device_rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT token, platform FROM user_devices WHERE user_id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to inspect registered devices for test notification: {}",
-            e
-        ))
-    })?;
+    let device_rows: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT token, platform FROM user_devices WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to inspect registered devices for test notification: {}",
+                    e
+                ))
+            })?;
 
     let registered_device_count = device_rows.len();
     let devices_with_token = device_rows
@@ -286,7 +285,7 @@ async fn get_config(
             .fetch_one(&state.db)
             .await
             .map_err(|_| crate::error::AppError::NotFound("Config not found".to_string()))?;
-    
+
     // Fetch default email provider settings
     let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
         r#"
@@ -294,7 +293,7 @@ async fn get_config(
         WHERE enabled = true AND is_default = true
         ORDER BY tenant_id NULLS LAST
         LIMIT 1
-        "#
+        "#,
     )
     .fetch_optional(&state.db)
     .await
@@ -598,7 +597,10 @@ struct SystemStatus {
     ios_latest_version: String,
     #[serde(rename = "IosMinVersion")]
     ios_min_version: String,
-    #[serde(rename = "CanReceiveNotifications", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "CanReceiveNotifications",
+        skip_serializing_if = "Option::is_none"
+    )]
     can_receive_notifications: Option<String>,
     status: String,
     version: String,

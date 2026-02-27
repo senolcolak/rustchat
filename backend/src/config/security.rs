@@ -40,7 +40,7 @@ impl SecretValidationResult {
 }
 
 /// Validate that secrets meet security requirements
-/// 
+///
 /// In production, this will fail if secrets are weak.
 /// In development, it will log warnings but allow weak secrets.
 pub fn validate_secrets(config: &Config) -> SecretValidationResult {
@@ -70,9 +70,7 @@ pub fn validate_secrets(config: &Config) -> SecretValidationResult {
 
     // Validate that JWT secret and encryption key are different
     if config.jwt_secret == config.encryption_key {
-        result.add_error(
-            "JWT_SECRET and ENCRYPTION_KEY must be different values".to_string()
-        );
+        result.add_error("JWT_SECRET and ENCRYPTION_KEY must be different values".to_string());
     }
 
     result
@@ -117,11 +115,11 @@ fn validate_secret_entropy(
     // Check entropy
     let entropy = calculate_entropy(secret);
     let entropy_bits = entropy * secret.len() as f64;
-    
+
     if entropy_bits < min_entropy_bits as f64 {
         // Check if it looks like a base64 or hex encoded value (which may have lower entropy)
         let is_encoded = looks_like_encoded(secret);
-        
+
         if is_encoded {
             result.add_warning(format!(
                 "{} may have low entropy: {:.1} bits (encoded values should be at least {} characters)",
@@ -141,7 +139,7 @@ fn validate_secret_entropy(
     // Check for repeated characters (low entropy indicator)
     let unique_chars: std::collections::HashSet<char> = secret.chars().collect();
     let uniqueness_ratio = unique_chars.len() as f64 / secret.len() as f64;
-    
+
     if uniqueness_ratio < 0.5 && secret.len() > 16 {
         result.add_warning(format!(
             "{} has low character diversity ({:.0}% unique). Consider using more varied characters.",
@@ -154,14 +152,14 @@ fn validate_secret_entropy(
 /// Check if a string looks like base64 or hex encoded
 fn looks_like_encoded(s: &str) -> bool {
     // Check for hex (only hex chars and even length)
-    let is_hex = s.len() % 2 == 0 && 
-        s.chars().all(|c| c.is_ascii_hexdigit());
-    
+    let is_hex = s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+
     // Check for base64 (alphanumeric + / + = padding)
-    let is_base64 = s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '/' || c == '+' || c == '='
-    }) && s.len() % 4 == 0;
-    
+    let is_base64 = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '+' || c == '=')
+        && s.len() % 4 == 0;
+
     is_hex || is_base64
 }
 
@@ -181,7 +179,7 @@ fn check_common_weak_secrets(secret: &str, name: &str, result: &mut SecretValida
     ];
 
     let lower_secret = secret.to_lowercase();
-    
+
     for pattern in &weak_patterns {
         if lower_secret.contains(pattern) {
             result.add_error(format!(

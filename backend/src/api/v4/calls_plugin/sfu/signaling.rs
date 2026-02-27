@@ -50,7 +50,7 @@ pub enum SignalingMessage {
 /// Signaling server manages signaling channels for participants
 pub struct SignalingServer {
     /// Signaling channels: session_id -> sender
-    channels: Arc<RwLock<HashMap<Uuid, mpsc::UnboundedSender<SignalingMessage>>>>,
+    channels: Arc<RwLock<HashMap<Uuid, mpsc::Sender<SignalingMessage>>>>,
 }
 
 impl SignalingServer {
@@ -62,11 +62,7 @@ impl SignalingServer {
     }
 
     /// Register a signaling channel for a participant
-    pub async fn register_channel(
-        &self,
-        session_id: Uuid,
-        tx: mpsc::UnboundedSender<SignalingMessage>,
-    ) {
+    pub async fn register_channel(&self, session_id: Uuid, tx: mpsc::Sender<SignalingMessage>) {
         self.channels.write().await.insert(session_id, tx);
     }
 
@@ -84,8 +80,12 @@ impl SignalingServer {
         let channels = self.channels.read().await;
 
         if let Some(tx) = channels.get(&session_id) {
-            tx.send(message).map_err(|_| "Failed to send message")?;
-            Ok(())
+            tx.try_send(message).map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    "Signaling channel is full; message dropped".to_string()
+                }
+                mpsc::error::TrySendError::Closed(_) => "Signaling channel is closed".to_string(),
+            })
         } else {
             Err("Participant not found".to_string())
         }
@@ -100,7 +100,9 @@ impl SignalingServer {
                 continue;
             }
 
-            let _ = tx.send(message.clone());
+            if tx.try_send(message.clone()).is_err() {
+                continue;
+            }
         }
     }
 

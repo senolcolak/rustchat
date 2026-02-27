@@ -144,7 +144,11 @@ docker compose up -d --build
 Important:
 - `docker-compose.yml` no longer ships fallback JWT/encryption secrets.
 - Set `RUSTCHAT_JWT_SECRET` and `RUSTCHAT_ENCRYPTION_KEY` in `.env` before startup.
+- Set `RUSTCHAT_S3_ACCESS_KEY`, `RUSTCHAT_S3_SECRET_KEY`, `RUSTFS_ACCESS_KEY`, and `RUSTFS_SECRET_KEY` in `.env` before startup.
 - For production, set `RUSTCHAT_ENVIRONMENT=production` and define `RUSTCHAT_CORS_ALLOWED_ORIGINS`.
+- For production, terminate TLS at the edge/proxy and avoid HTTP-only exposure.
+- Query-token transport is removed and rejected at startup (`RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=query` and `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true` are invalid).
+- In production mode, `RUSTCHAT_SITE_URL` (if set) and all `RUSTCHAT_CORS_ALLOWED_ORIGINS` entries must use `https://`.
 
 Default services:
 - Web UI / reverse proxy: `http://localhost:8080`

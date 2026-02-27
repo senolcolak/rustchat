@@ -11,7 +11,7 @@ export function useSocket() {
         if (!auth.token || socket.value) return
 
         const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:3000/api/v1/ws'
-        socket.value = new WebSocket(`${wsUrl}?token=${auth.token}`)
+        socket.value = new WebSocket(wsUrl, [auth.token])
 
         socket.value.onopen = () => {
             isConnected.value = true

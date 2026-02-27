@@ -13,7 +13,7 @@ use std::time::Duration;
 use axum::{
     extract::{
         ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        Query, State,
     },
     http::HeaderMap,
     response::{IntoResponse, Response},
@@ -29,7 +29,6 @@ use crate::api::v4::calls_plugin;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::api::AppState;
 use crate::auth::validate_token_with_policy;
-use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     mappers::map_channel_role,
@@ -44,9 +43,6 @@ use crate::realtime::{
 /// WebSocket query parameters
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    /// Authentication token - DEPRECATED, do not use
-    /// Use Authorization header or Sec-WebSocket-Protocol instead
-    pub _token: Option<String>,
     /// Connection ID for session resumption
     pub connection_id: Option<String>,
     /// Last sequence number received by client
@@ -56,37 +52,10 @@ pub struct WsQuery {
 /// Main WebSocket handler
 pub async fn handle_websocket(
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    // Check rate limiting if enabled
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::websocket_per_minute(
-            state.config.security.rate_limit_ws_per_minute,
-        );
-        let ip = rate_limit::extract_client_ip(&addr, &headers);
-        
-        match rate_limit::check_rate_limit(&state.redis, &config, &ip).await {
-            Ok(rate_result) if !rate_result.allowed => {
-                warn!(
-                    ip = %ip,
-                    "Rate limit exceeded for WebSocket connection"
-                );
-                return Response::builder()
-                    .status(429)
-                    .body("Too many connection attempts. Please try again later.".into())
-                    .unwrap();
-            }
-            Err(e) => {
-                error!("Rate limit check failed: {}", e);
-                // Continue anyway - don't block connections due to Redis issues
-            }
-            _ => {}
-        }
-    }
-
     let requested_protocol = websocket_core::requested_protocol(&headers);
     let ws = match ws {
         Ok(upgrade) => upgrade,
@@ -104,11 +73,7 @@ pub async fn handle_websocket(
         }
     };
 
-    // ALWAYS use secure token resolution - never accept token from query params
-    let token = websocket_core::resolve_auth_token_secure(
-        &headers,
-        requested_protocol.as_deref(),
-    );
+    let token = websocket_core::resolve_auth_token(&headers, requested_protocol.as_deref());
     let sequence_number = query.sequence_number;
     let connection_id = query.connection_id.and_then(|value| {
         let trimmed = value.trim();

@@ -11,13 +11,13 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::api::AppState;
 use crate::api::v4::extractors::MmAuthUser;
+use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
 use crate::models::channel_bookmark::{
-    ChannelBookmark, CreateBookmarkRequest, ReorderBookmarkRequest, UpdateBookmarkRequest,
-    BookmarkResponse,
+    BookmarkResponse, ChannelBookmark, CreateBookmarkRequest, ReorderBookmarkRequest,
+    UpdateBookmarkRequest,
 };
 use crate::realtime::{WsBroadcast, WsEnvelope};
 
@@ -25,12 +25,21 @@ use crate::realtime::{WsBroadcast, WsEnvelope};
 pub fn router() -> Router<AppState> {
     Router::new()
         // GET /api/v4/channels/{channel_id}/bookmarks
-        .route("/channels/{channel_id}/bookmarks", get(get_channel_bookmarks).post(create_bookmark))
+        .route(
+            "/channels/{channel_id}/bookmarks",
+            get(get_channel_bookmarks).post(create_bookmark),
+        )
         // PATCH /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
         // DELETE /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}
-        .route("/channels/{channel_id}/bookmarks/{bookmark_id}", patch(update_bookmark).delete(delete_bookmark))
+        .route(
+            "/channels/{channel_id}/bookmarks/{bookmark_id}",
+            patch(update_bookmark).delete(delete_bookmark),
+        )
         // POST /api/v4/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order
-        .route("/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order", post(reorder_bookmark))
+        .route(
+            "/channels/{channel_id}/bookmarks/{bookmark_id}/sort_order",
+            post(reorder_bookmark),
+        )
 }
 
 /// Get all bookmarks for a channel
@@ -72,7 +81,7 @@ async fn create_bookmark(
 
     // Validate channel exists and user is member
     let is_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)"
+        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)",
     )
     .bind(channel_uuid)
     .bind(auth.user_id)
@@ -80,25 +89,32 @@ async fn create_bookmark(
     .await?;
 
     if !is_member {
-        return Err(AppError::Forbidden("Not a member of this channel".to_string()));
+        return Err(AppError::Forbidden(
+            "Not a member of this channel".to_string(),
+        ));
     }
 
     // Validate bookmark type
     if body.r#type != "link" && body.r#type != "file" {
-        return Err(AppError::Validation("Bookmark type must be 'link' or 'file'".to_string()));
+        return Err(AppError::Validation(
+            "Bookmark type must be 'link' or 'file'".to_string(),
+        ));
     }
 
     // Validate based on type
     if body.r#type == "link" && body.link_url.is_none() {
-        return Err(AppError::Validation("Link bookmarks require link_url".to_string()));
+        return Err(AppError::Validation(
+            "Link bookmarks require link_url".to_string(),
+        ));
     }
 
     if body.r#type == "file" && body.file_id.is_none() {
-        return Err(AppError::Validation("File bookmarks require file_id".to_string()));
+        return Err(AppError::Validation(
+            "File bookmarks require file_id".to_string(),
+        ));
     }
 
-    let file_uuid = body.file_id.as_ref()
-        .and_then(|id| parse_mm_or_uuid(id));
+    let file_uuid = body.file_id.as_ref().and_then(|id| parse_mm_or_uuid(id));
 
     let now = Utc::now().timestamp_millis();
     let sort_order = body.sort_order.unwrap_or(0);
@@ -154,7 +170,9 @@ async fn update_bookmark(
     let owner_id = owner_id.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
     if owner_id != auth.user_id && auth.role != "admin" {
-        return Err(AppError::Forbidden("Can only update your own bookmarks".to_string()));
+        return Err(AppError::Forbidden(
+            "Can only update your own bookmarks".to_string(),
+        ));
     }
 
     let now = Utc::now().timestamp_millis();
@@ -213,20 +231,20 @@ async fn delete_bookmark(
     let bookmark = bookmark.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
     if bookmark.owner_id != auth.user_id && auth.role != "admin" {
-        return Err(AppError::Forbidden("Can only delete your own bookmarks".to_string()));
+        return Err(AppError::Forbidden(
+            "Can only delete your own bookmarks".to_string(),
+        ));
     }
 
     let now = Utc::now().timestamp_millis();
 
     // Soft delete
-    sqlx::query(
-        "UPDATE channel_bookmarks SET delete_at = $3 WHERE id = $1 AND channel_id = $2"
-    )
-    .bind(bookmark_uuid)
-    .bind(channel_uuid)
-    .bind(now)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE channel_bookmarks SET delete_at = $3 WHERE id = $1 AND channel_id = $2")
+        .bind(bookmark_uuid)
+        .bind(channel_uuid)
+        .bind(now)
+        .execute(&state.db)
+        .await?;
 
     // Broadcast event
     broadcast_bookmark_event(&state, "channel_bookmark_deleted", &bookmark).await;
@@ -259,7 +277,9 @@ async fn reorder_bookmark(
     let bookmark = bookmark.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
     if bookmark.owner_id != auth.user_id && auth.role != "admin" {
-        return Err(AppError::Forbidden("Can only reorder your own bookmarks".to_string()));
+        return Err(AppError::Forbidden(
+            "Can only reorder your own bookmarks".to_string(),
+        ));
     }
 
     let now = Utc::now().timestamp_millis();
@@ -286,11 +306,7 @@ async fn reorder_bookmark(
 }
 
 /// Broadcast bookmark event via WebSocket
-async fn broadcast_bookmark_event(
-    state: &AppState,
-    event_type: &str,
-    bookmark: &ChannelBookmark,
-) {
+async fn broadcast_bookmark_event(state: &AppState, event_type: &str, bookmark: &ChannelBookmark) {
     let event = WsEnvelope {
         msg_type: "event".to_string(),
         event: event_type.to_string(),

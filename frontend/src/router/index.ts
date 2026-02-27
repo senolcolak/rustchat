@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import client from '../api/client'
 
 const router = createRouter({
     history: createWebHistory(),
@@ -143,18 +144,34 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to, _from, next) => {
-    // Check for OAuth token in URL (e.g., ?token=xxx) - must happen before auth checks
+    // Handle OAuth redirects before auth checks.
     const urlParams = new URLSearchParams(window.location.search)
-    const token = urlParams.get('token')
-    if (token) {
-        localStorage.setItem('auth_token', token)  // Use correct key for auth store
-        window.history.replaceState({}, document.title, window.location.pathname)
-        // Reload to reinitialize with new token
-        window.location.reload()
-        return
-    }
-
+    const code = urlParams.get('code')
     const auth = useAuthStore()
+    if (code) {
+        try {
+            const response = await client.post('/oauth2/exchange', { code })
+            const accessToken = response.data?.token
+
+            if (!accessToken) {
+                throw new Error('OAuth redirect did not include a usable token')
+            }
+
+            auth.token = accessToken
+            await auth.fetchMe()
+
+            urlParams.delete('code')
+            const remaining = urlParams.toString()
+            const newUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ''}${window.location.hash}`
+            window.history.replaceState({}, document.title, newUrl)
+        } catch (error) {
+            console.error('OAuth redirect handling failed', error)
+            auth.token = ''
+            auth.user = null
+            next('/login?error=oauth_failed')
+            return
+        }
+    }
 
     // Rehydrate user if token exists but user is null
     if (auth.isAuthenticated && !auth.user) {

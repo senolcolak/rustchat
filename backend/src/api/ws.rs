@@ -3,75 +3,38 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        State,
     },
     http::HeaderMap,
+    middleware,
     response::Response,
     routing::get,
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::time::Duration;
 
 use super::AppState;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
-use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::realtime::WsEnvelope;
 
 /// Build WebSocket routes
 pub fn router() -> Router<AppState> {
-    Router::new().route("/ws", get(ws_handler))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    // Note: token in query is no longer supported for security
-    // Use Authorization header or Sec-WebSocket-Protocol instead
-    _legacy_token: Option<String>,
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::websocket_ip_rate_limit,
+        ))
 }
 
 /// WebSocket upgrade handler
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
-    Query(_query): Query<WsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    // Check rate limiting if enabled
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::websocket_per_minute(
-            state.config.security.rate_limit_ws_per_minute,
-        );
-        let ip = rate_limit::extract_client_ip(&addr, &headers);
-        
-        match rate_limit::check_rate_limit(&state.redis, &config, &ip).await {
-            Ok(rate_result) if !rate_result.allowed => {
-                tracing::warn!(
-                    ip = %ip,
-                    "Rate limit exceeded for WebSocket connection"
-                );
-                return Response::builder()
-                    .status(429)
-                    .body("Too many connection attempts. Please try again later.".into())
-                    .unwrap();
-            }
-            Err(e) => {
-                tracing::error!("Rate limit check failed: {}", e);
-                // Continue anyway - don't block connections due to Redis issues
-            }
-            _ => {}
-        }
-    }
-
     let requested_protocol = websocket_core::requested_protocol(&headers);
-    
-    // ALWAYS use secure mode - never accept token from query params
-    let token = websocket_core::resolve_auth_token_secure(
-        &headers,
-        requested_protocol.as_deref(),
-    );
+    let token = websocket_core::resolve_auth_token(&headers, requested_protocol.as_deref());
 
     tracing::info!(
         "WS Handshake - Token present: {}, Protocol: {:?}",

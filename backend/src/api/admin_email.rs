@@ -28,22 +28,59 @@ use crate::services::template_renderer::TemplateRenderer;
 pub fn router() -> Router<AppState> {
     Router::new()
         // Provider Settings
-        .route("/admin/email/providers", get(list_providers).post(create_provider))
-        .route("/admin/email/providers/{id}", get(get_provider).put(update_provider).delete(delete_provider))
+        .route(
+            "/admin/email/providers",
+            get(list_providers).post(create_provider),
+        )
+        .route(
+            "/admin/email/providers/{id}",
+            get(get_provider)
+                .put(update_provider)
+                .delete(delete_provider),
+        )
         .route("/admin/email/providers/{id}/test", post(test_provider))
-        .route("/admin/email/providers/{id}/default", post(set_default_provider))
+        .route(
+            "/admin/email/providers/{id}/default",
+            post(set_default_provider),
+        )
         // Workflows
         .route("/admin/email/workflows", get(list_workflows))
-        .route("/admin/email/workflows/{id}", get(get_workflow).patch(update_workflow))
+        .route(
+            "/admin/email/workflows/{id}",
+            get(get_workflow).patch(update_workflow),
+        )
         // Template Families
-        .route("/admin/email/template-families", get(list_template_families).post(create_template_family))
-        .route("/admin/email/template-families/{id}", get(get_template_family).patch(update_template_family).delete(delete_template_family))
+        .route(
+            "/admin/email/template-families",
+            get(list_template_families).post(create_template_family),
+        )
+        .route(
+            "/admin/email/template-families/{id}",
+            get(get_template_family)
+                .patch(update_template_family)
+                .delete(delete_template_family),
+        )
         // Template Versions
-        .route("/admin/email/template-families/{id}/versions", get(list_template_versions).post(create_template_version))
-        .route("/admin/email/template-versions/{version_id}", get(get_template_version).patch(update_template_version))
-        .route("/admin/email/template-versions/{version_id}/publish", post(publish_template_version))
-        .route("/admin/email/template-versions/{version_id}/preview", post(preview_template))
-        .route("/admin/email/template-versions/{version_id}/send-preview", post(send_preview_email))
+        .route(
+            "/admin/email/template-families/{id}/versions",
+            get(list_template_versions).post(create_template_version),
+        )
+        .route(
+            "/admin/email/template-versions/{version_id}",
+            get(get_template_version).patch(update_template_version),
+        )
+        .route(
+            "/admin/email/template-versions/{version_id}/publish",
+            post(publish_template_version),
+        )
+        .route(
+            "/admin/email/template-versions/{version_id}/preview",
+            post(preview_template),
+        )
+        .route(
+            "/admin/email/template-versions/{version_id}/send-preview",
+            post(send_preview_email),
+        )
         // Outbox
         .route("/admin/email/outbox", get(list_outbox))
         .route("/admin/email/outbox/{id}", get(get_outbox_entry))
@@ -54,7 +91,10 @@ pub fn router() -> Router<AppState> {
         // Send test email
         .route("/admin/email/send-test", post(send_test_email))
         // User preferences (admin view)
-        .route("/admin/email/users/{user_id}/prefs", get(get_user_prefs).put(update_user_prefs))
+        .route(
+            "/admin/email/users/{user_id}/prefs",
+            get(get_user_prefs).put(update_user_prefs),
+        )
 }
 
 // ============================================
@@ -110,13 +150,12 @@ async fn get_provider(
 ) -> ApiResult<Json<MailProviderResponse>> {
     require_admin(&auth)?;
 
-    let provider: MailProviderSettings = sqlx::query_as(
-        "SELECT * FROM mail_provider_settings WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+    let provider: MailProviderSettings =
+        sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
     Ok(Json(provider.into()))
 }
@@ -128,8 +167,9 @@ async fn create_provider(
 ) -> ApiResult<Json<MailProviderResponse>> {
     require_admin(&auth)?;
 
-    let provider_type = MailProviderType::from_str(&body.provider_type)
-        .ok_or_else(|| AppError::Validation(format!("Invalid provider type: {}", body.provider_type)))?;
+    let provider_type = MailProviderType::from_str(&body.provider_type).ok_or_else(|| {
+        AppError::Validation(format!("Invalid provider type: {}", body.provider_type))
+    })?;
 
     let tls_mode = TlsMode::from_str(&body.tls_mode)
         .ok_or_else(|| AppError::Validation(format!("Invalid TLS mode: {}", body.tls_mode)))?;
@@ -180,7 +220,10 @@ async fn create_provider(
     .fetch_one(&state.db)
     .await?;
 
-    info!("Created mail provider: id={}, host={}", provider.id, provider.host);
+    info!(
+        "Created mail provider: id={}, host={}",
+        provider.id, provider.host
+    );
     Ok(Json(provider.into()))
 }
 
@@ -193,20 +236,22 @@ async fn update_provider(
     require_admin(&auth)?;
 
     // Get existing provider
-    let existing: MailProviderSettings = sqlx::query_as(
-        "SELECT * FROM mail_provider_settings WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+    let existing: MailProviderSettings =
+        sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
     // Process password if provided
     let password_encrypted = if let Some(ref password) = body.password {
         if password.is_empty() {
             None
         } else {
-            Some(crate::crypto::encrypt(password, &state.config.encryption_key)?)
+            Some(crate::crypto::encrypt(
+                password,
+                &state.config.encryption_key,
+            )?)
         }
     } else {
         None
@@ -245,7 +290,11 @@ async fn update_provider(
         "#,
     )
     .bind(id)
-    .bind(body.provider_type.as_deref().and_then(MailProviderType::from_str))
+    .bind(
+        body.provider_type
+            .as_deref()
+            .and_then(MailProviderType::from_str),
+    )
     .bind(&body.host)
     .bind(body.port)
     .bind(&body.username)
@@ -294,13 +343,12 @@ async fn set_default_provider(
     require_admin(&auth)?;
 
     // Get the provider
-    let provider: MailProviderSettings = sqlx::query_as(
-        "SELECT * FROM mail_provider_settings WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+    let provider: MailProviderSettings =
+        sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
     // Clear other defaults for this tenant
     sqlx::query(
@@ -312,7 +360,7 @@ async fn set_default_provider(
 
     // Set this one as default
     let provider: MailProviderSettings = sqlx::query_as(
-        "UPDATE mail_provider_settings SET is_default = true WHERE id = $1 RETURNING *"
+        "UPDATE mail_provider_settings SET is_default = true WHERE id = $1 RETURNING *",
     )
     .bind(id)
     .fetch_one(&state.db)
@@ -335,13 +383,12 @@ async fn test_provider(
     require_admin(&auth)?;
 
     // Get provider settings
-    let settings: MailProviderSettings = sqlx::query_as(
-        "SELECT * FROM mail_provider_settings WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+    let settings: MailProviderSettings =
+        sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
     // Create provider and test connection
     let provider = SmtpProvider::new(settings.clone(), &state.config.encryption_key)
@@ -364,28 +411,27 @@ async fn test_provider(
         subject: "RustChat Email Test".to_string(),
         body_text: format!(
             "This is a test email from RustChat.\n\nProvider: {}:{}\nTLS: {}\nSent at: {}",
-            settings.host, settings.port, settings.tls_mode.as_str(), Utc::now()
+            settings.host,
+            settings.port,
+            settings.tls_mode.as_str(),
+            Utc::now()
         ),
         body_html: None,
         headers: vec![],
     };
 
     match provider.send_email(&from, &to, &content).await {
-        Ok(result) => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "stage": "sent",
-                "message": format!("Test email sent to {}", body.to_email),
-                "server_response": result.server_response
-            })))
-        }
-        Err(e) => {
-            Ok(Json(serde_json::json!({
-                "success": false,
-                "stage": "sending",
-                "error": e.to_string()
-            })))
-        }
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": true,
+            "stage": "sent",
+            "message": format!("Test email sent to {}", body.to_email),
+            "server_response": result.server_response
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "success": false,
+            "stage": "sending",
+            "error": e.to_string()
+        }))),
     }
 }
 
@@ -421,13 +467,12 @@ async fn get_workflow(
 ) -> ApiResult<Json<WorkflowResponse>> {
     require_admin(&auth)?;
 
-    let workflow: NotificationWorkflow = sqlx::query_as(
-        "SELECT * FROM notification_workflows WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Workflow not found".to_string()))?;
+    let workflow: NotificationWorkflow =
+        sqlx::query_as("SELECT * FROM notification_workflows WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Workflow not found".to_string()))?;
 
     Ok(Json(workflow.into()))
 }
@@ -441,19 +486,18 @@ async fn update_workflow(
     require_admin(&auth)?;
 
     // Get existing to check if system required
-    let existing: NotificationWorkflow = sqlx::query_as(
-        "SELECT * FROM notification_workflows WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Workflow not found".to_string()))?;
+    let existing: NotificationWorkflow =
+        sqlx::query_as("SELECT * FROM notification_workflows WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Workflow not found".to_string()))?;
 
     // Don't allow disabling system required workflows
     if let Some(false) = body.enabled {
         if existing.system_required {
             return Err(AppError::Forbidden(
-                "Cannot disable system-required workflow".to_string()
+                "Cannot disable system-required workflow".to_string(),
             ));
         }
     }
@@ -514,13 +558,12 @@ async fn get_template_family(
 ) -> ApiResult<Json<EmailTemplateFamily>> {
     require_admin(&auth)?;
 
-    let family: EmailTemplateFamily = sqlx::query_as(
-        "SELECT * FROM email_template_families WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Template family not found".to_string()))?;
+    let family: EmailTemplateFamily =
+        sqlx::query_as("SELECT * FROM email_template_families WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Template family not found".to_string()))?;
 
     Ok(Json(family))
 }
@@ -548,7 +591,10 @@ async fn create_template_family(
     .fetch_one(&state.db)
     .await?;
 
-    info!("Created template family: id={}, key={}", family.id, family.key);
+    info!(
+        "Created template family: id={}, key={}",
+        family.id, family.key
+    );
     Ok(Json(family))
 }
 
@@ -587,15 +633,16 @@ async fn delete_template_family(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&auth)?;
 
-    let result = sqlx::query(
-        "DELETE FROM email_template_families WHERE id = $1 AND is_system = false"
-    )
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM email_template_families WHERE id = $1 AND is_system = false")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Template family not found or is system".to_string()));
+        return Err(AppError::NotFound(
+            "Template family not found or is system".to_string(),
+        ));
     }
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
@@ -634,13 +681,12 @@ async fn get_template_version(
 ) -> ApiResult<Json<TemplateVersionResponse>> {
     require_admin(&auth)?;
 
-    let version: EmailTemplateVersion = sqlx::query_as(
-        "SELECT * FROM email_template_versions WHERE id = $1"
-    )
-    .bind(version_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
+    let version: EmailTemplateVersion =
+        sqlx::query_as("SELECT * FROM email_template_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
 
     Ok(Json(version.into()))
 }
@@ -655,7 +701,7 @@ async fn create_template_version(
 
     // Get next version number for this locale
     let max_version: Option<i32> = sqlx::query_scalar(
-        "SELECT MAX(version) FROM email_template_versions WHERE family_id = $1 AND locale = $2"
+        "SELECT MAX(version) FROM email_template_versions WHERE family_id = $1 AND locale = $2",
     )
     .bind(family_id)
     .bind(&body.locale)
@@ -699,17 +745,16 @@ async fn update_template_version(
     require_admin(&auth)?;
 
     // Can only update draft versions
-    let existing: EmailTemplateVersion = sqlx::query_as(
-        "SELECT * FROM email_template_versions WHERE id = $1"
-    )
-    .bind(version_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
+    let existing: EmailTemplateVersion =
+        sqlx::query_as("SELECT * FROM email_template_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
 
     if existing.status != TemplateStatus::Draft {
         return Err(AppError::Forbidden(
-            "Cannot edit published or archived versions".to_string()
+            "Cannot edit published or archived versions".to_string(),
         ));
     }
 
@@ -760,10 +805,14 @@ async fn publish_template_version(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Template version not found or not in draft status".to_string()))?;
+    .ok_or_else(|| {
+        AppError::NotFound("Template version not found or not in draft status".to_string())
+    })?;
 
-    info!("Published template version: id={}, family_id={}, version={}", 
-        version_id, version.family_id, version.version);
+    info!(
+        "Published template version: id={}, family_id={}, version={}",
+        version_id, version.family_id, version.version
+    );
 
     Ok(Json(version.into()))
 }
@@ -781,32 +830,31 @@ async fn preview_template(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&auth)?;
 
-    let version: EmailTemplateVersion = sqlx::query_as(
-        "SELECT * FROM email_template_versions WHERE id = $1"
-    )
-    .bind(version_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
+    let version: EmailTemplateVersion =
+        sqlx::query_as("SELECT * FROM email_template_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
 
     let renderer = TemplateRenderer::new();
 
     // Use provided sample data or build from schema
-    let sample_data = body.sample_data
-        .unwrap_or_else(|| TemplateRenderer::build_sample_payload(&version.variables_schema_json.0));
+    let sample_data = body.sample_data.unwrap_or_else(|| {
+        TemplateRenderer::build_sample_payload(&version.variables_schema_json.0)
+    });
 
     match renderer.preview_template(&version, &sample_data) {
-        Ok(rendered) => {
-            Ok(Json(serde_json::json!({
-                "subject": rendered.subject,
-                "body_text": rendered.body_text,
-                "body_html": rendered.body_html,
-                "sample_data_used": sample_data,
-            })))
-        }
-        Err(e) => {
-            Err(AppError::BadRequest(format!("Template render error: {}", e)))
-        }
+        Ok(rendered) => Ok(Json(serde_json::json!({
+            "subject": rendered.subject,
+            "body_text": rendered.body_text,
+            "body_html": rendered.body_html,
+            "sample_data_used": sample_data,
+        }))),
+        Err(e) => Err(AppError::BadRequest(format!(
+            "Template render error: {}",
+            e
+        ))),
     }
 }
 
@@ -840,20 +888,21 @@ async fn send_preview_email(
         .ok_or_else(|| AppError::Config("No default mail provider configured".to_string()))?;
 
     // Get template
-    let version: EmailTemplateVersion = sqlx::query_as(
-        "SELECT * FROM email_template_versions WHERE id = $1"
-    )
-    .bind(version_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
+    let version: EmailTemplateVersion =
+        sqlx::query_as("SELECT * FROM email_template_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Template version not found".to_string()))?;
 
     // Render
     let renderer = TemplateRenderer::new();
-    let sample_data = body.sample_data
-        .unwrap_or_else(|| TemplateRenderer::build_sample_payload(&version.variables_schema_json.0));
+    let sample_data = body.sample_data.unwrap_or_else(|| {
+        TemplateRenderer::build_sample_payload(&version.variables_schema_json.0)
+    });
 
-    let rendered = renderer.preview_template(&version, &sample_data)
+    let rendered = renderer
+        .preview_template(&version, &sample_data)
         .map_err(|e| AppError::BadRequest(format!("Template render error: {}", e)))?;
 
     // Send via provider
@@ -871,15 +920,11 @@ async fn send_preview_email(
     };
 
     match provider.send_email(&from, &to, &content).await {
-        Ok(_) => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "message": format!("Preview email sent to {}", body.to_email)
-            })))
-        }
-        Err(e) => {
-            Err(AppError::ExternalService(format!("Failed to send: {}", e)))
-        }
+        Ok(_) => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": format!("Preview email sent to {}", body.to_email)
+        }))),
+        Err(e) => Err(AppError::ExternalService(format!("Failed to send: {}", e))),
     }
 }
 
@@ -915,7 +960,9 @@ async fn list_outbox(
         recipient_user_id: None,
     };
 
-    let entries = service.list_outbox(filters, per_page, offset).await
+    let entries = service
+        .list_outbox(filters, per_page, offset)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let responses: Vec<EmailOutboxResponse> = entries.into_iter().map(Into::into).collect();
@@ -930,7 +977,9 @@ async fn get_outbox_entry(
     require_admin(&auth)?;
 
     let service = EmailService::new(state.db.clone());
-    let entry = service.get_outbox_entry(id).await
+    let entry = service
+        .get_outbox_entry(id)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::NotFound("Outbox entry not found".to_string()))?;
 
@@ -945,7 +994,7 @@ async fn cancel_outbox_entry(
     require_admin(&auth)?;
 
     let result = sqlx::query(
-        "UPDATE email_outbox SET status = 'cancelled' WHERE id = $1 AND status = 'queued'"
+        "UPDATE email_outbox SET status = 'cancelled' WHERE id = $1 AND status = 'queued'",
     )
     .bind(id)
     .execute(&state.db)
@@ -953,7 +1002,7 @@ async fn cancel_outbox_entry(
 
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(
-            "Email cannot be cancelled (may already be sent or failed)".to_string()
+            "Email cannot be cancelled (may already be sent or failed)".to_string(),
         ));
     }
 
@@ -976,7 +1025,7 @@ async fn retry_outbox_entry(
             last_error_category = NULL,
             last_error_message = NULL
         WHERE id = $1 AND status = 'failed'
-        "#
+        "#,
     )
     .bind(id)
     .execute(&state.db)
@@ -984,7 +1033,7 @@ async fn retry_outbox_entry(
 
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(
-            "Email cannot be retried (may not be in failed status)".to_string()
+            "Email cannot be retried (may not be in failed status)".to_string(),
         ));
     }
 
@@ -1080,13 +1129,16 @@ async fn send_test_email(
             "message_count": 5,
         });
 
-        let outbox_id = service.enqueue_email(
-            &workflow_key,
-            &body.to_email,
-            None, // No user_id for test
-            payload,
-            options,
-        ).await.map_err(|e| AppError::ExternalService(e.to_string()))?;
+        let outbox_id = service
+            .enqueue_email(
+                &workflow_key,
+                &body.to_email,
+                None, // No user_id for test
+                payload,
+                options,
+            )
+            .await
+            .map_err(|e| AppError::ExternalService(e.to_string()))?;
 
         return Ok(Json(serde_json::json!({
             "success": true,
@@ -1109,8 +1161,8 @@ async fn send_test_email(
         .await?
     };
 
-    let settings = provider_settings
-        .ok_or_else(|| AppError::Config("No mail provider found".to_string()))?;
+    let settings =
+        provider_settings.ok_or_else(|| AppError::Config("No mail provider found".to_string()))?;
 
     let provider = SmtpProvider::new(settings.clone(), &state.config.encryption_key)
         .await
@@ -1119,24 +1171,23 @@ async fn send_test_email(
     let from = EmailAddress::with_name(&settings.from_address, &settings.from_name);
     let to = EmailAddress::new(&body.to_email);
     let content = EmailContent {
-        subject: body.subject.unwrap_or_else(|| "RustChat Test Email".to_string()),
-        body_text: body.body_text.unwrap_or_else(|| 
-            "This is a test email from RustChat.".to_string()),
+        subject: body
+            .subject
+            .unwrap_or_else(|| "RustChat Test Email".to_string()),
+        body_text: body
+            .body_text
+            .unwrap_or_else(|| "This is a test email from RustChat.".to_string()),
         body_html: None,
         headers: vec![],
     };
 
     match provider.send_email(&from, &to, &content).await {
-        Ok(result) => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "server_response": result.server_response,
-                "message": format!("Test email sent to {}", body.to_email)
-            })))
-        }
-        Err(e) => {
-            Err(AppError::ExternalService(format!("Failed to send: {}", e)))
-        }
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": true,
+            "server_response": result.server_response,
+            "message": format!("Test email sent to {}", body.to_email)
+        }))),
+        Err(e) => Err(AppError::ExternalService(format!("Failed to send: {}", e))),
     }
 }
 
@@ -1152,7 +1203,9 @@ async fn get_user_prefs(
     require_admin(&auth)?;
 
     let service = EmailService::new(state.db.clone());
-    let prefs = service.get_user_prefs(user_id).await
+    let prefs = service
+        .get_user_prefs(user_id)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(prefs.into()))
@@ -1167,7 +1220,9 @@ async fn update_user_prefs(
     require_admin(&auth)?;
 
     let service = EmailService::new(state.db.clone());
-    let prefs = service.update_user_prefs(user_id, body).await
+    let prefs = service
+        .update_user_prefs(user_id, body)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(prefs.into()))

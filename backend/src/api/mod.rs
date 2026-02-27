@@ -68,12 +68,12 @@ fn handle_panic(
         .unwrap()
 }
 
-use crate::api::v4::calls_plugin::sfu::SFUManager;
+use crate::api::v4::calls_plugin::sfu::{SFUManager, VOICE_EVENT_CHANNEL_CAPACITY};
 use crate::api::v4::calls_plugin::start_voice_event_listener;
 use crate::api::v4::calls_plugin::state::{CallStateBackend, CallStateManager};
 use crate::config::Config;
 use crate::middleware::reliability::ServiceCircuitBreakers;
-use crate::middleware::security_headers::{SecurityHeadersLayer, cors_compatible_config};
+use crate::middleware::security_headers::{cors_compatible_config, SecurityHeadersLayer};
 use crate::realtime::{ConnectionStore, WsHub};
 use crate::storage::S3Client;
 use tokio::sync::mpsc;
@@ -154,7 +154,7 @@ pub fn router(
     s3_client: S3Client,
     config: Config,
 ) -> Router {
-    let (voice_event_tx, voice_event_rx) = mpsc::unbounded_channel();
+    let (voice_event_tx, voice_event_rx) = mpsc::channel(VOICE_EVENT_CHANNEL_CAPACITY);
     let sfu_manager = SFUManager::new(config.calls.clone(), voice_event_tx);
     let call_state_manager = Arc::new(CallStateManager::with_backend(
         Some(redis.clone()),
@@ -187,19 +187,34 @@ pub fn router(
     let cors = build_cors_layer(&state.config);
 
     // Body size limits (in bytes)
-    const SMALL_BODY_LIMIT: usize = 64 * 1024;      // 64KB - for most JSON APIs
-    const MEDIUM_BODY_LIMIT: usize = 1024 * 1024;   // 1MB - for larger payloads
+    const SMALL_BODY_LIMIT: usize = 64 * 1024; // 64KB - for most JSON APIs
+    const MEDIUM_BODY_LIMIT: usize = 1024 * 1024; // 1MB - for larger payloads
     const LARGE_BODY_LIMIT: usize = 50 * 1024 * 1024; // 50MB - for file uploads
-    
+
     // API v1 routes with appropriate body limits
     // Routes that don't handle file uploads get smaller limits
     let api_v1 = Router::new()
         .nest("/health", health::router())
-        .nest("/auth", auth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
-        .nest("/users", users::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)))
-        .nest("/teams", teams::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
-        .nest("/channels", channels::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)))
-        .nest("/unreads", unreads::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
+        .nest(
+            "/auth",
+            auth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
+        )
+        .nest(
+            "/users",
+            users::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)),
+        )
+        .nest(
+            "/teams",
+            teams::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
+        )
+        .nest(
+            "/channels",
+            channels::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)),
+        )
+        .nest(
+            "/unreads",
+            unreads::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
+        )
         .merge(posts::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)))
         // Files router gets large limit for uploads
         .merge(files::router().layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)))
@@ -211,7 +226,10 @@ pub fn router(
         .merge(calls::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(oauth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(site::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
-        .nest("/video", video::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
+        .nest(
+            "/video",
+            video::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
+        )
         // WebSocket endpoint doesn't need body limit
         .merge(ws::router());
 

@@ -2,8 +2,8 @@ use crate::api::AppState;
 use crate::error::ApiResult;
 use crate::mattermost_compat::models as mm;
 use crate::mattermost_compat::{id::encode_mm_id, MM_VERSION};
-use crate::models::server_config::{AuthConfig, SiteConfig};
 use crate::models::email::MailProviderSettings;
+use crate::models::server_config::{AuthConfig, SiteConfig};
 use axum::{
     extract::{Query, State},
     response::IntoResponse,
@@ -42,26 +42,17 @@ pub async fn get_client_config(
         ));
     }
 
-    let (site, auth) =
-        sqlx::query_as::<
-            _,
-            (
-                sqlx::types::Json<SiteConfig>,
-                sqlx::types::Json<AuthConfig>,
-            ),
-        >("SELECT site, authentication FROM server_config WHERE id = 'default'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| (row.0 .0, row.1 .0))
-        .unwrap_or_else(|| {
-            (
-                SiteConfig::default(),
-                AuthConfig::default(),
-            )
-        });
-    
+    let (site, auth) = sqlx::query_as::<
+        _,
+        (sqlx::types::Json<SiteConfig>, sqlx::types::Json<AuthConfig>),
+    >("SELECT site, authentication FROM server_config WHERE id = 'default'")
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| (row.0 .0, row.1 .0))
+    .unwrap_or_else(|| (SiteConfig::default(), AuthConfig::default()));
+
     // Get email settings from provider system
     let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
         r#"
@@ -69,7 +60,7 @@ pub async fn get_client_config(
         WHERE enabled = true AND is_default = true
         ORDER BY tenant_id NULLS LAST
         LIMIT 1
-        "#
+        "#,
     )
     .fetch_optional(&state.db)
     .await
@@ -79,7 +70,12 @@ pub async fn get_client_config(
     let diagnostic_id = diagnostic_id(&site);
     Ok((
         axum::http::StatusCode::OK,
-        Json(legacy_config(&site, &auth, provider_settings.as_ref(), &diagnostic_id)),
+        Json(legacy_config(
+            &site,
+            &auth,
+            provider_settings.as_ref(),
+            &diagnostic_id,
+        )),
     ))
 }
 

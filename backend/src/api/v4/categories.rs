@@ -138,8 +138,9 @@ async fn get_category(
 ) -> ApiResult<Json<mm::SidebarCategory>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
     let team_id = resolve_team_id(&state, &params.team_id).await?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     // Fetch the specific category
     let category: Option<CategoryRow> = sqlx::query_as(
@@ -208,8 +209,9 @@ async fn update_category(
 ) -> ApiResult<Json<mm::SidebarCategory>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
     let team_id = resolve_team_id(&state, &params.team_id).await?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -297,8 +299,9 @@ async fn delete_category(
 ) -> ApiResult<Json<serde_json::Value>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
     let team_id = resolve_team_id(&state, &params.team_id).await?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes()));
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     // First check category exists
     let category: Option<CategoryRow> = sqlx::query_as(

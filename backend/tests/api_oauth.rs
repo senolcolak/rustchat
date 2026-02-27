@@ -11,7 +11,7 @@ use common::spawn_app;
 /// Helper to create an admin user and return auth token
 async fn create_test_admin(app: &common::TestApp) -> (String, Uuid) {
     let org_id = Uuid::new_v4();
-    
+
     // Create organization
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, $2)")
         .bind(org_id)
@@ -21,9 +21,12 @@ async fn create_test_admin(app: &common::TestApp) -> (String, Uuid) {
         .expect("Failed to create organization");
 
     // Register a user first
-    let username = format!("admin_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+    let username = format!(
+        "admin_{}",
+        Uuid::new_v4().to_string().split('-').next().unwrap()
+    );
     let email = format!("{}@test.com", username);
-    
+
     let user_data = serde_json::json!({
         "username": username,
         "email": email,
@@ -40,8 +43,12 @@ async fn create_test_admin(app: &common::TestApp) -> (String, Uuid) {
         .await
         .expect("Failed to register admin");
 
-    assert_eq!(200, response.status().as_u16(), "Failed to register admin user");
-    
+    assert_eq!(
+        200,
+        response.status().as_u16(),
+        "Failed to register admin user"
+    );
+
     // Update role to system_admin via SQL
     sqlx::query("UPDATE users SET role = 'system_admin' WHERE email = $1")
         .bind(&email)
@@ -63,8 +70,12 @@ async fn create_test_admin(app: &common::TestApp) -> (String, Uuid) {
         .await
         .expect("Failed to login");
 
-    assert_eq!(200, login_response.status().as_u16(), "Failed to login admin user");
-    
+    assert_eq!(
+        200,
+        login_response.status().as_u16(),
+        "Failed to login admin user"
+    );
+
     let body: serde_json::Value = login_response.json().await.unwrap();
     let token = body["token"].as_str().unwrap().to_string();
     (token, org_id)
@@ -73,7 +84,7 @@ async fn create_test_admin(app: &common::TestApp) -> (String, Uuid) {
 /// Helper to create a regular user and return auth token
 async fn create_test_user(app: &common::TestApp, role: &str) -> String {
     let org_id = Uuid::new_v4();
-    
+
     // Create organization
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, $2)")
         .bind(org_id)
@@ -83,9 +94,12 @@ async fn create_test_user(app: &common::TestApp, role: &str) -> String {
         .expect("Failed to create organization");
 
     // Register a user
-    let username = format!("user_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+    let username = format!(
+        "user_{}",
+        Uuid::new_v4().to_string().split('-').next().unwrap()
+    );
     let email = format!("{}@test.com", username);
-    
+
     let user_data = serde_json::json!({
         "username": username,
         "email": email,
@@ -103,7 +117,7 @@ async fn create_test_user(app: &common::TestApp, role: &str) -> String {
         .expect("Failed to register user");
 
     assert_eq!(200, response.status().as_u16(), "Failed to register user");
-    
+
     // Update role via SQL
     sqlx::query("UPDATE users SET role = $1 WHERE email = $2")
         .bind(role)
@@ -126,8 +140,12 @@ async fn create_test_user(app: &common::TestApp, role: &str) -> String {
         .await
         .expect("Failed to login");
 
-    assert_eq!(200, login_response.status().as_u16(), "Failed to login user");
-    
+    assert_eq!(
+        200,
+        login_response.status().as_u16(),
+        "Failed to login user"
+    );
+
     let body: serde_json::Value = login_response.json().await.unwrap();
     body["token"].as_str().unwrap().to_string()
 }
@@ -163,7 +181,12 @@ async fn create_test_sso_config(
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK, "Failed to create SSO config: {:?}", response.text().await);
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Failed to create SSO config: {:?}",
+        response.text().await
+    );
     let body: serde_json::Value = response.json().await.unwrap();
     body["id"].as_str().unwrap().to_string()
 }
@@ -174,14 +197,7 @@ async fn test_oauth_login_redirects_to_provider() {
     let (token, _org_id) = create_test_admin(&app).await;
 
     // Create a test GitHub config (no OIDC discovery needed)
-    let _config_id = create_test_sso_config(
-        &app,
-        &token,
-        "github",
-        "test-github",
-        None,
-    )
-    .await;
+    let _config_id = create_test_sso_config(&app, &token, "github", "test-github", None).await;
 
     // Test login endpoint
     let response = app
@@ -195,7 +211,11 @@ async fn test_oauth_login_redirects_to_provider() {
         .unwrap();
 
     // Should redirect (302 or 307)
-    assert!(response.status().is_redirection(), "Expected redirect, got {:?}", response.status());
+    assert!(
+        response.status().is_redirection(),
+        "Expected redirect, got {:?}",
+        response.status()
+    );
 }
 
 #[tokio::test]
@@ -204,14 +224,7 @@ async fn test_oauth_callback_invalid_state_returns_error() {
     let (token, _org_id) = create_test_admin(&app).await;
 
     // Create a test GitHub config (no OIDC discovery needed)
-    let _config_id = create_test_sso_config(
-        &app,
-        &token,
-        "github",
-        "test-github",
-        None,
-    )
-    .await;
+    let _config_id = create_test_sso_config(&app, &token, "github", "test-github", None).await;
 
     // Test callback with invalid state
     let response = app
@@ -232,9 +245,14 @@ async fn test_oauth_callback_invalid_state_returns_error() {
         "Expected redirect or 400, got {:?}",
         status
     );
-    
+
     if status.is_redirection() {
-        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(location.contains("/login") || location.contains("error"));
     }
 }
@@ -275,7 +293,10 @@ async fn test_admin_sso_crud_operations() {
     assert_eq!(created["issuer_url"], "https://auth.example.com");
     // Secret should NOT be returned
     assert!(!created.as_object().unwrap().contains_key("client_secret"));
-    assert!(!created.as_object().unwrap().contains_key("client_secret_encrypted"));
+    assert!(!created
+        .as_object()
+        .unwrap()
+        .contains_key("client_secret_encrypted"));
 
     // List
     let list_response = app
@@ -463,7 +484,10 @@ async fn test_sso_config_response_excludes_secrets() {
     let body_str = body.to_string();
     assert!(!body_str.contains("super-secret"));
     assert!(!body.as_object().unwrap().contains_key("client_secret"));
-    assert!(!body.as_object().unwrap().contains_key("client_secret_encrypted"));
+    assert!(!body
+        .as_object()
+        .unwrap()
+        .contains_key("client_secret_encrypted"));
 
     // Verify public fields are present
     assert_eq!(body["client_id"], "public-id");
@@ -566,7 +590,10 @@ async fn test_sso_list_includes_login_url() {
 
     // Enable SSO
     app.api_client
-        .patch(&format!("{}/api/v1/admin/config/authentication", app.address))
+        .patch(&format!(
+            "{}/api/v1/admin/config/authentication",
+            app.address
+        ))
         .bearer_auth(&token)
         .json(&json!({
             "enable_email_password": true,
@@ -587,8 +614,14 @@ async fn test_sso_list_includes_login_url() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let providers: Vec<serde_json::Value> = response.json().await.unwrap();
-    
+
     assert!(!providers.is_empty());
-    let provider = providers.iter().find(|p| p["provider_key"] == "my-github").unwrap();
-    assert!(provider["login_url"].as_str().unwrap().contains("/oauth2/my-github/login"));
+    let provider = providers
+        .iter()
+        .find(|p| p["provider_key"] == "my-github")
+        .unwrap();
+    assert!(provider["login_url"]
+        .as_str()
+        .unwrap()
+        .contains("/oauth2/my-github/login"));
 }

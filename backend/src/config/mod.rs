@@ -24,7 +24,7 @@ pub struct Config {
 
     /// PostgreSQL database URL
     pub database_url: String,
-    
+
     /// Database connection pool configuration
     #[serde(default)]
     pub db_pool: DbPoolConfig,
@@ -99,7 +99,7 @@ pub struct Config {
     /// Calls plugin configuration
     #[serde(default)]
     pub calls: CallsConfig,
-    
+
     /// Security policy configuration
     #[serde(default)]
     pub security: SecurityConfig,
@@ -219,19 +219,19 @@ pub struct DbPoolConfig {
     /// Maximum number of connections in the pool
     #[serde(default = "default_db_pool_max_connections")]
     pub max_connections: u32,
-    
+
     /// Minimum number of connections to maintain
     #[serde(default = "default_db_pool_min_connections")]
     pub min_connections: u32,
-    
+
     /// Connection timeout in seconds
     #[serde(default = "default_db_pool_acquire_timeout")]
     pub acquire_timeout_secs: u64,
-    
+
     /// Idle connection timeout in seconds
     #[serde(default = "default_db_pool_idle_timeout")]
     pub idle_timeout_secs: u64,
-    
+
     /// Max connection lifetime in seconds
     #[serde(default = "default_db_pool_max_lifetime")]
     pub max_lifetime_secs: u64,
@@ -293,23 +293,23 @@ fn default_db_pool_max_lifetime() -> u64 {
 /// Security policy configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct SecurityConfig {
-    /// Allow WebSocket authentication via query parameter (token=...)
-    /// Set to false in production to prevent token leakage via logs/referrers
+    /// Deprecated compatibility toggle (query-token auth was removed).
+    /// Any `true` value now fails config validation.
     #[serde(default = "default_ws_allow_query_token")]
     pub ws_allow_query_token: bool,
-    
-    /// OAuth token delivery method: "query" (legacy/insecure) or "cookie" (secure)
+
+    /// OAuth token delivery method. Only `cookie` is supported.
     #[serde(default = "default_oauth_token_delivery")]
     pub oauth_token_delivery: String,
-    
+
     /// Enable global rate limiting for auth endpoints
     #[serde(default = "default_rate_limit_enabled")]
     pub rate_limit_enabled: bool,
-    
+
     /// Rate limit: requests per minute per IP for auth endpoints
     #[serde(default = "default_rate_limit_auth_per_minute")]
     pub rate_limit_auth_per_minute: u32,
-    
+
     /// Rate limit: WebSocket connection attempts per minute per IP
     #[serde(default = "default_rate_limit_ws_per_minute")]
     pub rate_limit_ws_per_minute: u32,
@@ -502,22 +502,22 @@ impl Config {
         let config = builder.build()?;
         let mut settings: Config = config.try_deserialize()?;
         settings.apply_calls_env_overrides()?;
-        
+
         // Validate security settings
         settings.validate_security()?;
-        
+
         Ok(settings)
     }
-    
+
     /// Validate security-critical configuration
     fn validate_security(&self) -> anyhow::Result<()> {
         let validation = security::validate_secrets(self);
-        
+
         // Log all warnings
         for warning in &validation.warnings {
             tracing::warn!("Security configuration warning: {}", warning);
         }
-        
+
         if self.is_production() {
             // In production, fail fast on security issues
             if !validation.is_valid {
@@ -535,7 +535,62 @@ impl Config {
                 tracing::warn!("Security configuration issue (allowed in dev): {}", error);
             }
         }
-        
+
+        let oauth_delivery = self
+            .security
+            .oauth_token_delivery
+            .trim()
+            .to_ascii_lowercase();
+        if oauth_delivery != "cookie" {
+            anyhow::bail!(
+                "Invalid RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY value '{}'. Query-token delivery has been removed; expected 'cookie'.",
+                self.security.oauth_token_delivery
+            );
+        }
+
+        if self.security.ws_allow_query_token {
+            anyhow::bail!(
+                "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true is no longer supported. WebSocket query-token authentication has been removed."
+            );
+        }
+
+        if self.is_production() {
+            if let Ok(site_url) = std::env::var("RUSTCHAT_SITE_URL") {
+                let normalized = site_url.trim().to_ascii_lowercase();
+                if !normalized.is_empty() && !normalized.starts_with("https://") {
+                    anyhow::bail!(
+                        "RUSTCHAT_SITE_URL must use https:// in production (current value: '{}').",
+                        site_url
+                    );
+                }
+            }
+
+            if let Some(origins) = self.cors_allowed_origins.as_deref() {
+                let insecure_origins: Vec<&str> = origins
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|origin| !origin.is_empty())
+                    .filter(|origin| origin.to_ascii_lowercase().starts_with("http://"))
+                    .collect();
+
+                if !insecure_origins.is_empty() {
+                    anyhow::bail!(
+                        "In production, RUSTCHAT_CORS_ALLOWED_ORIGINS must use https:// only. Insecure origin(s): {}",
+                        insecure_origins.join(", ")
+                    );
+                }
+            }
+        } else {
+            if let Ok(site_url) = std::env::var("RUSTCHAT_SITE_URL") {
+                let normalized = site_url.trim().to_ascii_lowercase();
+                if !normalized.is_empty() && !normalized.starts_with("https://") {
+                    tracing::warn!(
+                        "RUSTCHAT_SITE_URL does not use https:// (allowed in non-production)"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 

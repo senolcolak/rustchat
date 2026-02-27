@@ -91,7 +91,11 @@ impl SsoProviderType {
         match self {
             SsoProviderType::GitHub => vec!["read:user".to_string(), "user:email".to_string()],
             SsoProviderType::Google | SsoProviderType::Oidc | SsoProviderType::Saml => {
-                vec!["openid".to_string(), "profile".to_string(), "email".to_string()]
+                vec![
+                    "openid".to_string(),
+                    "profile".to_string(),
+                    "email".to_string(),
+                ]
             }
         }
     }

@@ -64,7 +64,9 @@ fn decrypt_current(encoded: &str, key: &str) -> Result<String, AppError> {
         .map_err(|e| AppError::Internal(format!("Decryption failed: invalid encoding ({})", e)))?;
 
     if payload.len() <= SALT_LEN + NONCE_LEN {
-        return Err(AppError::Internal("Decryption failed: malformed ciphertext".to_string()));
+        return Err(AppError::Internal(
+            "Decryption failed: malformed ciphertext".to_string(),
+        ));
     }
 
     let (salt, rest) = payload.split_at(SALT_LEN);

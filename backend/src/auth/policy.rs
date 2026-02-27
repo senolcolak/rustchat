@@ -97,7 +97,7 @@ impl Role {
     pub fn system_admin() -> Self {
         use permissions::*;
         let mut permissions = HashSet::new();
-        
+
         // Admin has all permissions
         permissions.insert(ADMIN_FULL);
         permissions.insert(USER_MANAGE);
@@ -105,34 +105,34 @@ impl Role {
         permissions.insert(CHANNEL_MANAGE);
         permissions.insert(SYSTEM_MANAGE);
         permissions.insert(POST_DELETE); // Can delete any post
-        
+
         Self {
             name: "system_admin".to_string(),
             permissions,
         }
     }
-    
+
     /// Create a team admin role
     pub fn team_admin() -> Self {
         use permissions::*;
         let mut permissions = HashSet::new();
-        
+
         permissions.insert(TEAM_MANAGE);
         permissions.insert(CHANNEL_MANAGE);
         permissions.insert(USER_READ);
         permissions.insert(POST_DELETE); // Can delete posts in their teams
-        
+
         Self {
             name: "team_admin".to_string(),
             permissions,
         }
     }
-    
+
     /// Create a standard member role
     pub fn member() -> Self {
         use permissions::*;
         let mut permissions = HashSet::new();
-        
+
         // Basic permissions for regular users
         permissions.insert(USER_READ);
         permissions.insert(USER_UPDATE); // Own profile only
@@ -145,35 +145,35 @@ impl Role {
         permissions.insert(FILE_CREATE);
         permissions.insert(FILE_READ);
         permissions.insert(SYSTEM_READ);
-        
+
         Self {
             name: "member".to_string(),
             permissions,
         }
     }
-    
+
     /// Create a guest role with limited permissions
     pub fn guest() -> Self {
         use permissions::*;
         let mut permissions = HashSet::new();
-        
+
         permissions.insert(USER_READ);
         permissions.insert(TEAM_READ);
         permissions.insert(CHANNEL_READ);
         permissions.insert(POST_READ);
         permissions.insert(FILE_READ);
-        
+
         Self {
             name: "guest".to_string(),
             permissions,
         }
     }
-    
+
     /// Check if role has a specific permission
     pub fn has_permission(&self, permission: &Permission) -> bool {
         self.permissions.contains(permission)
     }
-    
+
     /// Get role by name
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -204,19 +204,19 @@ impl PolicyEngine {
             Some(r) => r,
             None => return AuthzResult::Deny("Unknown role"),
         };
-        
+
         // Admin role has all permissions
         if role.has_permission(&permissions::ADMIN_FULL) {
             return AuthzResult::Allow;
         }
-        
+
         if role.has_permission(permission) {
             AuthzResult::Allow
         } else {
             AuthzResult::Deny("Permission denied")
         }
     }
-    
+
     /// Check if user can access a resource they own
     pub fn check_ownership(
         role: &str,
@@ -228,7 +228,7 @@ impl PolicyEngine {
         if user_id == resource_owner_id {
             return AuthzResult::Allow;
         }
-        
+
         // Otherwise check role permission
         Self::check_permission(role, permission)
     }
@@ -239,7 +239,7 @@ impl PolicyEngine {
 macro_rules! require_permission {
     ($auth_user:expr, $permission:expr) => {
         match $crate::auth::policy::PolicyEngine::check_permission(&$auth_user.role, &$permission) {
-            $crate::auth::policy::AuthzResult::Allow => {},
+            $crate::auth::policy::AuthzResult::Allow => {}
             $crate::auth::policy::AuthzResult::Deny(reason) => {
                 return Err($crate::error::AppError::Forbidden(reason.to_string()));
             }
@@ -251,8 +251,12 @@ macro_rules! require_permission {
 macro_rules! require_admin {
     ($auth_user:expr) => {
         match $auth_user.role.as_str() {
-            "system_admin" | "admin" => {},
-            _ => return Err($crate::error::AppError::Forbidden("Admin access required".to_string())),
+            "system_admin" | "admin" => {}
+            _ => {
+                return Err($crate::error::AppError::Forbidden(
+                    "Admin access required".to_string(),
+                ))
+            }
         }
     };
 }
@@ -265,7 +269,7 @@ mod tests {
     #[test]
     fn test_system_admin_has_all_permissions() {
         let admin = Role::system_admin();
-        
+
         assert!(admin.has_permission(&ADMIN_FULL));
         assert!(admin.has_permission(&USER_MANAGE));
         assert!(admin.has_permission(&SYSTEM_MANAGE));
@@ -275,7 +279,7 @@ mod tests {
     #[test]
     fn test_member_limited_permissions() {
         let member = Role::member();
-        
+
         assert!(member.has_permission(&POST_CREATE));
         assert!(member.has_permission(&CHANNEL_READ));
         assert!(!member.has_permission(&USER_MANAGE));
@@ -285,7 +289,7 @@ mod tests {
     #[test]
     fn test_guest_readonly() {
         let guest = Role::guest();
-        
+
         assert!(guest.has_permission(&POST_READ));
         assert!(!guest.has_permission(&POST_CREATE));
         assert!(!guest.has_permission(&CHANNEL_CREATE));
@@ -297,12 +301,12 @@ mod tests {
             PolicyEngine::check_permission("system_admin", &POST_DELETE),
             AuthzResult::Allow
         );
-        
+
         assert_eq!(
             PolicyEngine::check_permission("member", &POST_CREATE),
             AuthzResult::Allow
         );
-        
+
         assert!(matches!(
             PolicyEngine::check_permission("guest", &POST_CREATE),
             AuthzResult::Deny(_)
@@ -313,19 +317,19 @@ mod tests {
     fn test_ownership_check() {
         let user1 = Uuid::new_v4();
         let user2 = Uuid::new_v4();
-        
+
         // Owner can access their own resource
         assert_eq!(
             PolicyEngine::check_ownership("guest", &POST_UPDATE, user1, user1),
             AuthzResult::Allow
         );
-        
+
         // Non-owner needs permission
         assert_eq!(
             PolicyEngine::check_ownership("member", &POST_UPDATE, user1, user2),
             AuthzResult::Allow // Members have POST_UPDATE
         );
-        
+
         // Guest can't update others' posts
         assert!(matches!(
             PolicyEngine::check_ownership("guest", &POST_UPDATE, user1, user2),

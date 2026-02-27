@@ -43,6 +43,9 @@ pub use manager::SFUManager;
 use signaling::{SignalingMessage, SignalingServer};
 use tracks::TrackManager;
 
+pub const VOICE_EVENT_CHANNEL_CAPACITY: usize = 1024;
+const SIGNALING_CHANNEL_CAPACITY: usize = 256;
+
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
     VoiceOn { call_id: Uuid, session_id: Uuid },
@@ -57,7 +60,7 @@ pub struct Participant {
     pub audio_track: Option<Arc<TrackLocalStaticRTP>>,
     pub video_track: Option<Arc<TrackLocalStaticRTP>>,
     pub screen_track: Option<Arc<TrackLocalStaticRTP>>,
-    pub signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+    pub signaling_tx: mpsc::Sender<SignalingMessage>,
     pub is_screen_sharing: bool,
 }
 
@@ -69,7 +72,7 @@ pub struct SFU {
     track_manager: Arc<TrackManager>,
     signaling: Arc<SignalingServer>,
     pending_ice_candidates: Arc<RwLock<HashMap<Uuid, Vec<RTCIceCandidateInit>>>>,
-    voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+    voice_event_tx: mpsc::Sender<VoiceEvent>,
     webrtc_api: Arc<API>,
     webrtc_api_fallback: Arc<API>,
 }
@@ -106,7 +109,7 @@ impl SFU {
     pub async fn new(
         call_id: Uuid,
         config: CallsConfig,
-        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+        voice_event_tx: mpsc::Sender<VoiceEvent>,
         shared_udp_mux: Option<Arc<dyn UDPMux + Send + Sync>>,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         let participants = Arc::new(RwLock::new(HashMap::new()));
@@ -199,10 +202,7 @@ impl SFU {
         user_id: Uuid,
         session_id: Uuid,
     ) -> Result<
-        (
-            Arc<RTCPeerConnection>,
-            mpsc::UnboundedReceiver<SignalingMessage>,
-        ),
+        (Arc<RTCPeerConnection>, mpsc::Receiver<SignalingMessage>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
         // Create ICE servers configuration
@@ -241,7 +241,7 @@ impl SFU {
         };
 
         // Create signaling channel
-        let (signaling_tx, signaling_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, signaling_rx) = mpsc::channel(SIGNALING_CHANNEL_CAPACITY);
 
         // Set up track handling
         self.setup_track_handlers(&peer_connection, user_id, session_id)
@@ -354,10 +354,7 @@ impl SFU {
         user_id: Uuid,
         session_id: Uuid,
     ) -> Result<
-        (
-            Arc<RTCPeerConnection>,
-            mpsc::UnboundedReceiver<SignalingMessage>,
-        ),
+        (Arc<RTCPeerConnection>, mpsc::Receiver<SignalingMessage>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
         info!(session_id = %session_id, "Recreating participant PeerConnection");
@@ -619,7 +616,7 @@ impl SFU {
         track_manager: Arc<TrackManager>,
         participants: Arc<RwLock<HashMap<Uuid, Participant>>>,
         sender_session_id: Uuid,
-        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+        voice_event_tx: mpsc::Sender<VoiceEvent>,
     ) {
         // Read RTP packets from the track
         let mut rtp_buffer = vec![0u8; 1500];
@@ -695,10 +692,13 @@ impl SFU {
                         last_packet_at = tokio::time::Instant::now();
                         if !voice_on {
                             voice_on = true;
-                            let _ = voice_event_tx.send(VoiceEvent::VoiceOn {
-                                call_id,
-                                session_id: sender_session_id,
-                            });
+                            try_send_voice_event(
+                                &voice_event_tx,
+                                VoiceEvent::VoiceOn {
+                                    call_id,
+                                    session_id: sender_session_id,
+                                },
+                            );
                         }
                     }
                     // Get the packet data length
@@ -793,10 +793,13 @@ impl SFU {
                 && last_packet_at.elapsed() > tokio::time::Duration::from_millis(500)
             {
                 voice_on = false;
-                let _ = voice_event_tx.send(VoiceEvent::VoiceOff {
-                    call_id,
-                    session_id: sender_session_id,
-                });
+                try_send_voice_event(
+                    &voice_event_tx,
+                    VoiceEvent::VoiceOff {
+                        call_id,
+                        session_id: sender_session_id,
+                    },
+                );
             }
         }
 
@@ -819,7 +822,7 @@ impl SFU {
         &self,
         peer_connection: &Arc<RTCPeerConnection>,
         _user_id: Uuid,
-        signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+        signaling_tx: mpsc::Sender<SignalingMessage>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Clone signaling_tx for each handler since it will be moved into closures
         let signaling_tx_ice = signaling_tx.clone();
@@ -843,14 +846,19 @@ impl SFU {
                         "SFU generated ICE candidate - sending to client"
                     );
 
-                    let _ = signaling_tx_ice.send(SignalingMessage::IceCandidate {
-                        candidate: candidate_str,
-                        sdp_mid: candidate_json.as_ref().and_then(|j| j.sdp_mid.clone()),
-                        sdp_mline_index: candidate_json.as_ref().and_then(|j| j.sdp_mline_index),
-                        username_fragment: candidate_json
-                            .as_ref()
-                            .and_then(|j| j.username_fragment.clone()),
-                    });
+                    try_send_signaling(
+                        &signaling_tx_ice,
+                        SignalingMessage::IceCandidate {
+                            candidate: candidate_str,
+                            sdp_mid: candidate_json.as_ref().and_then(|j| j.sdp_mid.clone()),
+                            sdp_mline_index: candidate_json
+                                .as_ref()
+                                .and_then(|j| j.sdp_mline_index),
+                            username_fragment: candidate_json
+                                .as_ref()
+                                .and_then(|j| j.username_fragment.clone()),
+                        },
+                    );
                 } else {
                     info!("ICE candidate gathering completed (null candidate received)");
                 }
@@ -862,9 +870,12 @@ impl SFU {
         // Handle ICE connection state changes
         peer_connection.on_ice_connection_state_change(Box::new(
             move |state: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState| {
-                let _ = signaling_tx_ice_state.send(SignalingMessage::IceConnectionState {
-                    state: format!("{:?}", state),
-                });
+                try_send_signaling(
+                    &signaling_tx_ice_state,
+                    SignalingMessage::IceConnectionState {
+                        state: format!("{:?}", state),
+                    },
+                );
                 Box::pin(async {})
             },
         ));
@@ -872,9 +883,12 @@ impl SFU {
         // Handle peer connection state changes (using ICE connection state as proxy)
         peer_connection.on_peer_connection_state_change(Box::new(
             move |state: webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState| {
-                let _ = signaling_tx_conn_state.send(SignalingMessage::ConnectionState {
-                    state: format!("{:?}", state),
-                });
+                try_send_signaling(
+                    &signaling_tx_conn_state,
+                    SignalingMessage::ConnectionState {
+                        state: format!("{:?}", state),
+                    },
+                );
                 Box::pin(async {})
             },
         ));
@@ -921,12 +935,12 @@ impl SFU {
     pub async fn get_signaling_receiver(
         &self,
         session_id: Uuid,
-    ) -> Option<mpsc::UnboundedReceiver<SignalingMessage>> {
+    ) -> Option<mpsc::Receiver<SignalingMessage>> {
         let participants = self.participants.read().await;
 
         if let Some(_participant) = participants.get(&session_id) {
             // Create a new signaling channel
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(SIGNALING_CHANNEL_CAPACITY);
 
             // Register the new channel with the signaling server
             // Drop the read lock first to avoid deadlock
@@ -1006,6 +1020,30 @@ impl Drop for SFU {
     fn drop(&mut self) {
         // Cleanup when SFU is dropped
         // In production, you'd want to properly close all peer connections
+    }
+}
+
+fn try_send_signaling(tx: &mpsc::Sender<SignalingMessage>, message: SignalingMessage) {
+    match tx.try_send(message) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("Signaling channel full; dropping signaling message");
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!("Signaling channel closed; dropping signaling message");
+        }
+    }
+}
+
+fn try_send_voice_event(tx: &mpsc::Sender<VoiceEvent>, event: VoiceEvent) {
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("Voice event channel full; dropping voice activity event");
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!("Voice event channel closed; dropping voice activity event");
+        }
     }
 }
 

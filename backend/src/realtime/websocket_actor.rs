@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, trace, warn};
@@ -29,6 +30,10 @@ const WRITE_WAIT: Duration = Duration::from_secs(30);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Number of missed heartbeat windows tolerated before closing.
 const MAX_MISSED_HEARTBEATS: u32 = 2;
+/// Actor command buffer capacity per connection.
+const COMMAND_BUFFER_CAPACITY: usize = 256;
+/// Actor event buffer capacity per connection.
+const EVENT_BUFFER_CAPACITY: usize = 256;
 
 fn is_benign_disconnect_error(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
@@ -36,6 +41,20 @@ fn is_benign_disconnect_error(error: &str) -> bool {
         || e.contains("connection reset by peer")
         || e.contains("broken pipe")
         || e.contains("connection closed")
+}
+
+fn emit_event(event_tx: &mpsc::Sender<WsEvent>, connection_id: &str, event: WsEvent) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            warn!(
+                connection_id = %connection_id,
+                "Dropping websocket event because event queue is full"
+            );
+            false
+        }
+        Err(TrySendError::Closed(_)) => false,
+    }
 }
 
 /// WebSocket close codes
@@ -109,9 +128,9 @@ pub struct WebSocketActor {
     /// Connection store for session management
     store: Arc<ConnectionStore>,
     /// Channel for sending commands to the actor
-    cmd_tx: mpsc::UnboundedSender<WsCommand>,
+    cmd_tx: mpsc::Sender<WsCommand>,
     /// Channel for receiving events from the actor
-    event_rx: Mutex<mpsc::UnboundedReceiver<WsEvent>>,
+    event_rx: Mutex<mpsc::Receiver<WsEvent>>,
     /// Last activity timestamp (for pong timeout)
     #[allow(dead_code)]
     last_activity: Arc<std::sync::atomic::AtomicU64>,
@@ -147,8 +166,8 @@ impl WebSocketActor {
         let conn_id = state.connection_id.clone();
 
         // Create channels for actor communication
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_BUFFER_CAPACITY);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER_CAPACITY);
 
         let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(
             Instant::now().elapsed().as_secs(),
@@ -206,8 +225,11 @@ impl WebSocketActor {
         }
 
         self.cmd_tx
-            .send(WsCommand::SendMessage(msg))
-            .map_err(|e| format!("Failed to send command: {}", e))
+            .try_send(WsCommand::SendMessage(msg))
+            .map_err(|e| match e {
+                TrySendError::Full(_) => "Connection command queue is full".to_string(),
+                TrySendError::Closed(_) => "Connection is closed".to_string(),
+            })
     }
 
     /// Send raw JSON to the client
@@ -217,14 +239,19 @@ impl WebSocketActor {
         }
 
         self.cmd_tx
-            .send(WsCommand::SendRaw(data))
-            .map_err(|e| format!("Failed to send command: {}", e))
+            .try_send(WsCommand::SendRaw(data))
+            .map_err(|e| match e {
+                TrySendError::Full(_) => "Connection command queue is full".to_string(),
+                TrySendError::Closed(_) => "Connection is closed".to_string(),
+            })
     }
 
     /// Close the connection
     pub fn close(&self, code: u16, reason: &str) {
         self.is_closing.store(true, Ordering::SeqCst);
-        let _ = self.cmd_tx.send(WsCommand::Close(code, reason.to_string()));
+        let _ = self
+            .cmd_tx
+            .try_send(WsCommand::Close(code, reason.to_string()));
     }
 
     /// Receive the next event from the actor
@@ -286,8 +313,8 @@ struct ActorTask {
     socket: WebSocket,
     state: Arc<ConnectionState>,
     store: Arc<ConnectionStore>,
-    cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
-    event_tx: mpsc::UnboundedSender<WsEvent>,
+    cmd_rx: mpsc::Receiver<WsCommand>,
+    event_tx: mpsc::Sender<WsEvent>,
     #[allow(dead_code)]
     last_activity: Arc<std::sync::atomic::AtomicU64>,
     is_closing: Arc<AtomicBool>,
@@ -297,6 +324,8 @@ struct ActorTask {
 
 impl ActorTask {
     async fn run(mut self) {
+        let event_tx = self.event_tx.clone();
+        let event_connection_id = self.connection_id.clone();
         let (mut ws_sink, mut ws_stream) = self.socket.split();
 
         // Create ping interval
@@ -324,14 +353,14 @@ impl ActorTask {
                                 "Received text message"
                             );
 
-                            if let Err(_) = self.event_tx.send(WsEvent::MessageReceived(text_str)) {
+                            if !emit_event(&event_tx, &event_connection_id, WsEvent::MessageReceived(text_str)) {
                                 break;
                             }
                         }
                         Some(Ok(Message::Binary(bin))) => {
                             *last_pong.lock().unwrap() = Instant::now();
                             self.state.touch();
-                            if let Err(_) = self.event_tx.send(WsEvent::BinaryReceived(bin.to_vec())) {
+                            if !emit_event(&event_tx, &event_connection_id, WsEvent::BinaryReceived(bin.to_vec())) {
                                 break;
                             }
                         }
@@ -340,7 +369,7 @@ impl ActorTask {
                             *last_pong.lock().unwrap() = Instant::now();
                             self.state.touch();
 
-                            if let Err(_) = self.event_tx.send(WsEvent::PongReceived) {
+                            if !emit_event(&event_tx, &event_connection_id, WsEvent::PongReceived) {
                                 break;
                             }
                         }
@@ -371,7 +400,7 @@ impl ActorTask {
                                 reason: "Client closed".to_string(),
                             });
 
-                            let _ = self.event_tx.send(WsEvent::Closed(reason));
+                            let _ = emit_event(&event_tx, &event_connection_id, WsEvent::Closed(reason));
                             break;
                         }
                         Some(Err(e)) => {
@@ -382,7 +411,7 @@ impl ActorTask {
                                     error = %error_text,
                                     "WebSocket disconnected without clean close handshake"
                                 );
-                                let _ = self.event_tx.send(WsEvent::Closed(CloseReason {
+                                let _ = emit_event(&event_tx, &event_connection_id, WsEvent::Closed(CloseReason {
                                     code: close_codes::GOING_AWAY,
                                     reason: "Peer disconnected".to_string(),
                                 }));
@@ -392,7 +421,7 @@ impl ActorTask {
                                     error = %error_text,
                                     "WebSocket error"
                                 );
-                                let _ = self.event_tx.send(WsEvent::Error(error_text));
+                                let _ = emit_event(&event_tx, &event_connection_id, WsEvent::Error(error_text));
                             }
                             break;
                         }
@@ -500,7 +529,10 @@ impl ActorTask {
                             };
 
                             let _ = ws_sink.send(Message::Close(Some(close_frame))).await;
-                            let _ = self.event_tx.send(WsEvent::Closed(CloseReason { code, reason: reason_clone }));
+                            let _ = emit_event(&event_tx, &event_connection_id, WsEvent::Closed(CloseReason {
+                                code,
+                                reason: reason_clone,
+                            }));
                             break;
                         }
                         Some(WsCommand::SubscribeChannels(channels)) => {

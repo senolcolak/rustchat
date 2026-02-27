@@ -24,7 +24,7 @@ async fn create_test_user(db: &PgPool, email: &str) -> (Uuid, String) {
     let user_id = Uuid::new_v4();
     let username = format!("user_{}", user_id.to_string().split('-').next().unwrap());
     let password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."; // Dummy hash
-    
+
     sqlx::query(
         r#"
         INSERT INTO users (id, username, email, password_hash, display_name, is_active, role)
@@ -44,7 +44,7 @@ async fn create_test_user(db: &PgPool, email: &str) -> (Uuid, String) {
     .fetch_one(db)
     .await
     .expect("Failed to create test user");
-    
+
     (user_id, username)
 }
 
@@ -108,13 +108,12 @@ async fn test_request_password_reset_creates_token() {
     assert!(result.is_ok());
 
     // Verify token was created
-    let token_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM password_reset_tokens WHERE email = $1)",
-    )
-    .bind("test_reset@example.com")
-    .fetch_one(&app.db_pool)
-    .await
-    .expect("Failed to check token");
+    let token_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM password_reset_tokens WHERE email = $1)")
+            .bind("test_reset@example.com")
+            .fetch_one(&app.db_pool)
+            .await
+            .expect("Failed to check token");
 
     assert!(token_exists);
 }
@@ -137,13 +136,12 @@ async fn test_request_password_reset_anti_enumeration() {
     assert!(result.is_ok());
 
     // Token should be created even for non-existent user (anti-enumeration)
-    let token_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM password_reset_tokens WHERE email = $1)",
-    )
-    .bind("nonexistent@example.com")
-    .fetch_one(&app.db_pool)
-    .await
-    .expect("Failed to check token");
+    let token_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM password_reset_tokens WHERE email = $1)")
+            .bind("nonexistent@example.com")
+            .fetch_one(&app.db_pool)
+            .await
+            .expect("Failed to check token");
 
     assert!(token_exists);
 }
@@ -178,7 +176,7 @@ async fn test_password_reset_full_flow() {
     // Since we hash tokens, we'll create a test token directly
     let test_token = "test_token_for_flow_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     // Update the token hash to our known value
     sqlx::query("UPDATE password_reset_tokens SET token_hash = $1 WHERE email = $2")
         .bind(&test_token_hash)
@@ -191,25 +189,24 @@ async fn test_password_reset_full_flow() {
     let (validated_user_id, _) = validate_token(&app.db_pool, test_token)
         .await
         .expect("Token should be valid");
-    
+
     assert_eq!(validated_user_id, user_id);
 
     // Step 4: Reset password
     let new_password = "NewStr0ng!Passw0rd";
     let reset_result = reset_password(&app.db_pool, test_token, new_password).await;
-    
+
     assert!(reset_result.is_ok());
     assert_eq!(reset_result.unwrap(), user_id);
 
     // Step 5: Verify token is now marked as used
-    let used_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT used_at FROM password_reset_tokens WHERE token_hash = $1"
-    )
-    .bind(&test_token_hash)
-    .fetch_one(&app.db_pool)
-    .await
-    .expect("Failed to check used_at");
-    
+    let used_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT used_at FROM password_reset_tokens WHERE token_hash = $1")
+            .bind(&test_token_hash)
+            .fetch_one(&app.db_pool)
+            .await
+            .expect("Failed to check used_at");
+
     assert!(used_at.is_some());
 }
 
@@ -223,12 +220,12 @@ async fn test_password_reset_token_replay_protection() {
     // Create a test token
     let test_token = "test_token_for_replay_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -255,12 +252,12 @@ async fn test_password_reset_expired_token() {
     // Create an expired token directly in database
     let test_token = "test_token_expired_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() - INTERVAL '1 minute')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -292,12 +289,12 @@ async fn test_password_policy_validation() {
     // Create a test token
     let test_token = "test_token_policy_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -308,27 +305,45 @@ async fn test_password_policy_validation() {
 
     // Test too short password
     let result = reset_password(&app.db_pool, test_token, "Short1!").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 
     // Test missing uppercase
     let result = reset_password(&app.db_pool, test_token, "lowercase123!").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 
     // Test missing lowercase
     let result = reset_password(&app.db_pool, test_token, "UPPERCASE123!").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 
     // Test missing digit
     let result = reset_password(&app.db_pool, test_token, "PasswordNoDigit!").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 
     // Test missing special char
     let result = reset_password(&app.db_pool, test_token, "PasswordNoSpecial123").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 
     // Test common password
     let result = reset_password(&app.db_pool, test_token, "Password123!").await;
-    assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+    assert!(matches!(
+        result,
+        Err(PasswordResetError::InvalidPassword(_))
+    ));
 }
 
 #[tokio::test]
@@ -421,7 +436,10 @@ async fn test_api_forgot_password_endpoint() {
     assert_eq!(200, response.status().as_u16());
 
     let body: serde_json::Value = response.json().await.expect("Failed to parse JSON");
-    assert!(body.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(body
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false));
 }
 
 #[tokio::test]
@@ -444,7 +462,10 @@ async fn test_api_forgot_password_anti_enumeration() {
     assert_eq!(200, response.status().as_u16());
 
     let body: serde_json::Value = response.json().await.expect("Failed to parse JSON");
-    assert!(body.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(body
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false));
 }
 
 #[tokio::test]
@@ -455,12 +476,12 @@ async fn test_api_reset_password_endpoint() {
     // Create a test token directly
     let test_token = "test_api_token_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -484,7 +505,10 @@ async fn test_api_reset_password_endpoint() {
     assert_eq!(200, response.status().as_u16());
 
     let body: serde_json::Value = response.json().await.expect("Failed to parse JSON");
-    assert!(body.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(body
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false));
 }
 
 #[tokio::test]
@@ -495,12 +519,12 @@ async fn test_api_validate_token_endpoint() {
     // Create a test token
     let test_token = "test_api_validate_token_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -559,12 +583,12 @@ async fn test_api_reset_with_weak_password() {
     // Create a test token
     let test_token = "test_api_weak_token_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -604,12 +628,12 @@ async fn test_password_reset_changes_password_hash() {
     // Create a test token
     let test_token = "test_hash_token_12345";
     let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
-    
+
     sqlx::query(
         r#"
         INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
         VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
-        "#
+        "#,
     )
     .bind(&test_token_hash)
     .bind(user_id)
@@ -632,7 +656,7 @@ async fn test_password_reset_changes_password_hash() {
 
     // Hash should have changed
     assert_ne!(original_hash, new_hash);
-    
+
     // New hash should be valid argon2
     assert!(new_hash.starts_with("$argon2id$"));
 }

@@ -297,8 +297,6 @@ pub async fn enforce_connection_limit(
     }
 }
 
-
-
 pub async fn fetch_username(state: &AppState, user_id: Uuid) -> Result<String, sqlx::Error> {
     sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE id = $1")
         .bind(user_id)
@@ -355,6 +353,11 @@ pub fn resolve_auth_token_secure(
     }
 
     None
+}
+
+/// Resolve auth token using secure transport only.
+pub fn resolve_auth_token(headers: &HeaderMap, protocol_token: Option<&str>) -> Option<String> {
+    resolve_auth_token_secure(headers, protocol_token)
 }
 
 pub fn validate_user_id(token: Option<&str>, state: &AppState) -> Option<Uuid> {
@@ -668,7 +671,15 @@ mod tests {
     #[test]
     fn resolve_token_uses_protocol_fallback() {
         let headers = HeaderMap::new();
-        let token = resolve_auth_token_secure(&headers, Some("abc.def.ghi"));
-        assert_eq!(token.as_deref(), Some("abc.def.ghi"));
+        let protocol_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature";
+        let token = resolve_auth_token_secure(&headers, Some(protocol_token));
+        assert_eq!(token.as_deref(), Some(protocol_token));
+    }
+
+    #[test]
+    fn resolve_token_without_secure_transport_is_none() {
+        let headers = HeaderMap::new();
+        let token = resolve_auth_token(&headers, None);
+        assert_eq!(token, None);
     }
 }

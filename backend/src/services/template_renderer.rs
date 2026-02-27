@@ -22,7 +22,9 @@ impl std::fmt::Display for TemplateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TemplateError::RenderError(msg) => write!(f, "Render error: {}", msg),
-            TemplateError::MissingVariable(name) => write!(f, "Missing required variable: {}", name),
+            TemplateError::MissingVariable(name) => {
+                write!(f, "Missing required variable: {}", name)
+            }
             TemplateError::InvalidTemplate(msg) => write!(f, "Invalid template: {}", msg),
             TemplateError::JsonError(msg) => write!(f, "JSON error: {}", msg),
         }
@@ -50,8 +52,8 @@ impl RenderContext {
     }
 
     pub fn with_variables<T: Serialize>(mut self, variables: T) -> TemplateResult<Self> {
-        self.variables = serde_json::to_value(variables)
-            .map_err(|e| TemplateError::JsonError(e.to_string()))?;
+        self.variables =
+            serde_json::to_value(variables).map_err(|e| TemplateError::JsonError(e.to_string()))?;
         Ok(self)
     }
 
@@ -96,11 +98,11 @@ impl TemplateRenderer {
     /// Create a new template renderer
     pub fn new() -> Self {
         let mut handlebars = Handlebars::new();
-        
+
         // Configure Handlebars for strict mode
         handlebars.set_strict_mode(true);
         handlebars.register_escape_fn(handlebars::no_escape);
-        
+
         // Register built-in helpers
         Self::register_helpers(&mut handlebars);
 
@@ -120,108 +122,142 @@ impl TemplateRenderer {
     /// Register built-in Handlebars helpers
     fn register_helpers(handlebars: &mut Handlebars) {
         // eq helper for comparisons
-        handlebars.register_helper("eq", Box::new(|h: &handlebars::Helper,
-                                                  _: &handlebars::Handlebars,
-                                                  _: &handlebars::Context,
-                                                  _: &mut handlebars::RenderContext,
-                                                  out: &mut dyn handlebars::Output|
-                                                  -> handlebars::HelperResult {
-            let param0 = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            let param1 = h.param(1).and_then(|v| v.value().as_str()).unwrap_or("");
-            out.write(if param0 == param1 { "true" } else { "" })?;
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "eq",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    let param0 = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    let param1 = h.param(1).and_then(|v| v.value().as_str()).unwrap_or("");
+                    out.write(if param0 == param1 { "true" } else { "" })?;
+                    Ok(())
+                },
+            ),
+        );
 
         // ne helper (not equal)
-        handlebars.register_helper("ne", Box::new(|h: &handlebars::Helper,
-                                                  _: &handlebars::Handlebars,
-                                                  _: &handlebars::Context,
-                                                  _: &mut handlebars::RenderContext,
-                                                  out: &mut dyn handlebars::Output|
-                                                  -> handlebars::HelperResult {
-            let param0 = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            let param1 = h.param(1).and_then(|v| v.value().as_str()).unwrap_or("");
-            out.write(if param0 != param1 { "true" } else { "" })?;
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "ne",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    let param0 = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    let param1 = h.param(1).and_then(|v| v.value().as_str()).unwrap_or("");
+                    out.write(if param0 != param1 { "true" } else { "" })?;
+                    Ok(())
+                },
+            ),
+        );
 
         // upper helper
-        handlebars.register_helper("upper", Box::new(|h: &handlebars::Helper,
-                                                      _: &handlebars::Handlebars,
-                                                      _: &handlebars::Context,
-                                                      _: &mut handlebars::RenderContext,
-                                                      out: &mut dyn handlebars::Output|
-                                                      -> handlebars::HelperResult {
-            let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            out.write(&param.to_uppercase())?;
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "upper",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    out.write(&param.to_uppercase())?;
+                    Ok(())
+                },
+            ),
+        );
 
         // lower helper
-        handlebars.register_helper("lower", Box::new(|h: &handlebars::Helper,
-                                                      _: &handlebars::Handlebars,
-                                                      _: &handlebars::Context,
-                                                      _: &mut handlebars::RenderContext,
-                                                      out: &mut dyn handlebars::Output|
-                                                      -> handlebars::HelperResult {
-            let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            out.write(&param.to_lowercase())?;
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "lower",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    out.write(&param.to_lowercase())?;
+                    Ok(())
+                },
+            ),
+        );
 
         // truncate helper
-        handlebars.register_helper("truncate", Box::new(|h: &handlebars::Helper,
-                                                         _: &handlebars::Handlebars,
-                                                         _: &handlebars::Context,
-                                                         _: &mut handlebars::RenderContext,
-                                                         out: &mut dyn handlebars::Output|
-                                                         -> handlebars::HelperResult {
-            let text = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            let length = h.param(1).and_then(|v| v.value().as_i64()).unwrap_or(100) as usize;
-            if text.len() > length {
-                out.write(&format!("{}...", &text[..length]))?;
-            } else {
-                out.write(text)?;
-            }
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "truncate",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    let text = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    let length =
+                        h.param(1).and_then(|v| v.value().as_i64()).unwrap_or(100) as usize;
+                    if text.len() > length {
+                        out.write(&format!("{}...", &text[..length]))?;
+                    } else {
+                        out.write(text)?;
+                    }
+                    Ok(())
+                },
+            ),
+        );
 
         // format_date helper (simple implementation)
-        handlebars.register_helper("format_date", Box::new(|h: &handlebars::Helper,
-                                                            _: &handlebars::Handlebars,
-                                                            _: &handlebars::Context,
-                                                            _: &mut handlebars::RenderContext,
-                                                            out: &mut dyn handlebars::Output|
-                                                            -> handlebars::HelperResult {
-            // Simple date formatting - in production, use a proper date library
-            let date = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-            out.write(date)?;
-            Ok(())
-        }));
+        handlebars.register_helper(
+            "format_date",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    // Simple date formatting - in production, use a proper date library
+                    let date = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                    out.write(date)?;
+                    Ok(())
+                },
+            ),
+        );
     }
 
     /// Render a template string with context
-    pub fn render_template(&self, template: &str, context: &RenderContext) -> TemplateResult<String> {
+    pub fn render_template(
+        &self,
+        template: &str,
+        context: &RenderContext,
+    ) -> TemplateResult<String> {
         // Create a temporary template
         let template_name = "__temp__";
-        
+
         // Register the template (this is inefficient for single renders, but works)
         let mut hb = self.handlebars.clone();
         hb.register_template_string(template_name, template)
             .map_err(|e| TemplateError::InvalidTemplate(e.to_string()))?;
 
         // Render
-        let result = hb.render(template_name, &context.variables)
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("helper") && msg.contains("not defined") {
-                    // Extract missing variable name from error
-                    let var_name = msg.split('"').nth(1).unwrap_or("unknown").to_string();
-                    TemplateError::MissingVariable(var_name)
-                } else {
-                    TemplateError::RenderError(msg)
-                }
-            })?;
+        let result = hb.render(template_name, &context.variables).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("helper") && msg.contains("not defined") {
+                // Extract missing variable name from error
+                let var_name = msg.split('"').nth(1).unwrap_or("unknown").to_string();
+                TemplateError::MissingVariable(var_name)
+            } else {
+                TemplateError::RenderError(msg)
+            }
+        })?;
 
         Ok(result)
     }
@@ -263,9 +299,8 @@ impl TemplateRenderer {
         template: &EmailTemplateVersion,
         sample_data: &serde_json::Value,
     ) -> TemplateResult<RenderedEmail> {
-        let context = RenderContext::new()
-            .with_variables(sample_data)?;
-        
+        let context = RenderContext::new().with_variables(sample_data)?;
+
         self.render_email(template, &context)
     }
 
@@ -288,13 +323,16 @@ impl TemplateRenderer {
         // In a full implementation, this would use mjml-rs or call an MJML service
         // For now, return a placeholder
         warn!("MJML compilation requested but not implemented");
-        Ok(format!("<!-- MJML would be compiled here -->\n{}", mjml_source))
+        Ok(format!(
+            "<!-- MJML would be compiled here -->\n{}",
+            mjml_source
+        ))
     }
 
     /// Extract variables from a template (basic implementation)
     pub fn extract_variables(&self, template: &str) -> Vec<String> {
         let mut variables = Vec::new();
-        
+
         // Simple regex-like parsing for {{variable}} patterns
         // This is a basic implementation - Handlebars has more complex syntax
         let mut chars = template.chars().peekable();
@@ -310,16 +348,21 @@ impl TemplateRenderer {
                     var_name.push(c);
                 }
                 // Clean up the variable name (remove helpers, etc.)
-                let clean_name = var_name.split('|').next()
+                let clean_name = var_name
+                    .split('|')
+                    .next()
                     .unwrap_or(&var_name)
                     .trim()
                     .to_string();
-                if !clean_name.is_empty() && !clean_name.starts_with('#') && !clean_name.starts_with('/') {
+                if !clean_name.is_empty()
+                    && !clean_name.starts_with('#')
+                    && !clean_name.starts_with('/')
+                {
                     variables.push(clean_name);
                 }
             }
         }
-        
+
         variables.sort();
         variables.dedup();
         variables
@@ -328,7 +371,7 @@ impl TemplateRenderer {
     /// Build sample payload from variable schema
     pub fn build_sample_payload(schema: &[TemplateVariable]) -> serde_json::Value {
         let mut map = serde_json::Map::new();
-        
+
         for var in schema {
             let value = if let Some(default) = &var.default_value {
                 serde_json::Value::String(default.clone())
@@ -340,14 +383,14 @@ impl TemplateRenderer {
                     "email" | "user_email" | "recipient_email" => {
                         serde_json::Value::String("user@example.com".to_string())
                     }
-                    "site_name" | "app_name" => {
-                        serde_json::Value::String("RustChat".to_string())
-                    }
+                    "site_name" | "app_name" => serde_json::Value::String("RustChat".to_string()),
                     "site_url" | "base_url" => {
                         serde_json::Value::String("https://chat.example.com".to_string())
                     }
                     "verification_link" | "reset_link" | "invite_link" | "action_link" => {
-                        serde_json::Value::String("https://chat.example.com/action?token=abc123".to_string())
+                        serde_json::Value::String(
+                            "https://chat.example.com/action?token=abc123".to_string(),
+                        )
                     }
                     "channel_name" => serde_json::Value::String("general".to_string()),
                     "team_name" => serde_json::Value::String("Engineering".to_string()),
@@ -364,7 +407,7 @@ impl TemplateRenderer {
             };
             map.insert(var.name.clone(), value);
         }
-        
+
         serde_json::Value::Object(map)
     }
 }
@@ -391,14 +434,18 @@ impl EmailLayout {
     /// Apply the layout to rendered content
     pub fn apply(&self, content: &RenderedEmail) -> RenderedEmail {
         let mut context = RenderContext::new();
-        
+
         // In a real implementation, we'd use Handlebars to inject
         // the content into the layout template
         // For now, simple string replacement
-        let html = self.html_template
-            .replace("{{content}}", content.body_html.as_deref().unwrap_or(&content.body_text));
-        
-        let text = self.text_template.as_ref()
+        let html = self.html_template.replace(
+            "{{content}}",
+            content.body_html.as_deref().unwrap_or(&content.body_text),
+        );
+
+        let text = self
+            .text_template
+            .as_ref()
             .map(|t| t.replace("{{content}}", &content.body_text))
             .unwrap_or_else(|| content.body_text.clone());
 
@@ -424,7 +471,7 @@ pub struct LocaleFallback {
 impl LocaleFallback {
     pub fn resolve(&self) -> Vec<String> {
         let mut locales = Vec::new();
-        
+
         if let Some(user) = &self.user_locale {
             locales.push(user.clone());
             // Add base locale (e.g., "en" from "en-US")
@@ -434,17 +481,17 @@ impl LocaleFallback {
                 }
             }
         }
-        
+
         if let Some(tenant) = &self.tenant_default {
             if !locales.contains(tenant) {
                 locales.push(tenant.clone());
             }
         }
-        
+
         if !locales.contains(&self.system_default) {
             locales.push(self.system_default.clone());
         }
-        
+
         locales
     }
 }

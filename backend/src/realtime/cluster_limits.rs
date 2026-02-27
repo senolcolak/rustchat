@@ -57,10 +57,7 @@ pub async fn check_cluster_connection_limit(
 }
 
 /// Get global connection count from presence registry and prune stale entries.
-pub async fn get_global_connection_count(
-    state: &AppState,
-    user_id: Uuid,
-) -> anyhow::Result<usize> {
+pub async fn get_global_connection_count(state: &AppState, user_id: Uuid) -> anyhow::Result<usize> {
     let mut conn = state.redis.get().await?;
     let key = presence_connection_key(user_id);
 

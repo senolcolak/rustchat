@@ -41,12 +41,12 @@ pub mod plugins;
 pub mod posts;
 
 pub mod recaps;
-pub mod status;
 pub mod reports;
 pub mod roles;
 pub mod saml;
 pub mod schemes;
 pub mod shared_channels;
+pub mod status;
 pub mod system;
 pub mod teams;
 pub mod terms_of_service;
@@ -62,7 +62,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Create v4 router with configurable body size limits
-/// 
+///
 /// # Arguments
 /// * `small_limit` - For simple JSON APIs (auth, status, etc.)
 /// * `medium_limit` - For larger payloads (posts with content, user profiles)
@@ -72,6 +72,15 @@ pub fn router_with_body_limits(
     medium_limit: usize,
     large_limit: usize,
 ) -> Router<AppState> {
+    let websocket_router = Router::new()
+        .route(
+            "/websocket",
+            axum::routing::get(websocket::handle_websocket),
+        )
+        .layer(axum::middleware::from_fn(
+            crate::middleware::rate_limit::websocket_ip_rate_limit,
+        ));
+
     Router::new()
         // User management - medium limit for profiles
         .merge(users::router().layer(DefaultBodyLimit::max(medium_limit)))
@@ -164,10 +173,7 @@ pub fn router_with_body_limits(
         // Mattermost Calls plugin API - small limit
         .merge(calls_plugin::router().layer(DefaultBodyLimit::max(small_limit)))
         // WebSocket - no body limit (upgrade request)
-        .route(
-            "/websocket",
-            axum::routing::get(websocket::handle_websocket),
-        )
+        .merge(websocket_router)
         .fallback(not_implemented)
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("x-mm-compat"),

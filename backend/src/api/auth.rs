@@ -2,6 +2,7 @@
 
 use axum::{
     extract::{ConnectInfo, State},
+    middleware,
     routing::{get, post},
     Json, Router,
 };
@@ -12,14 +13,28 @@ use crate::auth::{create_token_with_policy, hash_password, verify_password, Auth
 use crate::error::{ApiResult, AppError};
 use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{AuthResponse, CreateUser, LoginRequest, User, UserResponse};
-use crate::services::password_reset::{PasswordResetError, request_password_reset, reset_password, validate_token, send_password_setup_email};
+use crate::services::password_reset::{
+    request_password_reset, reset_password, validate_token, PasswordResetError,
+};
 use crate::services::turnstile;
 
 /// Build auth routes
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/register", post(register))
+    let registration_routes =
+        Router::new()
+            .route("/register", post(register))
+            .layer(middleware::from_fn(
+                crate::middleware::rate_limit::register_ip_rate_limit,
+            ));
+    let login_routes = Router::new()
         .route("/login", post(login))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::auth_ip_rate_limit,
+        ));
+
+    Router::new()
+        .merge(registration_routes)
+        .merge(login_routes)
         .route("/verify-email", post(verify_email))
         .route("/resend-verification", post(resend_verification))
         .route("/password/forgot", post(forgot_password))
@@ -53,7 +68,7 @@ async fn get_public_auth_config(
 }
 
 /// Register a new user
-/// 
+///
 /// If password is provided, user is registered with that password.
 /// If password is not provided, a password setup email is sent and user must set password via email link.
 async fn register(
@@ -61,33 +76,13 @@ async fn register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(input): Json<CreateUser>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Check rate limiting if enabled
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig {
-            max_requests: 5, // Stricter limit for registration
-            window_seconds: 3600, // Per hour
-            key_prefix: "ratelimit:register".to_string(),
-        };
-        let ip = addr.ip().to_string();
-        
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
-        
-        if !rate_result.allowed {
-            tracing::warn!(
-                ip = %ip,
-                email = %input.email,
-                "Rate limit exceeded for registration"
-            );
-            return Err(AppError::TooManyRequests(
-                "Too many registration attempts from this IP. Please try again later.".to_string()
-            ));
-        }
-    }
-
     // Check honeypot - if filled, likely a bot
     if let Some(ref honeypot) = input.honeypot {
         if !honeypot.is_empty() {
-            tracing::warn!("Honeypot field filled, likely bot attempt from {}", addr.ip());
+            tracing::warn!(
+                "Honeypot field filled, likely bot attempt from {}",
+                addr.ip()
+            );
             // Return generic error without revealing honeypot detection
             return Err(AppError::Validation("Invalid request".to_string()));
         }
@@ -95,17 +90,23 @@ async fn register(
 
     // Verify Turnstile token if enabled
     if state.config.turnstile.enabled {
-        let token = input.turnstile_token.as_deref()
+        let token = input
+            .turnstile_token
+            .as_deref()
             .ok_or_else(|| AppError::Validation("Verification required".to_string()))?;
-        
+
         let remote_ip = Some(addr.ip().to_string());
         if let Err(e) = turnstile::verify_token(
             &state.config.turnstile.secret_key,
             token,
             remote_ip.as_deref(),
-        ).await {
+        )
+        .await
+        {
             tracing::warn!("Turnstile verification failed: {}", e);
-            return Err(AppError::Validation("Verification failed. Please try again.".to_string()));
+            return Err(AppError::Validation(
+                "Verification failed. Please try again.".to_string(),
+            ));
         }
     }
 
@@ -142,7 +143,7 @@ async fn register(
 
     // Determine if this is passwordless registration
     let has_password = input.password.is_some() && !input.password.as_ref().unwrap().is_empty();
-    
+
     // Validate password if provided
     let password_hash = if has_password {
         let config = crate::services::auth_config::get_password_rules(&state.db).await?;
@@ -172,15 +173,14 @@ async fn register(
     seed_default_preferences(&state.db, user.id).await?;
 
     // Fetch site_url from server_config
-    let site_url: Option<String> = sqlx::query_scalar(
-        "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
-    
+    let site_url: Option<String> =
+        sqlx::query_scalar("SELECT site->>'site_url' FROM server_config WHERE id = 'default'")
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
+
     if let Some(site_url) = site_url {
         if has_password {
             // Send verification email for users who provided password
@@ -201,7 +201,7 @@ async fn register(
                     tracing::warn!("Failed to send verification email: {}", e);
                 }
             }
-            
+
             // Generate token for immediate login
             let token = create_token_with_policy(
                 user.id,
@@ -213,7 +213,7 @@ async fn register(
                 state.jwt_audience.as_deref(),
                 state.jwt_expiry_hours,
             )?;
-            
+
             return Ok(Json(serde_json::json!({
                 "success": true,
                 "message": "Registration successful. Please check your email to verify your account.",
@@ -240,7 +240,7 @@ async fn register(
                     // Don't fail registration, but inform user
                 }
             }
-            
+
             return Ok(Json(serde_json::json!({
                 "success": true,
                 "message": "Registration successful. Please check your email to set your password.",
@@ -250,7 +250,7 @@ async fn register(
         }
     } else {
         tracing::warn!("site_url not configured, skipping email sending");
-        
+
         if has_password {
             // Generate token for immediate login
             let token = create_token_with_policy(
@@ -263,7 +263,7 @@ async fn register(
                 state.jwt_audience.as_deref(),
                 state.jwt_expiry_hours,
             )?;
-            
+
             return Ok(Json(serde_json::json!({
                 "success": true,
                 "message": "Registration successful.",
@@ -285,79 +285,45 @@ async fn register(
 /// Login with email and password
 async fn login(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(input): Json<LoginRequest>,
 ) -> ApiResult<Json<AuthResponse>> {
-    // Check rate limiting if enabled
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
-        let ip = addr.ip().to_string();
-        
-        // Try to find user ID for user-based limiting
-        let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL"
-        )
-        .bind(&input.email)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-        
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
-        
-        if !rate_result.allowed {
-            tracing::warn!(
-                ip = %ip,
-                email = %input.email,
-                "Rate limit exceeded for login"
-            );
-            return Err(AppError::TooManyRequests(
-                "Too many login attempts. Please try again later.".to_string()
-            ));
-        }
-        
-        // Also check user-based rate limit if user exists
-        if let Some(uid) = user_id {
-            let user_key = format!("user:{}", uid);
-            let user_result = rate_limit::check_rate_limit(&state.redis, &config, &user_key).await?;
-            
-            if !user_result.allowed {
-                tracing::warn!(
-                    user_id = %uid,
-                    "Rate limit exceeded for user login"
-                );
-                return Err(AppError::TooManyRequests(
-                    "Too many login attempts. Please try again later.".to_string()
-                ));
-            }
-        }
-    }
-
     // Find user by email
     let user: User = sqlx::query_as(
         "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
     )
-        .bind(&input.email)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid email or password".to_string()))?;
+    .bind(&input.email)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("Invalid email or password".to_string()))?;
+
+    // Keep per-account throttle in addition to centralized per-IP middleware.
+    if state.config.security.rate_limit_enabled {
+        let config =
+            RateLimitConfig::auth_per_minute(state.config.security.rate_limit_auth_per_minute);
+        let user_key = format!("user:{}", user.id);
+        let user_result = rate_limit::check_rate_limit(&state.redis, &config, &user_key).await?;
+
+        if !user_result.allowed {
+            tracing::warn!(user_id = %user.id, "Rate limit exceeded for user login");
+            return Err(AppError::TooManyRequests(
+                "Too many login attempts. Please try again later.".to_string(),
+            ));
+        }
+    }
 
     // Verify password (OAuth users or users pending password setup cannot login with password)
-    let password_hash = user.password_hash.as_deref()
-        .ok_or_else(|| {
-            if user.email_verified {
-                AppError::Unauthorized(
-                    "Please set your password using the link sent to your email.".to_string()
-                )
-            } else {
-                AppError::Unauthorized(
-                    "Please verify your email and set your password first.".to_string()
-                )
-            }
-        })?;
-    
+    let password_hash = user.password_hash.as_deref().ok_or_else(|| {
+        if user.email_verified {
+            AppError::Unauthorized(
+                "Please set your password using the link sent to your email.".to_string(),
+            )
+        } else {
+            AppError::Unauthorized(
+                "Please verify your email and set your password first.".to_string(),
+            )
+        }
+    })?;
+
     if !verify_password(&input.password, password_hash)? {
         return Err(AppError::Unauthorized(
             "Invalid email or password".to_string(),
@@ -400,12 +366,9 @@ async fn verify_email(
     State(state): State<AppState>,
     Json(input): Json<VerifyEmailRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let user_id = crate::services::email_verification::verify_token(
-        &state.db,
-        &input.token,
-        "registration",
-    )
-    .await?;
+    let user_id =
+        crate::services::email_verification::verify_token(&state.db, &input.token, "registration")
+            .await?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -426,7 +389,7 @@ async fn resend_verification(
 ) -> ApiResult<Json<serde_json::Value>> {
     // Find user by email
     let user: Option<User> = sqlx::query_as(
-        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL"
+        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(&input.email)
     .fetch_optional(&state.db)
@@ -452,15 +415,14 @@ async fn resend_verification(
 
     // Send verification email
     // Fetch site_url from server_config
-    let site_url: Option<String> = sqlx::query_scalar(
-        "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
-    
+    let site_url: Option<String> =
+        sqlx::query_scalar("SELECT site->>'site_url' FROM server_config WHERE id = 'default'")
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
+
     let verification_result = if let Some(site_url) = site_url {
         let verification_base_url = format!("{}/verify-email", site_url);
         crate::services::email_verification::send_verification_email(
@@ -475,9 +437,8 @@ async fn resend_verification(
         tracing::warn!("site_url not configured, cannot send verification email");
         Ok(())
     };
-    
-    match verification_result
-    {
+
+    match verification_result {
         Ok(_) => Ok(Json(serde_json::json!({
             "success": true,
             "message": "Verification email sent"
@@ -524,7 +485,10 @@ async fn forgot_password(
     // Check honeypot - if filled, likely a bot
     if let Some(ref honeypot) = input.honeypot {
         if !honeypot.is_empty() {
-            tracing::warn!("Honeypot field filled, likely bot attempt from {}", addr.ip());
+            tracing::warn!(
+                "Honeypot field filled, likely bot attempt from {}",
+                addr.ip()
+            );
             // Return success response to not reveal honeypot detection
             return Ok(Json(serde_json::json!({
                 "success": true,
@@ -544,13 +508,15 @@ async fn forgot_password(
                 })));
             }
         };
-        
+
         let remote_ip = Some(addr.ip().to_string());
         if let Err(e) = turnstile::verify_token(
             &state.config.turnstile.secret_key,
             token,
             remote_ip.as_deref(),
-        ).await {
+        )
+        .await
+        {
             tracing::warn!("Turnstile verification failed: {}", e);
             // Return success response to not reveal verification failure
             return Ok(Json(serde_json::json!({
@@ -562,7 +528,7 @@ async fn forgot_password(
 
     // Get IP address from connection
     let ip_address = Some(addr.ip());
-    
+
     // Request password reset (always returns Ok for anti-enumeration)
     let result = request_password_reset(
         &state.db,
@@ -596,22 +562,20 @@ async fn reset_password_handler(
     Json(input): Json<ResetPasswordRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     match reset_password(&state.db, &input.token, &input.new_password).await {
-        Ok(user_id) => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "message": "Password reset successful",
-                "user_id": user_id.to_string()
-            })))
-        }
-        Err(PasswordResetError::TokenNotFound | PasswordResetError::TokenExpired | PasswordResetError::TokenAlreadyUsed) => {
-            Err(AppError::BadRequest("Invalid or expired token".to_string()))
-        }
-        Err(PasswordResetError::InvalidPassword(msg)) => {
-            Err(AppError::Validation(msg))
-        }
-        Err(PasswordResetError::RateLimitExceeded) => {
-            Err(AppError::TooManyRequests("Too many attempts. Please try again later.".to_string()))
-        }
+        Ok(user_id) => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "Password reset successful",
+            "user_id": user_id.to_string()
+        }))),
+        Err(
+            PasswordResetError::TokenNotFound
+            | PasswordResetError::TokenExpired
+            | PasswordResetError::TokenAlreadyUsed,
+        ) => Err(AppError::BadRequest("Invalid or expired token".to_string())),
+        Err(PasswordResetError::InvalidPassword(msg)) => Err(AppError::Validation(msg)),
+        Err(PasswordResetError::RateLimitExceeded) => Err(AppError::TooManyRequests(
+            "Too many attempts. Please try again later.".to_string(),
+        )),
         Err(e) => {
             tracing::error!("Password reset error: {}", e);
             Err(AppError::Internal("Failed to reset password".to_string()))
@@ -630,18 +594,18 @@ async fn validate_token_handler(
     Json(input): Json<ValidateTokenRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     match validate_token(&state.db, &input.token).await {
-        Ok((user_id, email)) => {
-            Ok(Json(serde_json::json!({
-                "valid": true,
-                "user_id": user_id.to_string(),
-                "email": email
-            })))
-        }
-        Err(PasswordResetError::TokenNotFound | PasswordResetError::TokenExpired | PasswordResetError::TokenAlreadyUsed) => {
-            Ok(Json(serde_json::json!({
-                "valid": false
-            })))
-        }
+        Ok((user_id, email)) => Ok(Json(serde_json::json!({
+            "valid": true,
+            "user_id": user_id.to_string(),
+            "email": email
+        }))),
+        Err(
+            PasswordResetError::TokenNotFound
+            | PasswordResetError::TokenExpired
+            | PasswordResetError::TokenAlreadyUsed,
+        ) => Ok(Json(serde_json::json!({
+            "valid": false
+        }))),
         Err(e) => {
             tracing::error!("Token validation error: {}", e);
             Err(AppError::Internal("Failed to validate token".to_string()))
@@ -650,10 +614,7 @@ async fn validate_token_handler(
 }
 
 /// Seed default preferences for a new user
-async fn seed_default_preferences(
-    db: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-) -> ApiResult<()> {
+async fn seed_default_preferences(db: &sqlx::PgPool, user_id: uuid::Uuid) -> ApiResult<()> {
     // Build theme JSON using serde_json to avoid raw string issues with #" sequences
     let default_theme = serde_json::json!({
         "type": "RustChat",
@@ -681,7 +642,8 @@ async fn seed_default_preferences(
         "mentionHighlightBg": "#0d6e6e",
         "mentionHighlightLink": "#a4f4f4",
         "codeTheme": "monokai"
-    }).to_string();
+    })
+    .to_string();
 
     // Theme preference
     sqlx::query(

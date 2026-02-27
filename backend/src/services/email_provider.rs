@@ -32,12 +32,16 @@ impl fmt::Display for EmailProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EmailProviderError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
-            EmailProviderError::AuthenticationError(msg) => write!(f, "Authentication error: {}", msg),
+            EmailProviderError::AuthenticationError(msg) => {
+                write!(f, "Authentication error: {}", msg)
+            }
             EmailProviderError::RateLimitError(msg) => write!(f, "Rate limit: {}", msg),
             EmailProviderError::InvalidRecipient(msg) => write!(f, "Invalid recipient: {}", msg),
             EmailProviderError::InvalidSender(msg) => write!(f, "Invalid sender: {}", msg),
             EmailProviderError::ServerError(msg) => write!(f, "Server error: {}", msg),
-            EmailProviderError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
+            EmailProviderError::ConfigurationError(msg) => {
+                write!(f, "Configuration error: {}", msg)
+            }
             EmailProviderError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -82,7 +86,12 @@ impl EmailAddress {
     pub fn to_mailbox(&self) -> EmailProviderResult<Mailbox> {
         format!("{} <{}>", self.name.as_deref().unwrap_or(""), self.email)
             .parse()
-            .map_err(|e| EmailProviderError::InvalidRecipient(format!("Invalid address '{}': {}", self.email, e)))
+            .map_err(|e| {
+                EmailProviderError::InvalidRecipient(format!(
+                    "Invalid address '{}': {}",
+                    self.email, e
+                ))
+            })
     }
 }
 
@@ -158,10 +167,13 @@ impl SmtpProvider {
             TlsParameters::builder(host.clone())
                 .dangerous_accept_invalid_certs(true)
                 .build()
-                .map_err(|e| EmailProviderError::ConfigurationError(format!("TLS config error: {}", e)))?
+                .map_err(|e| {
+                    EmailProviderError::ConfigurationError(format!("TLS config error: {}", e))
+                })?
         } else {
-            TlsParameters::new(host.clone())
-                .map_err(|e| EmailProviderError::ConfigurationError(format!("TLS config error: {}", e)))?
+            TlsParameters::new(host.clone()).map_err(|e| {
+                EmailProviderError::ConfigurationError(format!("TLS config error: {}", e))
+            })?
         };
 
         // Build credentials if username is provided
@@ -169,23 +181,42 @@ impl SmtpProvider {
             // No authentication
             match settings.tls_mode {
                 TlsMode::ImplicitTls => {
-                    info!("Building SMTP transport with Implicit TLS (SMTPS) for {}:{}", host, port);
+                    info!(
+                        "Building SMTP transport with Implicit TLS (SMTPS) for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-                        .map_err(|e| EmailProviderError::ConfigurationError(format!("Transport error: {}", e)))?
+                        .map_err(|e| {
+                            EmailProviderError::ConfigurationError(format!(
+                                "Transport error: {}",
+                                e
+                            ))
+                        })?
                         .port(port)
                         .tls(Tls::Required(tls_params))
                         .build()
                 }
                 TlsMode::None => {
-                    warn!("Building SMTP transport without encryption for {}:{}", host, port);
+                    warn!(
+                        "Building SMTP transport without encryption for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
                         .port(port)
                         .build()
                 }
                 TlsMode::Starttls => {
-                    info!("Building SMTP transport with STARTTLS for {}:{}", host, port);
+                    info!(
+                        "Building SMTP transport with STARTTLS for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-                        .map_err(|e| EmailProviderError::ConfigurationError(format!("Transport error: {}", e)))?
+                        .map_err(|e| {
+                            EmailProviderError::ConfigurationError(format!(
+                                "Transport error: {}",
+                                e
+                            ))
+                        })?
                         .port(port)
                         .tls(Tls::Required(tls_params))
                         .build()
@@ -196,34 +227,57 @@ impl SmtpProvider {
             let password = if settings.password_encrypted.is_empty() {
                 String::new()
             } else {
-                crate::crypto::decrypt(&settings.password_encrypted, encryption_key)
-                    .map_err(|e| EmailProviderError::ConfigurationError(
-                        format!("Failed to decrypt SMTP password: {}", e)
-                    ))?
+                crate::crypto::decrypt(&settings.password_encrypted, encryption_key).map_err(
+                    |e| {
+                        EmailProviderError::ConfigurationError(format!(
+                            "Failed to decrypt SMTP password: {}",
+                            e
+                        ))
+                    },
+                )?
             };
             let creds = Credentials::new(settings.username.clone(), password);
 
             match settings.tls_mode {
                 TlsMode::ImplicitTls => {
-                    info!("Building authenticated SMTP transport with Implicit TLS for {}:{}", host, port);
+                    info!(
+                        "Building authenticated SMTP transport with Implicit TLS for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-                        .map_err(|e| EmailProviderError::ConfigurationError(format!("Transport error: {}", e)))?
+                        .map_err(|e| {
+                            EmailProviderError::ConfigurationError(format!(
+                                "Transport error: {}",
+                                e
+                            ))
+                        })?
                         .credentials(creds)
                         .port(port)
                         .tls(Tls::Required(tls_params))
                         .build()
                 }
                 TlsMode::None => {
-                    warn!("Building authenticated SMTP transport without encryption for {}:{}", host, port);
+                    warn!(
+                        "Building authenticated SMTP transport without encryption for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
                         .port(port)
                         .credentials(creds)
                         .build()
                 }
                 TlsMode::Starttls => {
-                    info!("Building authenticated SMTP transport with STARTTLS for {}:{}", host, port);
+                    info!(
+                        "Building authenticated SMTP transport with STARTTLS for {}:{}",
+                        host, port
+                    );
                     AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-                        .map_err(|e| EmailProviderError::ConfigurationError(format!("Transport error: {}", e)))?
+                        .map_err(|e| {
+                            EmailProviderError::ConfigurationError(format!(
+                                "Transport error: {}",
+                                e
+                            ))
+                        })?
                         .credentials(creds)
                         .port(port)
                         .tls(Tls::Required(tls_params))
@@ -254,18 +308,33 @@ impl SmtpProvider {
     /// Classify an SMTP error into our error types
     fn classify_error(error: &lettre::transport::smtp::Error) -> EmailProviderError {
         let error_str = error.to_string().to_lowercase();
-        
-        if error_str.contains("authentication") || error_str.contains("auth") || error_str.contains("535") {
+
+        if error_str.contains("authentication")
+            || error_str.contains("auth")
+            || error_str.contains("535")
+        {
             EmailProviderError::AuthenticationError(error.to_string())
-        } else if error_str.contains("certificate") || error_str.contains("tls") || error_str.contains("ssl") {
+        } else if error_str.contains("certificate")
+            || error_str.contains("tls")
+            || error_str.contains("ssl")
+        {
             EmailProviderError::ConnectionError(format!("TLS error: {}", error))
-        } else if error_str.contains("dns") || error_str.contains("resolve") || error_str.contains("connection") {
+        } else if error_str.contains("dns")
+            || error_str.contains("resolve")
+            || error_str.contains("connection")
+        {
             EmailProviderError::ConnectionError(error.to_string())
         } else if error_str.contains("timeout") || error_str.contains("timed out") {
             EmailProviderError::ConnectionError(format!("Connection timeout: {}", error))
-        } else if error_str.contains("relay") || error_str.contains("denied") || error_str.contains("550") {
+        } else if error_str.contains("relay")
+            || error_str.contains("denied")
+            || error_str.contains("550")
+        {
             EmailProviderError::ServerError(format!("Relay denied: {}", error))
-        } else if error_str.contains("rate") || error_str.contains("throttle") || error_str.contains("421") {
+        } else if error_str.contains("rate")
+            || error_str.contains("throttle")
+            || error_str.contains("421")
+        {
             EmailProviderError::RateLimitError(error.to_string())
         } else {
             EmailProviderError::Other(error.to_string())
@@ -276,21 +345,33 @@ impl SmtpProvider {
 #[async_trait]
 impl MailProvider for SmtpProvider {
     async fn test_connection(&self) -> EmailProviderResult<()> {
-        debug!("Testing SMTP connection to {}:{}", self.settings.host, self.settings.port);
-        
+        debug!(
+            "Testing SMTP connection to {}:{}",
+            self.settings.host, self.settings.port
+        );
+
         match self.transport.test_connection().await {
             Ok(true) => {
-                info!("SMTP connection test successful for {}:{}", self.settings.host, self.settings.port);
+                info!(
+                    "SMTP connection test successful for {}:{}",
+                    self.settings.host, self.settings.port
+                );
                 Ok(())
             }
             Ok(false) => {
-                warn!("SMTP connection test returned false for {}:{}", self.settings.host, self.settings.port);
+                warn!(
+                    "SMTP connection test returned false for {}:{}",
+                    self.settings.host, self.settings.port
+                );
                 Err(EmailProviderError::ConnectionError(
                     "SMTP server connected but returned failure".to_string(),
                 ))
             }
             Err(e) => {
-                error!("SMTP connection test failed for {}:{}: {}", self.settings.host, self.settings.port, e);
+                error!(
+                    "SMTP connection test failed for {}:{}: {}",
+                    self.settings.host, self.settings.port, e
+                );
                 Err(Self::classify_error(&e))
             }
         }
@@ -427,10 +508,17 @@ impl MailProviderManager {
         encryption_key: &str,
     ) -> EmailProviderResult<()> {
         let mut providers = self.providers.write().await;
-        
+
         // Check if we need to update an existing provider
         if let Some(existing) = providers.get_mut(&settings.id) {
-            if existing.provider_id() != format!("{}:{}:{}", settings.provider_type.as_str(), settings.host, settings.port) {
+            if existing.provider_id()
+                != format!(
+                    "{}:{}:{}",
+                    settings.provider_type.as_str(),
+                    settings.host,
+                    settings.port
+                )
+            {
                 // Settings changed, recreate
                 let new_provider = MailProviderFactory::create(settings, encryption_key).await?;
                 providers.insert(settings.id, new_provider);
@@ -440,7 +528,7 @@ impl MailProviderManager {
             let provider = MailProviderFactory::create(settings, encryption_key).await?;
             providers.insert(settings.id, provider);
         }
-        
+
         Ok(())
     }
 
@@ -503,12 +591,11 @@ pub async fn get_provider_by_id(
     db: &sqlx::PgPool,
     id: uuid::Uuid,
 ) -> Result<Option<MailProviderSettings>, sqlx::Error> {
-    let provider: Option<MailProviderSettings> = sqlx::query_as(
-        "SELECT * FROM mail_provider_settings WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(db)
-    .await?;
+    let provider: Option<MailProviderSettings> =
+        sqlx::query_as("SELECT * FROM mail_provider_settings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
 
     Ok(provider)
 }

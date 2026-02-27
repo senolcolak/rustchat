@@ -2,6 +2,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue},
+    middleware,
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -14,20 +15,20 @@ use super::extractors::MmAuthUser;
 use crate::api::AppState;
 use crate::auth::{create_token_with_policy, hash_password, verify_password};
 use crate::error::{ApiResult, AppError};
-use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     models as mm,
 };
+use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{channel::Channel, channel::ChannelMember, Team, TeamMember, User};
 
 mod preferences;
 mod sidebar_categories;
 
 use preferences::{
-    delete_preferences_for_user, get_my_preferences_by_category, get_preference_by_category_and_name, get_preferences,
-    get_preferences_by_category, get_preferences_for_user, update_preferences,
-    update_preferences_for_user,
+    delete_preferences_for_user, get_my_preferences_by_category,
+    get_preference_by_category_and_name, get_preferences, get_preferences_by_category,
+    get_preferences_for_user, update_preferences, update_preferences_for_user,
 };
 use sidebar_categories::{
     create_category, get_categories, get_my_categories, update_categories, update_category_order,
@@ -38,8 +39,14 @@ pub(crate) use sidebar_categories::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let login_routes = Router::new()
         .route("/users/login", post(login))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::auth_ip_rate_limit,
+        ));
+
+    Router::new()
+        .merge(login_routes)
         .route("/users/login/type", post(login_type))
         .route("/users/login/cws", post(login_cws))
         .route(
@@ -275,27 +282,6 @@ async fn login(
         .or(input.email)
         .ok_or_else(|| AppError::BadRequest("Missing login_id".to_string()))?;
 
-    // Apply centralized auth throttling for v4 login as well.
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
-        let ip_key = rate_limit::extract_client_ip_from_headers(&headers)
-            .unwrap_or_else(|| "unknown".to_string());
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip_key).await?;
-
-        if !rate_result.allowed {
-            tracing::warn!(
-                ip = %ip_key,
-                login_id = %login_id,
-                "Rate limit exceeded for v4 login"
-            );
-            return Err(AppError::TooManyRequests(
-                "Too many login attempts. Please try again later.".to_string(),
-            ));
-        }
-    }
-
     let user: Option<User> = sqlx::query_as(
         "SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = true AND deleted_at IS NULL",
     )
@@ -307,9 +293,8 @@ async fn login(
         user.ok_or_else(|| AppError::Unauthorized("Invalid login credentials".to_string()))?;
 
     if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
+        let config =
+            RateLimitConfig::auth_per_minute(state.config.security.rate_limit_auth_per_minute);
         let user_key = format!("user:{}", user.id);
         let user_result = rate_limit::check_rate_limit(&state.redis, &config, &user_key).await?;
         if !user_result.allowed {
@@ -324,9 +309,11 @@ async fn login(
     }
 
     // Verify password (OAuth users without password cannot login with password)
-    let password_hash = user.password_hash.as_deref()
+    let password_hash = user
+        .password_hash
+        .as_deref()
         .ok_or_else(|| AppError::Unauthorized("Please use SSO to login".to_string()))?;
-    
+
     if !verify_password(&input.password, password_hash)? {
         return Err(AppError::Unauthorized(
             "Invalid login credentials".to_string(),
@@ -1439,11 +1426,12 @@ async fn get_users_by_ids(
         return Ok(Json(vec![]));
     }
 
-    let users: Vec<User> =
-        sqlx::query_as("SELECT * FROM users WHERE id = ANY($1) AND (is_active = true OR deleted_at IS NOT NULL)")
-            .bind(&uuids)
-            .fetch_all(&state.db)
-            .await?;
+    let users: Vec<User> = sqlx::query_as(
+        "SELECT * FROM users WHERE id = ANY($1) AND (is_active = true OR deleted_at IS NOT NULL)",
+    )
+    .bind(&uuids)
+    .fetch_all(&state.db)
+    .await?;
 
     let mm_users: Vec<mm::User> = users.into_iter().map(|u| u.into()).collect();
     Ok(Json(mm_users))
@@ -2217,7 +2205,9 @@ async fn update_user_password(
     }
 
     if let Some(current) = input.current_password.as_deref() {
-        let password_hash = user.password_hash.as_deref()
+        let password_hash = user
+            .password_hash
+            .as_deref()
             .ok_or_else(|| AppError::BadRequest("No existing password to change".to_string()))?;
         if !verify_password(current, password_hash)? {
             return Err(AppError::BadRequest("Invalid current password".to_string()));
@@ -2286,12 +2276,8 @@ async fn verify_email(
     State(state): State<AppState>,
     Json(input): Json<VerifyEmailRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    crate::services::email_verification::verify_token(
-        &state.db,
-        &input.token,
-        "registration",
-    )
-    .await?;
+    crate::services::email_verification::verify_token(&state.db, &input.token, "registration")
+        .await?;
 
     Ok(status_ok())
 }
@@ -2307,7 +2293,7 @@ async fn send_email_verification(
 ) -> ApiResult<Json<serde_json::Value>> {
     // Find user by email
     let user: Option<User> = sqlx::query_as(
-        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL"
+        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(&input.email)
     .fetch_optional(&state.db)
@@ -2317,14 +2303,14 @@ async fn send_email_verification(
         if !user.email_verified {
             // Fetch site_url from server_config
             let site_url: Option<String> = sqlx::query_scalar(
-                "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
+                "SELECT site->>'site_url' FROM server_config WHERE id = 'default'",
             )
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten()
             .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
-            
+
             if let Some(site_url) = site_url {
                 let verification_base_url = format!("{}/verify-email", site_url);
                 // Send but ignore errors to prevent email enumeration

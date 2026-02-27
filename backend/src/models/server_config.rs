@@ -271,8 +271,6 @@ pub struct ComplianceConfig {
     pub file_retention_days: i32,
 }
 
-
-
 /// DTO for updating a specific config category
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]

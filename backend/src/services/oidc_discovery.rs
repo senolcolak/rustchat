@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::AppError;
+use crate::middleware::reliability::{
+    with_resilience, CircuitBreaker, CircuitError, RetryCondition, RetryConfig,
+};
 
 /// Cached discovery result with TTL
 struct CachedDiscovery {
@@ -46,6 +49,10 @@ pub struct OidcDiscoveryService {
     ttl: Duration,
     /// HTTP client
     client: reqwest::Client,
+    /// Circuit breaker for outbound OIDC calls
+    circuit_breaker: Arc<CircuitBreaker>,
+    /// Retry policy for transient OIDC failures
+    retry_config: RetryConfig,
 }
 
 impl OidcDiscoveryService {
@@ -63,6 +70,11 @@ impl OidcDiscoveryService {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to build HTTP client"),
+            circuit_breaker: CircuitBreaker::default_config("oidc-discovery"),
+            retry_config: RetryConfig {
+                retry_if: RetryCondition::Default,
+                ..Default::default()
+            },
         }
     }
 
@@ -85,12 +97,21 @@ impl OidcDiscoveryService {
         let discovery_url = format!("{}/.well-known/openid-configuration", issuer);
         tracing::debug!(url = %discovery_url, "Fetching OIDC discovery document");
 
-        let response = self
-            .client
-            .get(&discovery_url)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to fetch OIDC discovery: {}", e)))?;
+        let response = with_resilience(&self.circuit_breaker, &self.retry_config, {
+            let client = self.client.clone();
+            let discovery_url = discovery_url.clone();
+            move || {
+                let client = client.clone();
+                let discovery_url = discovery_url.clone();
+                async move {
+                    client.get(&discovery_url).send().await.map_err(|e| {
+                        AppError::ExternalService(format!("Failed to fetch OIDC discovery: {}", e))
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(map_circuit_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -121,7 +142,9 @@ impl OidcDiscoveryService {
             ));
         }
         if discovery.jwks_uri.is_empty() {
-            return Err(AppError::Internal("OIDC discovery missing jwks_uri".to_string()));
+            return Err(AppError::Internal(
+                "OIDC discovery missing jwks_uri".to_string(),
+            ));
         }
 
         // Validate issuer matches (case-sensitive exact match per OIDC spec)
@@ -141,8 +164,7 @@ impl OidcDiscoveryService {
             scopes_supported: discovery.scopes_supported,
             response_types_supported: discovery.response_types_supported,
             subject_types_supported: discovery.subject_types_supported,
-            id_token_signing_alg_values_supported: discovery
-                .id_token_signing_alg_values_supported,
+            id_token_signing_alg_values_supported: discovery.id_token_signing_alg_values_supported,
         };
 
         // Cache the result
@@ -161,12 +183,21 @@ impl OidcDiscoveryService {
     pub async fn fetch_jwks(&self, jwks_uri: &str) -> Result<Jwks, AppError> {
         tracing::debug!(url = %jwks_uri, "Fetching JWKS");
 
-        let response = self
-            .client
-            .get(jwks_uri)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to fetch JWKS: {}", e)))?;
+        let response = with_resilience(&self.circuit_breaker, &self.retry_config, {
+            let client = self.client.clone();
+            let jwks_uri = jwks_uri.to_string();
+            move || {
+                let client = client.clone();
+                let jwks_uri = jwks_uri.clone();
+                async move {
+                    client.get(&jwks_uri).send().await.map_err(|e| {
+                        AppError::ExternalService(format!("Failed to fetch JWKS: {}", e))
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(map_circuit_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -204,6 +235,15 @@ impl OidcDiscoveryService {
 impl Default for OidcDiscoveryService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn map_circuit_error(err: CircuitError<AppError>) -> AppError {
+    match err {
+        CircuitError::Open => AppError::ExternalService(
+            "OIDC endpoint temporarily unavailable (circuit open)".to_string(),
+        ),
+        CircuitError::Inner(inner) => inner,
     }
 }
 
@@ -249,11 +289,11 @@ pub struct Jwk {
     pub x5t: Option<String>,
     #[serde(rename = "x5t#S256")]
     pub x5t_s256: Option<String>,
-    pub n: Option<String>, // RSA modulus
-    pub e: Option<String>, // RSA exponent
+    pub n: Option<String>,   // RSA modulus
+    pub e: Option<String>,   // RSA exponent
     pub crv: Option<String>, // EC curve
-    pub x: Option<String>, // EC x coordinate
-    pub y: Option<String>, // EC y coordinate
+    pub x: Option<String>,   // EC x coordinate
+    pub y: Option<String>,   // EC y coordinate
     #[serde(rename = "d")]
     pub d: Option<String>, // Private key (should not be present in JWKS)
 }
@@ -263,10 +303,10 @@ pub fn find_signing_key<'a>(jwks: &'a Jwks, kid: Option<&str>) -> Option<&'a Jwk
     jwks.keys.iter().find(|key| {
         // Key must be for signing
         let is_signing = key.use_.as_deref() == Some("sig") || key.use_.is_none();
-        
+
         // If kid is specified, match it; otherwise return first valid signing key
         let kid_matches = kid.map_or(true, |k| key.kid.as_deref() == Some(k));
-        
+
         is_signing && kid_matches
     })
 }
@@ -278,7 +318,7 @@ mod tests {
     #[test]
     fn test_oidc_provider_type_defaults() {
         use crate::models::SsoProviderType;
-        
+
         assert_eq!(
             SsoProviderType::GitHub.default_scopes(),
             vec!["read:user", "user:email"]
@@ -291,7 +331,7 @@ mod tests {
             SsoProviderType::Oidc.default_scopes(),
             vec!["openid", "profile", "email"]
         );
-        
+
         assert!(SsoProviderType::Google.uses_oidc_discovery());
         assert!(SsoProviderType::Oidc.uses_oidc_discovery());
         assert!(!SsoProviderType::GitHub.uses_oidc_discovery());

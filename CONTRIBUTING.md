@@ -18,6 +18,10 @@ Thank you for contributing to rustchat.
 3. Set required secrets in `.env`:
    - `RUSTCHAT_JWT_SECRET`
    - `RUSTCHAT_ENCRYPTION_KEY`
+   - `RUSTCHAT_S3_ACCESS_KEY`
+   - `RUSTCHAT_S3_SECRET_KEY`
+   - `RUSTFS_ACCESS_KEY`
+   - `RUSTFS_SECRET_KEY`
 4. Start local dependencies:
    ```bash
    docker compose up -d postgres redis rustfs

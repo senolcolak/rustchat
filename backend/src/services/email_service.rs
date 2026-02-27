@@ -69,9 +69,10 @@ impl EmailService {
         // Check workflow is enabled
         let workflow = self.get_workflow(workflow_key, tenant_id).await?;
         if !workflow.enabled {
-            return Err(EmailServiceError::WorkflowDisabled(
-                format!("Workflow '{}' is disabled", workflow_key)
-            ));
+            return Err(EmailServiceError::WorkflowDisabled(format!(
+                "Workflow '{}' is disabled",
+                workflow_key
+            )));
         }
 
         // Check user preferences (if we have a user_id)
@@ -81,10 +82,14 @@ impl EmailService {
 
         // Check throttling
         if let Some(ref throttle_key) = options.throttle_key {
-            if self.is_throttled(throttle_key, &workflow.policy_json.0).await? {
-                return Err(EmailServiceError::RateLimited(
-                    format!("Email throttled for key: {}", throttle_key)
-                ));
+            if self
+                .is_throttled(throttle_key, &workflow.policy_json.0)
+                .await?
+            {
+                return Err(EmailServiceError::RateLimited(format!(
+                    "Email throttled for key: {}",
+                    throttle_key
+                )));
             }
         }
 
@@ -98,12 +103,15 @@ impl EmailService {
             .with_variables(&payload)
             .map_err(|e| EmailServiceError::Template(e.to_string()))?;
 
-        let rendered = self.renderer.render_email(&template_version, &context)
+        let rendered = self
+            .renderer
+            .render_email(&template_version, &context)
             .map_err(|e| EmailServiceError::Template(e.to_string()))?;
 
         // Calculate send_after for quiet hours
         let send_after = if let Some(user_id) = recipient_user_id {
-            self.calculate_send_after(user_id, &workflow.policy_json.0).await?
+            self.calculate_send_after(user_id, &workflow.policy_json.0)
+                .await?
         } else {
             None
         };
@@ -152,7 +160,8 @@ impl EmailService {
             recipient_user_id,
             None,
             None,
-        ).await?;
+        )
+        .await?;
 
         info!(
             "Email enqueued: id={}, workflow={}, recipient={}",
@@ -170,19 +179,19 @@ impl EmailService {
         to: &EmailAddress,
         content: EmailContent,
     ) -> EmailServiceResult<crate::services::email_provider::SendResult> {
-        provider.send_email(from, to, &content)
+        provider
+            .send_email(from, to, &content)
             .await
             .map_err(|e| EmailServiceError::Provider(e.to_string()))
     }
 
     /// Get user's tenant ID
     async fn get_user_tenant(&self, user_id: Uuid) -> EmailServiceResult<Option<Uuid>> {
-        let tenant_id: Option<(Option<Uuid>,)> = sqlx::query_as(
-            "SELECT org_id FROM users WHERE id = $1"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let tenant_id: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT org_id FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db)
+                .await?;
 
         Ok(tenant_id.and_then(|t| t.0))
     }
@@ -218,18 +227,17 @@ impl EmailService {
         user_id: Uuid,
     ) -> EmailServiceResult<()> {
         // Get or create user preferences
-        let prefs: Option<UserNotificationPrefs> = sqlx::query_as(
-            "SELECT * FROM user_notification_prefs WHERE user_id = $1"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let prefs: Option<UserNotificationPrefs> =
+            sqlx::query_as("SELECT * FROM user_notification_prefs WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db)
+                .await?;
 
         if let Some(prefs) = prefs {
             // Check if email is enabled globally
             if !prefs.email_enabled {
                 return Err(EmailServiceError::UserOptedOut(
-                    "User has disabled all emails".to_string()
+                    "User has disabled all emails".to_string(),
                 ));
             }
 
@@ -243,9 +251,10 @@ impl EmailService {
             };
 
             if opt_in == Some(false) {
-                return Err(EmailServiceError::UserOptedOut(
-                    format!("User has opted out of '{}'", workflow_key)
-                ));
+                return Err(EmailServiceError::UserOptedOut(format!(
+                    "User has opted out of '{}'",
+                    workflow_key
+                )));
             }
         }
 
@@ -253,7 +262,11 @@ impl EmailService {
     }
 
     /// Check if email is throttled
-    async fn is_throttled(&self, throttle_key: &str, policy: &WorkflowPolicy) -> EmailServiceResult<bool> {
+    async fn is_throttled(
+        &self,
+        throttle_key: &str,
+        policy: &WorkflowPolicy,
+    ) -> EmailServiceResult<bool> {
         let throttle_minutes = policy.throttle_minutes.unwrap_or(5);
         let since = Utc::now() - Duration::minutes(throttle_minutes as i64);
 
@@ -278,17 +291,17 @@ impl EmailService {
         locale: Option<&str>,
     ) -> EmailServiceResult<(EmailTemplateFamily, EmailTemplateVersion)> {
         let family_id = workflow.selected_template_family_id.ok_or_else(|| {
-            EmailServiceError::Configuration(
-                format!("No template family configured for workflow '{}'", workflow.workflow_key)
-            )
+            EmailServiceError::Configuration(format!(
+                "No template family configured for workflow '{}'",
+                workflow.workflow_key
+            ))
         })?;
 
-        let family: EmailTemplateFamily = sqlx::query_as(
-            "SELECT * FROM email_template_families WHERE id = $1"
-        )
-        .bind(family_id)
-        .fetch_one(&self.db)
-        .await?;
+        let family: EmailTemplateFamily =
+            sqlx::query_as("SELECT * FROM email_template_families WHERE id = $1")
+                .bind(family_id)
+                .fetch_one(&self.db)
+                .await?;
 
         // Determine locale with fallback
         let locale = locale.unwrap_or(&workflow.default_locale);
@@ -316,9 +329,10 @@ impl EmailService {
         }
 
         let template = template.ok_or_else(|| {
-            EmailServiceError::Configuration(
-                format!("No published template found for family '{}'", family.key)
-            )
+            EmailServiceError::Configuration(format!(
+                "No published template found for family '{}'",
+                family.key
+            ))
         })?;
 
         Ok((family, template))
@@ -336,12 +350,11 @@ impl EmailService {
         }
 
         // Get user's quiet hours
-        let prefs: Option<UserNotificationPrefs> = sqlx::query_as(
-            "SELECT * FROM user_notification_prefs WHERE user_id = $1"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let prefs: Option<UserNotificationPrefs> =
+            sqlx::query_as("SELECT * FROM user_notification_prefs WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db)
+                .await?;
 
         let quiet_hours = prefs
             .and_then(|p| p.quiet_hours_json)
@@ -446,12 +459,10 @@ impl EmailService {
 
     /// Get outbox entry by ID
     pub async fn get_outbox_entry(&self, id: Uuid) -> EmailServiceResult<Option<EmailOutbox>> {
-        let entry: Option<EmailOutbox> = sqlx::query_as(
-            "SELECT * FROM email_outbox WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.db)
-        .await?;
+        let entry: Option<EmailOutbox> = sqlx::query_as("SELECT * FROM email_outbox WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await?;
 
         Ok(entry)
     }
@@ -504,12 +515,11 @@ impl EmailService {
 
     /// Get or create user notification preferences
     pub async fn get_user_prefs(&self, user_id: Uuid) -> EmailServiceResult<UserNotificationPrefs> {
-        let prefs: Option<UserNotificationPrefs> = sqlx::query_as(
-            "SELECT * FROM user_notification_prefs WHERE user_id = $1"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let prefs: Option<UserNotificationPrefs> =
+            sqlx::query_as("SELECT * FROM user_notification_prefs WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db)
+                .await?;
 
         if let Some(prefs) = prefs {
             return Ok(prefs);

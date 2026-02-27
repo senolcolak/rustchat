@@ -60,7 +60,7 @@ pub async fn test_email_config(
         WHERE enabled = true AND is_default = true
         ORDER BY tenant_id NULLS LAST
         LIMIT 1
-        "#
+        "#,
     )
     .fetch_optional(&state.db)
     .await
@@ -99,15 +99,16 @@ pub async fn test_email_config(
         .unwrap_or_else(|| auth.email.clone());
 
     // Create provider and test
-    let provider = match SmtpProvider::new(provider_settings.clone(), &state.config.encryption_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            return Ok(Json(serde_json::json!({
-                "status": "error",
-                "error": format!("Failed to initialize SMTP provider: {}", e)
-            })));
-        }
-    };
+    let provider =
+        match SmtpProvider::new(provider_settings.clone(), &state.config.encryption_key).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("Failed to initialize SMTP provider: {}", e)
+                })));
+            }
+        };
 
     // Test connection first
     if let Err(e) = provider.test_connection().await {
@@ -118,7 +119,10 @@ pub async fn test_email_config(
     }
 
     // Send test email
-    let from = EmailAddress::with_name(&provider_settings.from_address, &provider_settings.from_name);
+    let from = EmailAddress::with_name(
+        &provider_settings.from_address,
+        &provider_settings.from_name,
+    );
     let to = EmailAddress::new(&test_email);
     let content = EmailContent {
         subject: "RustChat Test Email".to_string(),

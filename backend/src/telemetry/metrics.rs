@@ -167,29 +167,20 @@ pub static RATE_LIMIT_HITS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Messages sent
 pub static MESSAGES_SENT_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
-    register_counter!(
-        "rustchat_messages_sent_total",
-        "Total messages sent"
-    )
-    .expect("metric can be created")
+    register_counter!("rustchat_messages_sent_total", "Total messages sent")
+        .expect("metric can be created")
 });
 
 /// Files uploaded
 pub static FILES_UPLOADED_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
-    register_counter!(
-        "rustchat_files_uploaded_total",
-        "Total files uploaded"
-    )
-    .expect("metric can be created")
+    register_counter!("rustchat_files_uploaded_total", "Total files uploaded")
+        .expect("metric can be created")
 });
 
 /// Active users (guage)
 pub static ACTIVE_USERS: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "rustchat_active_users",
-        "Number of active users"
-    )
-    .expect("metric can be created")
+    register_int_gauge!("rustchat_active_users", "Number of active users")
+        .expect("metric can be created")
 });
 
 // ==================== Circuit Breaker Metrics ====================

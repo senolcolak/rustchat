@@ -3955,7 +3955,7 @@ fn spawn_signaling_forwarder(
     channel_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    mut rx: mpsc::UnboundedReceiver<SignalingMessage>,
+    mut rx: mpsc::Receiver<SignalingMessage>,
 ) {
     let state = state.clone();
     tokio::spawn(async move {
@@ -4185,10 +4185,7 @@ async fn send_signaling_event(
 }
 
 /// Start a background task to listen for voice events from the SFU and broadcast them via WebSockets
-pub async fn start_voice_event_listener(
-    state: AppState,
-    mut rx: mpsc::UnboundedReceiver<VoiceEvent>,
-) {
+pub async fn start_voice_event_listener(state: AppState, mut rx: mpsc::Receiver<VoiceEvent>) {
     info!("Starting Calls Voice Event Listener");
     while let Some(event) = rx.recv().await {
         match event {

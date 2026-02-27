@@ -271,18 +271,17 @@ pub async fn request_password_reset(
     // Send email only if user exists
     if let Some((user_id, username, user_email)) = user {
         // Fetch site_url from server_config
-        let site_url: Option<String> = sqlx::query_scalar(
-            "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
-        )
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
+        let site_url: Option<String> =
+            sqlx::query_scalar("SELECT site->>'site_url' FROM server_config WHERE id = 'default'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
 
         if let Some(site_url) = site_url {
             let reset_link = format!("{}/reset-password?token={}", site_url, token);
-            
+
             let email_service = EmailService::new(db.clone());
             let payload = serde_json::json!({
                 "user_name": username,
@@ -333,20 +332,21 @@ pub async fn validate_token(
 ) -> Result<(Uuid, String), PasswordResetError> {
     let token_hash = hash_token(token);
 
-    let result: Option<(Uuid, String, String, Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
-        r#"
+    let result: Option<(Uuid, String, String, Option<DateTime<Utc>>, DateTime<Utc>)> =
+        sqlx::query_as(
+            r#"
         SELECT user_id, email, token_hash, used_at, expires_at
         FROM password_reset_tokens 
         WHERE token_hash = $1
         "#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| {
-        error!("Token validation query failed: {}", e);
-        PasswordResetError::Internal("Token validation failed".to_string())
-    })?;
+        )
+        .bind(&token_hash)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| {
+            error!("Token validation query failed: {}", e);
+            PasswordResetError::Internal("Token validation failed".to_string())
+        })?;
 
     match result {
         Some((user_id, email, stored_hash, used_at, expires_at)) => {
@@ -381,21 +381,22 @@ pub async fn reset_password(
     let token_hash = hash_token(token);
 
     // Find and validate token (with row lock to prevent race conditions)
-    let result: Option<(Uuid, String, String, Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
-        r#"
+    let result: Option<(Uuid, String, String, Option<DateTime<Utc>>, DateTime<Utc>)> =
+        sqlx::query_as(
+            r#"
         SELECT user_id, email, token_hash, used_at, expires_at
         FROM password_reset_tokens 
         WHERE token_hash = $1
         FOR UPDATE
         "#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| {
-        error!("Token fetch failed: {}", e);
-        PasswordResetError::Internal("Token validation failed".to_string())
-    })?;
+        )
+        .bind(&token_hash)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| {
+            error!("Token fetch failed: {}", e);
+            PasswordResetError::Internal("Token validation failed".to_string())
+        })?;
 
     let (user_id, email, stored_hash, used_at, expires_at) = match result {
         Some(r) => r,
@@ -475,7 +476,7 @@ pub async fn reset_password(
 /// Check if user needs password setup (invited users without password)
 pub async fn needs_password_setup(db: &PgPool, user_id: Uuid) -> Result<bool, PasswordResetError> {
     let result: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT password_hash FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL"
+        "SELECT password_hash FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -543,14 +544,13 @@ pub async fn request_password_setup(
     })?;
 
     // Fetch site_url
-    let site_url: Option<String> = sqlx::query_scalar(
-        "SELECT site->>'site_url' FROM server_config WHERE id = 'default'"
-    )
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
-    .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
+    let site_url: Option<String> =
+        sqlx::query_scalar("SELECT site->>'site_url' FROM server_config WHERE id = 'default'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
 
     let site_url = site_url.ok_or_else(|| {
         warn!("site_url not configured");
@@ -558,7 +558,7 @@ pub async fn request_password_setup(
     })?;
 
     let setup_link = format!("{}/setup-password?token={}", site_url, token);
-    
+
     let email_service = EmailService::new(db.clone());
     let payload = serde_json::json!({
         "user_name": username,
@@ -636,7 +636,7 @@ pub async fn send_password_setup_email(
     })?;
 
     let setup_link = format!("{}/set-password?token={}", site_url, token);
-    
+
     let email_service = EmailService::new(db.clone());
     let payload = serde_json::json!({
         "user_name": username,
@@ -691,7 +691,7 @@ mod tests {
         let token1 = generate_secure_token();
         let token2 = generate_secure_token();
         let token3 = generate_secure_token();
-        
+
         assert_ne!(token1, token2);
         assert_ne!(token2, token3);
         assert_ne!(token1, token3);
@@ -702,10 +702,10 @@ mod tests {
         let token = "test_token_123";
         let hash1 = hash_token(token);
         let hash2 = hash_token(token);
-        
+
         // Same token should produce same hash
         assert_eq!(hash1, hash2);
-        
+
         // Hash should be 64 chars (SHA-256 hex)
         assert_eq!(hash1.len(), 64);
     }
@@ -714,7 +714,7 @@ mod tests {
     fn test_hash_token_different_tokens() {
         let hash1 = hash_token("token1");
         let hash2 = hash_token("token2");
-        
+
         assert_ne!(hash1, hash2);
     }
 
@@ -722,13 +722,13 @@ mod tests {
     fn test_constant_time_compare() {
         // Equal strings
         assert!(constant_time_compare("abc", "abc"));
-        
+
         // Different strings
         assert!(!constant_time_compare("abc", "def"));
-        
+
         // Different lengths
         assert!(!constant_time_compare("abc", "abcd"));
-        
+
         // Empty strings
         assert!(constant_time_compare("", ""));
         assert!(!constant_time_compare("a", ""));
@@ -737,37 +737,55 @@ mod tests {
     #[test]
     fn test_validate_password_policy_too_short() {
         let result = validate_password_policy("short1!");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]
     fn test_validate_password_policy_missing_uppercase() {
         let result = validate_password_policy("lowercase123!");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]
     fn test_validate_password_policy_missing_lowercase() {
         let result = validate_password_policy("UPPERCASE123!");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]
     fn test_validate_password_policy_missing_digit() {
         let result = validate_password_policy("PasswordNoDigit!");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]
     fn test_validate_password_policy_missing_special() {
         let result = validate_password_policy("PasswordNoSpecial123");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]
     fn test_validate_password_policy_common_password() {
         let result = validate_password_policy("Password123!");
-        assert!(matches!(result, Err(PasswordResetError::InvalidPassword(_))));
+        assert!(matches!(
+            result,
+            Err(PasswordResetError::InvalidPassword(_))
+        ));
     }
 
     #[test]

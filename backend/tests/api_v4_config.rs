@@ -144,8 +144,11 @@ fn test_config() -> Config {
         server_host: "127.0.0.1".to_string(),
         server_port: 3000,
         database_url: "postgres://fake:fake@localhost:5432/fake".to_string(),
+        db_pool: Default::default(),
         redis_url: "redis://localhost:6379/".to_string(),
         jwt_secret: "secret".to_string(),
+        jwt_issuer: None,
+        jwt_audience: None,
         encryption_key: "test-encryption-key".to_string(),
         jwt_expiry_hours: 1,
         log_level: "info".to_string(),
@@ -158,6 +161,8 @@ fn test_config() -> Config {
         admin_user: None,
         admin_password: None,
         cors_allowed_origins: None,
+        turnstile: Default::default(),
         calls: Default::default(),
+        security: Default::default(),
     }
 }

@@ -245,11 +245,15 @@ async fn connect_ws_v4_with_user_agent(
     user_agent: Option<&str>,
 ) -> WsClient {
     let ws_base = base_http_url.replacen("http://", "ws://", 1);
-    let ws_url = format!("{ws_base}/api/v4/websocket?token={token}");
+    let ws_url = format!("{ws_base}/api/v4/websocket");
 
     let mut request = ws_url
         .into_client_request()
         .expect("websocket request should be valid");
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_str(token).expect("valid websocket subprotocol token"),
+    );
     if let Some(ua) = user_agent {
         request.headers_mut().insert(
             "User-Agent",

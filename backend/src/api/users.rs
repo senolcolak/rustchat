@@ -40,7 +40,12 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_users))
         .route("/{id}", get(get_user).put(update_user))
         .route("/{id}/password", axum::routing::post(change_password))
-        .route("/me/status", get(get_my_status).put(update_my_status).delete(delete_my_status))
+        .route(
+            "/me/status",
+            get(get_my_status)
+                .put(update_my_status)
+                .delete(delete_my_status),
+        )
         .route("/{id}/status", get(get_user_status))
         .route("/status/ids", axum::routing::post(get_statuses_by_ids))
 }

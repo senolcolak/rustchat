@@ -3,9 +3,9 @@
 //! Handles user presence status (online, away, dnd, offline) and custom status
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::HeaderMap,
-    body::Bytes,
     routing::{get, post, put},
     Json, Router,
 };
@@ -13,8 +13,8 @@ use chrono::{DateTime, Datelike, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::AppState;
 use crate::api::v4::extractors::MmAuthUser;
+use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
 use crate::realtime::{WsBroadcast, WsEnvelope};
@@ -23,15 +23,27 @@ use crate::realtime::{WsBroadcast, WsEnvelope};
 pub fn router() -> Router<AppState> {
     Router::new()
         // GET /api/v4/users/{user_id}/status
-        .route("/users/{user_id}/status", get(get_user_status).put(update_user_status))
+        .route(
+            "/users/{user_id}/status",
+            get(get_user_status).put(update_user_status),
+        )
         // GET /api/v4/users/me/status
         .route("/users/me/status", get(get_my_status).put(update_my_status))
         // POST /api/v4/users/status/ids
         .route("/users/status/ids", post(get_statuses_by_ids))
         // Custom status endpoints
-        .route("/users/{user_id}/status/custom", put(update_user_custom_status).delete(clear_user_custom_status))
-        .route("/users/{user_id}/status/custom/recent", get(get_recent_custom_statuses))
-        .route("/users/{user_id}/status/custom/recent/delete", post(delete_recent_custom_status))
+        .route(
+            "/users/{user_id}/status/custom",
+            put(update_user_custom_status).delete(clear_user_custom_status),
+        )
+        .route(
+            "/users/{user_id}/status/custom/recent",
+            get(get_recent_custom_statuses),
+        )
+        .route(
+            "/users/{user_id}/status/custom/recent/delete",
+            post(delete_recent_custom_status),
+        )
 }
 
 /// User status response
@@ -72,7 +84,7 @@ impl CustomStatusDuration {
                 let tomorrow = now.date_naive().succ_opt()?;
                 Some(DateTime::from_naive_utc_and_offset(
                     tomorrow.and_hms_opt(0, 0, 0)?,
-                    chrono::Utc
+                    chrono::Utc,
                 ))
             }
             CustomStatusDuration::ThisWeek => {
@@ -82,7 +94,7 @@ impl CustomStatusDuration {
                 let next_week = end_of_week.date_naive().succ_opt()?;
                 Some(DateTime::from_naive_utc_and_offset(
                     next_week.and_hms_opt(0, 0, 0)?,
-                    chrono::Utc
+                    chrono::Utc,
                 ))
             }
             CustomStatusDuration::DateAndTime | CustomStatusDuration::CustomDateTime => custom_time,
@@ -115,7 +127,7 @@ impl CustomStatus {
         if runes.len() > MAX_RUNES {
             self.text = runes[..MAX_RUNES].iter().collect();
         }
-        
+
         // If duration is empty but expires_at is set, set duration to date_and_time
         if self.duration.is_empty() && self.expires_at.is_some() {
             self.duration = "date_and_time".to_string();
@@ -137,7 +149,7 @@ pub struct UpdateMyStatusRequest {
     // Legacy fields for backwards compatibility
     #[serde(default)]
     pub user_id: Option<String>,
-    
+
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -224,10 +236,13 @@ async fn update_my_status(
         let dnd_end_time = body.dnd_end_time;
         let _ = update_user_status_internal(&state, auth.user_id, presence, dnd_end_time).await?;
     }
-    
+
     // Handle custom status update if provided
     if body.text.is_some() || body.emoji.is_some() || body.clear == Some(true) {
-        let custom_status = if body.clear == Some(true) || (body.text.as_ref().map(|t| t.is_empty()).unwrap_or(false) && body.emoji.as_ref().map(|e| e.is_empty()).unwrap_or(false)) {
+        let custom_status = if body.clear == Some(true)
+            || (body.text.as_ref().map(|t| t.is_empty()).unwrap_or(false)
+                && body.emoji.as_ref().map(|e| e.is_empty()).unwrap_or(false))
+        {
             None
         } else {
             let mut cs = CustomStatus {
@@ -236,7 +251,7 @@ async fn update_my_status(
                 duration: body.duration.unwrap_or_default(),
                 expires_at: None,
             };
-            
+
             // Parse duration and calculate expires_at
             let duration_enum = match cs.duration.as_str() {
                 "thirty_minutes" => Some(CustomStatusDuration::ThirtyMinutes),
@@ -261,18 +276,18 @@ async fn update_my_status(
                     }
                 }
             };
-            
+
             if let Some(dur) = duration_enum {
                 cs.expires_at = dur.to_expires_at(None);
                 if cs.expires_at.is_some() && cs.duration.is_empty() {
                     cs.duration = "date_and_time".to_string();
                 }
             }
-            
+
             cs.pre_save();
             Some(cs)
         };
-        
+
         update_custom_status_internal(&state, auth.user_id, custom_status).await?;
     }
 
@@ -285,7 +300,7 @@ async fn update_my_status(
             presence, status_text, status_emoji, status_expires_at, custom_status,
             notify_props, timezone, last_login_at, created_at, updated_at
         FROM users WHERE id = $1
-        "#
+        "#,
     )
     .bind(auth.user_id)
     .fetch_one(&state.db)
@@ -311,7 +326,7 @@ async fn update_user_status(
 ) -> ApiResult<Json<serde_json::Value>> {
     let target_user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    
+
     // Users can only update their own status unless admin
     if target_user_id != auth.user_id && auth.role != "admin" {
         return Err(AppError::Forbidden(
@@ -375,9 +390,19 @@ async fn update_custom_status_internal(
             "duration": cs.duration,
             "expires_at": cs.expires_at.map(|t| t.to_rfc3339()),
         });
-        (Some(cs.text.clone()), Some(cs.emoji.clone()), cs.expires_at, json)
+        (
+            Some(cs.text.clone()),
+            Some(cs.emoji.clone()),
+            cs.expires_at,
+            json,
+        )
     } else {
-        (None::<String>, None::<String>, None::<DateTime<Utc>>, serde_json::json!(null))
+        (
+            None::<String>,
+            None::<String>,
+            None::<DateTime<Utc>>,
+            serde_json::json!(null),
+        )
     };
 
     sqlx::query(
@@ -472,7 +497,7 @@ async fn update_user_custom_status(
     }
 
     let mut custom_status = body;
-    
+
     // Parse duration and calculate expires_at
     let duration_enum = match custom_status.duration.as_str() {
         "thirty_minutes" => Some(CustomStatusDuration::ThirtyMinutes),
@@ -656,11 +681,9 @@ fn parse_body<T: serde::de::DeserializeOwned>(
         .unwrap_or("");
 
     if content_type.starts_with("application/json") {
-        serde_json::from_slice(body)
-            .map_err(|_| AppError::BadRequest(message.to_string()))
+        serde_json::from_slice(body).map_err(|_| AppError::BadRequest(message.to_string()))
     } else if content_type.starts_with("application/x-www-form-urlencoded") {
-        serde_urlencoded::from_bytes(body)
-            .map_err(|_| AppError::BadRequest(message.to_string()))
+        serde_urlencoded::from_bytes(body).map_err(|_| AppError::BadRequest(message.to_string()))
     } else {
         // Try JSON first, then fall back to url-encoded (handles missing content-type)
         serde_json::from_slice(body)

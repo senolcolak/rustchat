@@ -77,7 +77,7 @@ pub struct MailProviderSettings {
     pub id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub provider_type: MailProviderType,
-    
+
     // SMTP Configuration
     pub host: String,
     pub port: i32,
@@ -85,20 +85,20 @@ pub struct MailProviderSettings {
     pub password_encrypted: String,
     pub tls_mode: TlsMode,
     pub skip_cert_verify: bool,
-    
+
     // Sender Configuration
     pub from_address: String,
     pub from_name: String,
     pub reply_to: Option<String>,
-    
+
     // Rate Limiting
     pub max_emails_per_minute: i32,
     pub max_emails_per_hour: i32,
-    
+
     // Status
     pub enabled: bool,
     pub is_default: bool,
-    
+
     // Metadata
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -147,9 +147,15 @@ pub struct UpdateMailProviderRequest {
     pub is_default: Option<bool>,
 }
 
-fn default_rate_limit_minute() -> i32 { 60 }
-fn default_rate_limit_hour() -> i32 { 1000 }
-fn default_enabled() -> bool { true }
+fn default_rate_limit_minute() -> i32 {
+    60
+}
+fn default_rate_limit_hour() -> i32 {
+    1000
+}
+fn default_enabled() -> bool {
+    true
+}
 
 /// Response DTO (without sensitive fields)
 #[derive(Debug, Clone, Serialize)]

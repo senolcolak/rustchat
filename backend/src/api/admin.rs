@@ -12,10 +12,9 @@ use super::AppState;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::models::{
-    AddTeamMember, AuditLog, AuditLogQuery, CreateChannel, CreateRetentionPolicy,
-    CreateSsoConfig, Permission, RetentionPolicy, ServerConfig,
-    ServerConfigResponse, SsoConfig, SsoConfigResponse, SsoProviderType, SsoTestResult,
-    TeamMember, TeamMemberResponse, UpdateChannel, UpdateSsoConfig,
+    AddTeamMember, AuditLog, AuditLogQuery, CreateChannel, CreateRetentionPolicy, CreateSsoConfig,
+    Permission, RetentionPolicy, ServerConfig, ServerConfigResponse, SsoConfig, SsoConfigResponse,
+    SsoProviderType, SsoTestResult, TeamMember, TeamMemberResponse, UpdateChannel, UpdateSsoConfig,
 };
 use crate::services::email_provider::{EmailAddress, EmailContent, MailProvider, SmtpProvider};
 use crate::services::oidc_discovery::OidcDiscoveryService;
@@ -402,12 +401,11 @@ async fn create_sso_config(
     let provider_type = validate_sso_config(&input, false)?;
 
     // Check for duplicate provider_key
-    let existing: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM sso_configs WHERE provider_key = $1"
-    )
-    .bind(&input.provider_key)
-    .fetch_optional(&state.db)
-    .await?;
+    let existing: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM sso_configs WHERE provider_key = $1")
+            .bind(&input.provider_key)
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some() {
         return Err(AppError::Validation(format!(
@@ -468,7 +466,10 @@ async fn create_sso_config(
     .await
     .map_err(|e| {
         if e.to_string().contains("unique") {
-            AppError::Validation(format!("Provider key '{}' already exists", input.provider_key))
+            AppError::Validation(format!(
+                "Provider key '{}' already exists",
+                input.provider_key
+            ))
         } else {
             AppError::Internal(format!("Failed to create SSO config: {}", e))
         }
@@ -508,13 +509,12 @@ async fn update_sso_config(
         if new_key != &existing.provider_key {
             validate_provider_key(new_key)?;
             // Check for duplicates
-            let dup: Option<(Uuid,)> = sqlx::query_as(
-                "SELECT id FROM sso_configs WHERE provider_key = $1 AND id != $2"
-            )
-            .bind(new_key)
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+            let dup: Option<(Uuid,)> =
+                sqlx::query_as("SELECT id FROM sso_configs WHERE provider_key = $1 AND id != $2")
+                    .bind(new_key)
+                    .bind(id)
+                    .fetch_optional(&state.db)
+                    .await?;
             if dup.is_some() {
                 return Err(AppError::Validation(format!(
                     "Provider key '{}' already exists",
@@ -525,9 +525,11 @@ async fn update_sso_config(
     }
 
     // Encrypt new client secret if provided
-    let encrypted_secret = input.client_secret.as_ref().map(|s| {
-        crate::crypto::encrypt(s, &state.config.encryption_key)
-    }).transpose()?;
+    let encrypted_secret = input
+        .client_secret
+        .as_ref()
+        .map(|s| crate::crypto::encrypt(s, &state.config.encryption_key))
+        .transpose()?;
 
     let config: SsoConfig = sqlx::query_as(
         r#"
@@ -592,7 +594,9 @@ async fn delete_sso_config(
         .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("SSO configuration not found".to_string()));
+        return Err(AppError::NotFound(
+            "SSO configuration not found".to_string(),
+        ));
     }
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
@@ -636,9 +640,7 @@ async fn test_sso_config(
     // Test based on provider type
     match provider_type {
         SsoProviderType::GitHub => test_github_config(&config).await,
-        SsoProviderType::Google | SsoProviderType::Oidc => {
-            test_oidc_config(&config).await
-        }
+        SsoProviderType::Google | SsoProviderType::Oidc => test_oidc_config(&config).await,
         SsoProviderType::Saml => Ok(Json(SsoTestResult {
             success: false,
             message: "SAML testing is not supported".to_string(),
@@ -1899,21 +1901,49 @@ fn classify_email_error(message: &str) -> (&'static str, &'static str) {
             "TLS certificate validation failed. Use the certificate hostname (not an IP), or enable certificate-skip only for testing.",
         )
     } else if lower.contains("authentication") || lower.contains("auth") {
-        ("auth_failed", "SMTP authentication failed. Verify username/password and auth method.")
-    } else if lower.contains("dns") || lower.contains("name or service not known") || lower.contains("no such host") {
-        ("dns_error", "SMTP hostname lookup failed. Verify the SMTP host value.")
+        (
+            "auth_failed",
+            "SMTP authentication failed. Verify username/password and auth method.",
+        )
+    } else if lower.contains("dns")
+        || lower.contains("name or service not known")
+        || lower.contains("no such host")
+    {
+        (
+            "dns_error",
+            "SMTP hostname lookup failed. Verify the SMTP host value.",
+        )
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        ("timeout", "SMTP connection timed out. Verify firewall, port, and SMTP host reachability.")
-    } else if lower.contains("relay") || lower.contains("denied") || lower.contains("not permitted") {
+        (
+            "timeout",
+            "SMTP connection timed out. Verify firewall, port, and SMTP host reachability.",
+        )
+    } else if lower.contains("relay") || lower.contains("denied") || lower.contains("not permitted")
+    {
         ("relay_denied", "SMTP server rejected relaying. Verify from address, recipient policy, and account permissions.")
     } else if lower.contains("invalid from") || lower.contains("from address") {
-        ("invalid_from", "The configured from address is invalid or rejected by the SMTP server.")
-    } else if lower.contains("invalid to address") || lower.contains("mailbox") || lower.contains("recipient") {
-        ("invalid_recipient", "Recipient address is invalid or rejected by the SMTP server.")
+        (
+            "invalid_from",
+            "The configured from address is invalid or rejected by the SMTP server.",
+        )
+    } else if lower.contains("invalid to address")
+        || lower.contains("mailbox")
+        || lower.contains("recipient")
+    {
+        (
+            "invalid_recipient",
+            "Recipient address is invalid or rejected by the SMTP server.",
+        )
     } else if lower.contains("connection error") || lower.contains("refused") {
-        ("connect_failed", "SMTP connection failed. Verify host, port, and TLS mode.")
+        (
+            "connect_failed",
+            "SMTP connection failed. Verify host, port, and TLS mode.",
+        )
     } else {
-        ("smtp_error", "SMTP request failed. Check server logs and SMTP settings.")
+        (
+            "smtp_error",
+            "SMTP request failed. Check server logs and SMTP settings.",
+        )
     }
 }
 
@@ -1941,7 +1971,11 @@ async fn record_provider_email_test_event(
     if let Err(e) = insert_admin_audit_log(
         &state.db,
         actor_user_id,
-        if success { "email.test.success" } else { "email.test.failure" },
+        if success {
+            "email.test.success"
+        } else {
+            "email.test.failure"
+        },
         "email",
         None,
         metadata,
@@ -1978,12 +2012,36 @@ async fn list_email_events(
             created_at: row.created_at,
             kind: "test".to_string(),
             success: row.action == "email.test.success",
-            recipient: row.metadata.get("recipient").and_then(|v| v.as_str()).map(str::to_string),
-            smtp_host: row.metadata.get("smtp_host").and_then(|v| v.as_str()).map(str::to_string),
-            smtp_port: row.metadata.get("smtp_port").and_then(|v| v.as_i64()).map(|v| v as i32),
-            smtp_security: row.metadata.get("smtp_security").and_then(|v| v.as_str()).map(str::to_string),
-            message: row.metadata.get("message").and_then(|v| v.as_str()).map(str::to_string),
-            error_kind: row.metadata.get("error_kind").and_then(|v| v.as_str()).map(str::to_string),
+            recipient: row
+                .metadata
+                .get("recipient")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            smtp_host: row
+                .metadata
+                .get("smtp_host")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            smtp_port: row
+                .metadata
+                .get("smtp_port")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+            smtp_security: row
+                .metadata
+                .get("smtp_security")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            message: row
+                .metadata
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            error_kind: row
+                .metadata
+                .get("error_kind")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         })
         .collect();
 
@@ -2004,19 +2062,28 @@ async fn test_email_config(
         WHERE enabled = true AND is_default = true
         ORDER BY tenant_id NULLS LAST
         LIMIT 1
-        "#
+        "#,
     )
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::Config("No default mail provider configured. Please configure an email provider first.".to_string()))?;
+    .ok_or_else(|| {
+        AppError::Config(
+            "No default mail provider configured. Please configure an email provider first."
+                .to_string(),
+        )
+    })?;
 
     // Check if SMTP is configured
     if provider_settings.host.trim().is_empty() {
-        return Err(AppError::BadRequest("SMTP host is not configured in the default provider".to_string()));
+        return Err(AppError::BadRequest(
+            "SMTP host is not configured in the default provider".to_string(),
+        ));
     }
 
     if provider_settings.from_address.trim().is_empty() {
-        return Err(AppError::BadRequest("From address is not configured in the default provider".to_string()));
+        return Err(AppError::BadRequest(
+            "From address is not configured in the default provider".to_string(),
+        ));
     }
 
     if payload.to_email.is_none() && payload.email.is_none() && auth.email.trim().is_empty() {
@@ -2051,14 +2118,18 @@ async fn test_email_config(
         )
         .await;
         return Err(AppError::ExternalService(format!(
-            "SMTP connection failed ({}): {}. {}", kind, error_msg, hint
+            "SMTP connection failed ({}): {}. {}",
+            kind, error_msg, hint
         )));
     }
 
     tracing::info!("SMTP connection test successful");
 
     // Send test email
-    let from = EmailAddress::with_name(&provider_settings.from_address, &provider_settings.from_name);
+    let from = EmailAddress::with_name(
+        &provider_settings.from_address,
+        &provider_settings.from_name,
+    );
     let to = EmailAddress::new(&test_email);
     let content = EmailContent {
         subject: "RustChat Test Email".to_string(),
@@ -2118,7 +2189,8 @@ async fn test_email_config(
             )
             .await;
             Err(AppError::ExternalService(format!(
-                "Test email send failed ({}): {}. {}", kind, error_msg, hint
+                "Test email send failed ({}): {}. {}",
+                kind, error_msg, hint
             )))
         }
     }

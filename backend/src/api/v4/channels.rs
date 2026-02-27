@@ -30,8 +30,8 @@ mod view;
 use compat::{
     get_channel_access_control_attributes, get_channel_common_teams, get_channel_groups,
     get_channel_member_counts_by_group, get_channel_members_minus_group_members,
-    get_channel_moderations, patch_channel_moderations,
-    search_group_channels, update_channel_scheme,
+    get_channel_moderations, patch_channel_moderations, search_group_channels,
+    update_channel_scheme,
 };
 use helpers::normalize_notify_props;
 use view::{view_channel, view_channel_for_user};
@@ -1813,7 +1813,6 @@ async fn update_channel_member_scheme_roles(
     Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
-
 /// POST /channels/{channel_id}/members/{user_id}/read - Mark channel as read
 async fn mark_channel_as_read(
     State(state): State<AppState>,
@@ -1822,21 +1821,21 @@ async fn mark_channel_as_read(
 ) -> ApiResult<impl IntoResponse> {
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
-    
+
     let target_user_id = if user_id == "me" {
         auth.user_id
     } else {
         parse_mm_or_uuid(&user_id)
             .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?
     };
-    
+
     // Users can only mark their own channels as read
     if target_user_id != auth.user_id {
         return Err(crate::error::AppError::Forbidden(
             "Cannot mark channel as read for other users".to_string(),
         ));
     }
-    
+
     // Verify membership
     let _membership: crate::models::ChannelMember =
         sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
@@ -1847,16 +1846,16 @@ async fn mark_channel_as_read(
             .ok_or_else(|| {
                 crate::error::AppError::Forbidden("Not a member of this channel".to_string())
             })?;
-    
+
     // Update last_viewed_at to mark all messages as read
     sqlx::query(
-        "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2"
+        "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2",
     )
     .bind(channel_id)
     .bind(auth.user_id)
     .execute(&state.db)
     .await?;
-    
+
     // Also update channel_reads table if it exists
     let _ = sqlx::query(
         r#"
@@ -1864,13 +1863,13 @@ async fn mark_channel_as_read(
         VALUES ($1, $2, (SELECT MAX(seq) FROM posts WHERE channel_id = $2), NOW())
         ON CONFLICT (user_id, channel_id)
         DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_viewed_at = NOW()
-        "#
+        "#,
     )
     .bind(auth.user_id)
     .bind(channel_id)
     .execute(&state.db)
     .await;
-    
+
     // Broadcast channel viewed event
     let broadcast = crate::realtime::WsEnvelope::event(
         crate::realtime::EventType::ChannelViewed,
@@ -1886,7 +1885,7 @@ async fn mark_channel_as_read(
         exclude_user_id: None,
     });
     state.ws_hub.broadcast(broadcast).await;
-    
+
     Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
@@ -1899,21 +1898,21 @@ async fn mark_channel_as_unread(
 ) -> ApiResult<impl IntoResponse> {
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
-    
+
     let target_user_id = if user_id == "me" {
         auth.user_id
     } else {
         parse_mm_or_uuid(&user_id)
             .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?
     };
-    
+
     // Users can only mark their own channels as unread
     if target_user_id != auth.user_id {
         return Err(crate::error::AppError::Forbidden(
             "Cannot mark channel as unread for other users".to_string(),
         ));
     }
-    
+
     // Verify membership
     let _membership: crate::models::ChannelMember =
         sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
@@ -1924,30 +1923,28 @@ async fn mark_channel_as_unread(
             .ok_or_else(|| {
                 crate::error::AppError::Forbidden("Not a member of this channel".to_string())
             })?;
-    
+
     // Get the oldest post in the channel to set as unread point
     // Or use a time far in the past to ensure all messages are marked as unread
     let oldest_post_time: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT MIN(created_at) FROM posts WHERE channel_id = $1 AND deleted_at IS NULL"
+        "SELECT MIN(created_at) FROM posts WHERE channel_id = $1 AND deleted_at IS NULL",
     )
     .bind(channel_id)
     .fetch_optional(&state.db)
     .await?;
-    
+
     // Set last_viewed_at to the oldest post time, or epoch if no posts
-    let mark_time = oldest_post_time.unwrap_or_else(|| {
-        chrono::DateTime::UNIX_EPOCH
-    });
-    
+    let mark_time = oldest_post_time.unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+
     sqlx::query(
-        "UPDATE channel_members SET last_viewed_at = $3 WHERE channel_id = $1 AND user_id = $2"
+        "UPDATE channel_members SET last_viewed_at = $3 WHERE channel_id = $1 AND user_id = $2",
     )
     .bind(channel_id)
     .bind(auth.user_id)
     .bind(mark_time)
     .execute(&state.db)
     .await?;
-    
+
     // Also update channel_reads table
     let _ = sqlx::query(
         "UPDATE channel_reads SET last_read_message_id = 0, last_viewed_at = $3 WHERE channel_id = $1 AND user_id = $2"
@@ -1957,7 +1954,7 @@ async fn mark_channel_as_unread(
     .bind(mark_time)
     .execute(&state.db)
     .await;
-    
+
     // Broadcast unread update
     let broadcast = crate::realtime::WsEnvelope::event(
         crate::realtime::EventType::ChannelUnread,
@@ -1975,7 +1972,7 @@ async fn mark_channel_as_unread(
         exclude_user_id: None,
     });
     state.ws_hub.broadcast(broadcast).await;
-    
+
     Ok(Json(serde_json::json!({
         "channel_id": encode_mm_id(channel_id),
         "user_id": encode_mm_id(auth.user_id),

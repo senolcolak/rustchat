@@ -76,11 +76,7 @@ pub async fn create_verification_token(
 }
 
 /// Verify a token and mark the email as verified
-pub async fn verify_token(
-    db: &sqlx::PgPool,
-    token: &str,
-    purpose: &str,
-) -> Result<Uuid, AppError> {
+pub async fn verify_token(db: &sqlx::PgPool, token: &str, purpose: &str) -> Result<Uuid, AppError> {
     let token_hash = hash_token(token);
 
     // Find and validate the token
@@ -239,7 +235,9 @@ pub async fn resend_verification_email(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if user.email_verified {
-        return Err(AppError::BadRequest("Email is already verified".to_string()));
+        return Err(AppError::BadRequest(
+            "Email is already verified".to_string(),
+        ));
     }
 
     send_verification_email(

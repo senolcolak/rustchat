@@ -6,8 +6,8 @@
 //! - oidc: Generic OIDC with discovery (Keycloak, ZITADEL, Authentik, etc.)
 
 use axum::{
-    extract::{ConnectInfo, Path, Query, State},
-    http::HeaderMap,
+    extract::{Path, Query, State},
+    middleware,
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -19,7 +19,6 @@ use uuid::Uuid;
 use super::AppState;
 use crate::crypto;
 use crate::error::{ApiResult, AppError};
-use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{OAuthProviderInfo, SsoConfig, SsoProviderType};
 use crate::services::oauth_token_exchange::create_exchange_code;
 use crate::services::oidc_discovery::{find_signing_key, OidcDiscoveryService};
@@ -133,11 +132,17 @@ struct GitHubEmail {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let auth_routes = Router::new()
         .route("/oauth2/{provider_key}/login", get(oauth_login))
         .route("/oauth2/{provider_key}/callback", get(oauth_callback))
-        .route("/oauth2/providers", get(list_providers))
         .route("/oauth2/exchange", post(exchange_token))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::auth_ip_rate_limit,
+        ));
+
+    Router::new()
+        .merge(auth_routes)
+        .route("/oauth2/providers", get(list_providers))
 }
 
 /// Request to exchange a code for a token
@@ -156,26 +161,10 @@ pub struct ExchangeResponse {
 
 /// Exchange a one-time code for a JWT token
 async fn exchange_token(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     State(state): State<AppState>,
     Json(input): Json<ExchangeRequest>,
 ) -> ApiResult<Json<ExchangeResponse>> {
     use crate::services::oauth_token_exchange::{exchange_code, ExchangeError};
-
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
-        let ip = rate_limit::extract_client_ip(&addr, &headers);
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
-        if !rate_result.allowed {
-            tracing::warn!(ip = %ip, "Rate limit exceeded for OAuth exchange");
-            return Err(AppError::TooManyRequests(
-                "Too many authentication attempts. Please try again later.".to_string(),
-            ));
-        }
-    }
 
     // Validate code length to prevent unnecessary Redis calls
     if input.code.len() < 10 {
@@ -187,18 +176,18 @@ async fn exchange_token(
         Ok(payload) => payload,
         Err(ExchangeError::InvalidCode) => {
             return Err(AppError::BadRequest(
-                "Invalid or already used exchange code".to_string()
+                "Invalid or already used exchange code".to_string(),
             ));
         }
         Err(ExchangeError::CodeExpired) => {
             return Err(AppError::BadRequest(
-                "Exchange code has expired".to_string()
+                "Exchange code has expired".to_string(),
             ));
         }
         Err(ExchangeError::Internal(msg)) => {
             tracing::error!("Exchange code error: {}", msg);
             return Err(AppError::Internal(
-                "Failed to process exchange code".to_string()
+                "Failed to process exchange code".to_string(),
             ));
         }
     };
@@ -213,7 +202,8 @@ async fn exchange_token(
         state.jwt_issuer.as_deref(),
         state.jwt_audience.as_deref(),
         state.jwt_expiry_hours,
-    ).map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
+    )
+    .map_err(|e| AppError::Internal(format!("Failed to create token: {}", e)))?;
 
     tracing::info!(
         user_id = %payload.user_id,
@@ -252,14 +242,18 @@ fn sanitize_redirect_path(redirect_uri: Option<String>) -> String {
     }
 }
 
+fn append_query_param(path: &str, key: &str, value: &str) -> String {
+    let encoded_value = urlencoding::encode(value);
+    if path.contains('?') {
+        format!("{}&{}={}", path, key, encoded_value)
+    } else {
+        format!("{}?{}={}", path, key, encoded_value)
+    }
+}
+
 /// Append exchange code to redirect URL
 fn append_exchange_code(path: &str, code: &str) -> String {
-    let encoded_code = urlencoding::encode(code);
-    if path.contains('?') {
-        format!("{}&code={}", path, encoded_code)
-    } else {
-        format!("{}?code={}", path, encoded_code)
-    }
+    append_query_param(path, "code", code)
 }
 
 /// Generate PKCE code verifier (43-128 chars per RFC 7636)
@@ -305,8 +299,7 @@ async fn get_site_url(db: &sqlx::PgPool) -> String {
 
     // Fall back to environment variable if not set in database
     db_url.unwrap_or_else(|| {
-        std::env::var("RUSTCHAT_SITE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string())
+        std::env::var("RUSTCHAT_SITE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
     })
 }
 
@@ -347,15 +340,15 @@ async fn list_providers(State(state): State<AppState>) -> ApiResult<Json<Vec<OAu
     let providers: Vec<OAuthProviderInfo> = configs
         .into_iter()
         .map(|c| {
-            let display_name = c
-                .display_name
-                .clone()
-                .unwrap_or_else(|| match c.provider_type.as_str() {
-                    "github" => "GitHub".to_string(),
-                    "google" => "Google".to_string(),
-                    "oidc" => "SSO".to_string(),
-                    _ => c.provider_key.clone(),
-                });
+            let display_name =
+                c.display_name
+                    .clone()
+                    .unwrap_or_else(|| match c.provider_type.as_str() {
+                        "github" => "GitHub".to_string(),
+                        "google" => "Google".to_string(),
+                        "oidc" => "SSO".to_string(),
+                        _ => c.provider_key.clone(),
+                    });
 
             OAuthProviderInfo {
                 id: c.id.to_string(),
@@ -372,26 +365,10 @@ async fn list_providers(State(state): State<AppState>) -> ApiResult<Json<Vec<OAu
 
 /// Initiate OAuth login - redirects to provider
 async fn oauth_login(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     State(state): State<AppState>,
     Path(provider_key): Path<String>,
     Query(query): Query<OAuthLoginQuery>,
 ) -> Result<Redirect, AppError> {
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
-        let ip = rate_limit::extract_client_ip(&addr, &headers);
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
-        if !rate_result.allowed {
-            tracing::warn!(ip = %ip, provider = %provider_key, "Rate limit exceeded for OAuth login");
-            return Err(AppError::TooManyRequests(
-                "Too many authentication attempts. Please try again later.".to_string(),
-            ));
-        }
-    }
-
     // Load provider config
     let config: SsoConfig = sqlx::query_as(
         r#"
@@ -419,10 +396,9 @@ async fn oauth_login(
         AppError::BadRequest("OAuth provider client_id not configured".to_string())
     })?;
 
-    let provider_type =
-        SsoProviderType::from_str(&config.provider_type).ok_or_else(|| {
-            AppError::Internal(format!("Unknown provider type: {}", config.provider_type))
-        })?;
+    let provider_type = SsoProviderType::from_str(&config.provider_type).ok_or_else(|| {
+        AppError::Internal(format!("Unknown provider type: {}", config.provider_type))
+    })?;
 
     // Generate state parameter
     let oauth_state = Uuid::new_v4().to_string();
@@ -467,7 +443,11 @@ async fn oauth_login(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to store OAuth state: {}", e)))?;
 
-    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(&state.db).await, provider_key);
+    let callback_url = format!(
+        "{}/api/v1/oauth2/{}/callback",
+        get_site_url(&state.db).await,
+        provider_key
+    );
     let scopes = if config.scopes.is_empty() {
         provider_type.default_scopes()
     } else {
@@ -534,35 +514,13 @@ async fn oauth_login(
 
 /// Handle OAuth callback from provider
 async fn oauth_callback(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     State(state): State<AppState>,
     Path(provider_key): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<Redirect, AppError> {
-    if state.config.security.rate_limit_enabled {
-        let config = RateLimitConfig::auth_per_minute(
-            state.config.security.rate_limit_auth_per_minute,
-        );
-        let ip = rate_limit::extract_client_ip(&addr, &headers);
-        let rate_result = rate_limit::check_rate_limit(&state.redis, &config, &ip).await?;
-        if !rate_result.allowed {
-            tracing::warn!(
-                ip = %ip,
-                provider = %provider_key,
-                "Rate limit exceeded for OAuth callback"
-            );
-            return Err(AppError::TooManyRequests(
-                "Too many authentication attempts. Please try again later.".to_string(),
-            ));
-        }
-    }
-
     // Handle provider error
     if let Some(error) = query.error {
-        let desc = query
-            .error_description
-            .unwrap_or_else(|| error.clone());
+        let desc = query.error_description.unwrap_or_else(|| error.clone());
         tracing::warn!(
             provider = %provider_key,
             error = %error,
@@ -574,12 +532,12 @@ async fn oauth_callback(
         )));
     }
 
-    let code = query.code.ok_or_else(|| {
-        AppError::BadRequest("Missing authorization code".to_string())
-    })?;
-    let oauth_state = query.state.ok_or_else(|| {
-        AppError::BadRequest("Missing OAuth state parameter".to_string())
-    })?;
+    let code = query
+        .code
+        .ok_or_else(|| AppError::BadRequest("Missing authorization code".to_string()))?;
+    let oauth_state = query
+        .state
+        .ok_or_else(|| AppError::BadRequest("Missing OAuth state parameter".to_string()))?;
 
     // Validate and consume state from Redis (one-time use)
     let mut redis_conn = state
@@ -589,10 +547,11 @@ async fn oauth_callback(
         .map_err(|e| AppError::Internal(format!("Redis connection failed: {}", e)))?;
 
     let state_key = oauth_state_key(&oauth_state);
-    let stored_state_json: Option<String> = redis_conn
-        .get::<_, Option<String>>(&state_key)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read OAuth state: {}", e)))?;
+    let stored_state_json: Option<String> =
+        redis_conn
+            .get::<_, Option<String>>(&state_key)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to read OAuth state: {}", e)))?;
 
     // Delete state immediately (one-time use)
     let _: () = redis_conn
@@ -600,9 +559,8 @@ async fn oauth_callback(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to delete OAuth state: {}", e)))?;
 
-    let stored_state_json = stored_state_json.ok_or_else(|| {
-        AppError::BadRequest("Invalid or expired OAuth state".to_string())
-    })?;
+    let stored_state_json = stored_state_json
+        .ok_or_else(|| AppError::BadRequest("Invalid or expired OAuth state".to_string()))?;
 
     let stored_state: OAuthStatePayload = serde_json::from_str(&stored_state_json)
         .map_err(|e| AppError::Internal(format!("Invalid OAuth state payload: {}", e)))?;
@@ -635,14 +593,11 @@ async fn oauth_callback(
     .bind(&provider_key)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::NotFound(format!("OAuth provider '{}' not found", provider_key))
-    })?;
+    .ok_or_else(|| AppError::NotFound(format!("OAuth provider '{}' not found", provider_key)))?;
 
-    let provider_type =
-        SsoProviderType::from_str(&config.provider_type).ok_or_else(|| {
-            AppError::Internal(format!("Unknown provider type: {}", config.provider_type))
-        })?;
+    let provider_type = SsoProviderType::from_str(&config.provider_type).ok_or_else(|| {
+        AppError::Internal(format!("Unknown provider type: {}", config.provider_type))
+    })?;
 
     let client_id = config.client_id.clone().ok_or_else(|| {
         AppError::BadRequest("OAuth provider client_id not configured".to_string())
@@ -670,19 +625,16 @@ async fn oauth_callback(
         }
     };
 
-    let callback_url = format!("{}/api/v1/oauth2/{}/callback", get_site_url(&state.db).await, provider_key);
+    let callback_url = format!(
+        "{}/api/v1/oauth2/{}/callback",
+        get_site_url(&state.db).await,
+        provider_key
+    );
 
     // Exchange code for token and get user info based on provider type
     let (email, user_info) = match provider_type {
         SsoProviderType::GitHub => {
-            exchange_github_token(
-                &code,
-                &client_id,
-                &client_secret,
-                &callback_url,
-                &config,
-            )
-            .await?
+            exchange_github_token(&code, &client_id, &client_secret, &callback_url, &config).await?
         }
         SsoProviderType::Google | SsoProviderType::Oidc => {
             let issuer = config.issuer_url.clone().ok_or_else(|| {
@@ -707,30 +659,33 @@ async fn oauth_callback(
     };
 
     // Find or create user
-    let _user = find_or_create_user(&state, &email, &user_info, &config, &provider_key).await?;
+    let user = find_or_create_user(&state, &email, &user_info, &config, &provider_key).await?;
 
-    // ALWAYS use secure exchange code - never put token in URL
+    // Secure default: one-time code exchange, never token in URL.
     let exchange_code = create_exchange_code(
         &state.redis,
-        _user.id,
-        _user.email.clone(),
-        _user.role.clone(),
-        _user.org_id,
-    ).await?;
-    
+        user.id,
+        user.email.clone(),
+        user.role.clone(),
+        user.org_id,
+    )
+    .await?;
+
     tracing::info!(
-        user_id = %_user.id,
+        user_id = %user.id,
         "OAuth callback using secure exchange code"
     );
-    
+
     let redirect_url = if stored_state.is_mobile {
         // Mobile apps also use exchange codes
-        format!("rustchat://oauth/complete?code={}", urlencoding::encode(&exchange_code))
+        format!(
+            "rustchat://oauth/complete?code={}",
+            urlencoding::encode(&exchange_code)
+        )
     } else {
         append_exchange_code(&stored_state.redirect_after, &exchange_code)
     };
 
-    // Redirect with exchange code (never token)
     Ok(Redirect::temporary(&redirect_url))
 }
 
@@ -770,10 +725,7 @@ async fn exchange_github_token(
 
     if !token_response.status().is_success() {
         let status = token_response.status();
-        let body = token_response
-            .text()
-            .await
-            .unwrap_or_default();
+        let body = token_response.text().await.unwrap_or_default();
         return Err(AppError::Internal(format!(
             "GitHub token exchange failed: {} - {}",
             status, body
@@ -835,9 +787,7 @@ async fn exchange_github_token(
             .find(|e| e.primary && e.verified)
             .or_else(|| emails.iter().find(|e| e.verified))
             .ok_or_else(|| {
-                AppError::BadRequest(
-                    "No verified email found for GitHub account".to_string(),
-                )
+                AppError::BadRequest("No verified email found for GitHub account".to_string())
             })?;
 
         primary_email.email.clone()
@@ -846,7 +796,10 @@ async fn exchange_github_token(
     // Check GitHub organization/team restrictions if configured
     if let Some(ref org) = config.github_org {
         let org_check = client
-            .get(format!("{}/orgs/{}/members/{}", GITHUB_API_URL, org, github_user.login))
+            .get(format!(
+                "{}/orgs/{}/members/{}",
+                GITHUB_API_URL, org, github_user.login
+            ))
             .header("Authorization", format!("token {}", tokens.access_token))
             .header("User-Agent", "RustChat")
             .send()
@@ -965,10 +918,7 @@ async fn exchange_oidc_token(
 
     if !token_response.status().is_success() {
         let status = token_response.status();
-        let body = token_response
-            .text()
-            .await
-            .unwrap_or_default();
+        let body = token_response.text().await.unwrap_or_default();
         return Err(AppError::Internal(format!(
             "OIDC token exchange failed: {} - {}",
             status, body
@@ -1016,9 +966,7 @@ async fn exchange_oidc_token(
             .map_err(|e| AppError::Internal(format!("UserInfo request failed: {}", e)))?;
 
         if !userinfo_response.status().is_success() {
-            return Err(AppError::Internal(
-                "Failed to fetch UserInfo".to_string(),
-            ));
+            return Err(AppError::Internal("Failed to fetch UserInfo".to_string()));
         }
 
         let userinfo: UserInfoResponse = userinfo_response
@@ -1130,9 +1078,8 @@ async fn validate_id_token(
     use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 
     // Decode header to get key ID
-    let header = decode_header(id_token).map_err(|e| {
-        AppError::Internal(format!("Failed to decode ID token header: {}", e))
-    })?;
+    let header = decode_header(id_token)
+        .map_err(|e| AppError::Internal(format!("Failed to decode ID token header: {}", e)))?;
 
     // Fetch JWKS
     let discovery = OidcDiscoveryService::new();
@@ -1142,9 +1089,8 @@ async fn validate_id_token(
         .map_err(|e| AppError::Internal(format!("Failed to fetch JWKS: {}", e)))?;
 
     // Find signing key
-    let jwk = find_signing_key(&jwks, header.kid.as_deref()).ok_or_else(|| {
-        AppError::Internal("No suitable signing key found in JWKS".to_string())
-    })?;
+    let jwk = find_signing_key(&jwks, header.kid.as_deref())
+        .ok_or_else(|| AppError::Internal("No suitable signing key found in JWKS".to_string()))?;
 
     // Build decoding key from JWK
     let decoding_key = jwk_to_decoding_key(jwk)?;
@@ -1164,9 +1110,8 @@ async fn validate_id_token(
     validation.set_audience(&[client_id]);
     validation.set_issuer(&[expected_issuer]);
 
-    let token_data = decode::<IdTokenClaims>(id_token, &decoding_key, &validation).map_err(
-        |e| AppError::Internal(format!("ID token validation failed: {}", e)),
-    )?;
+    let token_data = decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| AppError::Internal(format!("ID token validation failed: {}", e)))?;
 
     let claims = token_data.claims;
 
@@ -1174,9 +1119,7 @@ async fn validate_id_token(
     if let Some(expected) = expected_nonce {
         let actual = claims.nonce.as_deref().unwrap_or("");
         if actual != expected {
-            return Err(AppError::Internal(
-                "ID token nonce mismatch".to_string(),
-            ));
+            return Err(AppError::Internal("ID token nonce mismatch".to_string()));
         }
     }
 
@@ -1190,27 +1133,41 @@ async fn validate_id_token(
 }
 
 /// Convert JWK to DecodingKey
-fn jwk_to_decoding_key(jwk: &crate::services::oidc_discovery::Jwk) -> Result<jsonwebtoken::DecodingKey, AppError> {
+fn jwk_to_decoding_key(
+    jwk: &crate::services::oidc_discovery::Jwk,
+) -> Result<jsonwebtoken::DecodingKey, AppError> {
     use jsonwebtoken::DecodingKey;
 
     match jwk.kty.as_str() {
         "RSA" => {
-            let n = jwk.n.as_ref().ok_or_else(|| {
-                AppError::Internal("RSA key missing modulus".to_string())
-            })?;
-            let e = jwk.e.as_ref().ok_or_else(|| {
-                AppError::Internal("RSA key missing exponent".to_string())
-            })?;
-            DecodingKey::from_rsa_components(n, e).map_err(|e| {
-                AppError::Internal(format!("Failed to build RSA decoding key: {}", e))
-            })
+            let n = jwk
+                .n
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("RSA key missing modulus".to_string()))?;
+            let e = jwk
+                .e
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("RSA key missing exponent".to_string()))?;
+            DecodingKey::from_rsa_components(n, e)
+                .map_err(|e| AppError::Internal(format!("Failed to build RSA decoding key: {}", e)))
         }
         "EC" => {
             // For EC keys, we need to use the x5c certificate chain or build from components
             if let Some(ref x5c) = jwk.x5c {
                 if let Some(cert) = x5c.first() {
-                    return DecodingKey::from_ec_pem(format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", cert).as_bytes())
-                        .map_err(|e| AppError::Internal(format!("Failed to build EC decoding key from cert: {}", e)));
+                    return DecodingKey::from_ec_pem(
+                        format!(
+                            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                            cert
+                        )
+                        .as_bytes(),
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "Failed to build EC decoding key from cert: {}",
+                            e
+                        ))
+                    });
                 }
             }
             Err(AppError::Internal(
@@ -1268,8 +1225,14 @@ async fn find_or_create_user(
     // Determine role from mappings or use default
     let role = if let Some(ref mappings) = config.role_mappings {
         // Map groups to role
-        let mappings_obj = mappings.as_object().unwrap_or(&serde_json::Map::new()).clone();
-        let mut assigned_role = config.default_role.clone().unwrap_or_else(|| "member".to_string());
+        let mappings_obj = mappings
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+            .clone();
+        let mut assigned_role = config
+            .default_role
+            .clone()
+            .unwrap_or_else(|| "member".to_string());
 
         for group in &user_info.groups {
             if let Some(role_val) = mappings_obj.get(group) {
@@ -1281,7 +1244,10 @@ async fn find_or_create_user(
         }
         assigned_role
     } else {
-        config.default_role.clone().unwrap_or_else(|| "member".to_string())
+        config
+            .default_role
+            .clone()
+            .unwrap_or_else(|| "member".to_string())
     };
 
     // Generate username from preferred_username, name, or email
@@ -1338,10 +1304,11 @@ async fn generate_unique_username(
     base_username: &str,
 ) -> Result<String, AppError> {
     // First try the base username
-    let exists: Option<(bool,)> = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
-        .bind(base_username)
-        .fetch_optional(db)
-        .await?;
+    let exists: Option<(bool,)> =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+            .bind(base_username)
+            .fetch_optional(db)
+            .await?;
 
     if exists.map_or(true, |(e,)| !e) {
         return Ok(base_username.to_string());
@@ -1350,10 +1317,11 @@ async fn generate_unique_username(
     // Try appending numbers
     for i in 1..1000 {
         let candidate = format!("{}{}", base_username, i);
-        let exists: Option<(bool,)> = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
-            .bind(&candidate)
-            .fetch_optional(db)
-            .await?;
+        let exists: Option<(bool,)> =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+                .bind(&candidate)
+                .fetch_optional(db)
+                .await?;
 
         if exists.map_or(true, |(e,)| !e) {
             return Ok(candidate);
@@ -1361,6 +1329,11 @@ async fn generate_unique_username(
     }
 
     // Fallback to UUID suffix
-    let unique_suffix = Uuid::new_v4().to_string().split('-').next().unwrap_or("user").to_string();
+    let unique_suffix = Uuid::new_v4()
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap_or("user")
+        .to_string();
     Ok(format!("{}_{}", base_username, unique_suffix))
 }

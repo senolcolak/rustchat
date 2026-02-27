@@ -283,10 +283,11 @@ export function useWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
         const host = window.location.host
         // Align with Mattermost mobile websocket endpoint semantics.
-        const url = `${protocol}//${host}/api/v4/websocket?token=${authStore.token}`
+        const url = `${protocol}//${host}/api/v4/websocket`
 
         try {
-            // Pass token in protocols array as a fallback for browsers like Brave
+            // Browsers can't set Authorization headers for WebSocket handshakes.
+            // Pass bearer token via Sec-WebSocket-Protocol.
             const socket = new WebSocket(url, [authStore.token])
             ws.value = socket
 

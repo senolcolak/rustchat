@@ -65,17 +65,14 @@ impl CircuitBreaker {
             name: name.into(),
         })
     }
-    
+
     /// Create with default config
     pub fn default_config(name: impl Into<String>) -> Arc<Self> {
         Self::new(name, CircuitBreakerConfig::default())
     }
-    
+
     /// Execute a function with circuit breaker protection
-    pub async fn execute<T, E, F, Fut>(
-        self: &Arc<Self>,
-        f: F,
-    ) -> Result<T, CircuitError<E>>
+    pub async fn execute<T, E, F, Fut>(self: &Arc<Self>, f: F) -> Result<T, CircuitError<E>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
@@ -85,7 +82,7 @@ impl CircuitBreaker {
         if let Err(CircuitError::Open) = self.check_state().await {
             return Err(CircuitError::Open);
         }
-        
+
         // Execute the request
         match f().await {
             Ok(result) => {
@@ -98,11 +95,11 @@ impl CircuitBreaker {
             }
         }
     }
-    
+
     /// Check current circuit state and transition if needed
     pub async fn check_state(&self) -> Result<(), CircuitError<()>> {
         let mut state = self.state.lock().await;
-        
+
         match *state {
             CircuitState::Closed => Ok(()),
             CircuitState::Open => {
@@ -112,7 +109,7 @@ impl CircuitBreaker {
                     last.map(|t| t.elapsed() >= self.config.recovery_timeout)
                         .unwrap_or(true)
                 };
-                
+
                 if should_attempt {
                     info!(
                         circuit = %self.name,
@@ -128,16 +125,16 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => Ok(()),
         }
     }
-    
+
     /// Record a successful request
     pub async fn on_success(&self) {
         let mut state = self.state.lock().await;
-        
+
         match *state {
             CircuitState::HalfOpen => {
                 let mut successes = self.successes.lock().await;
                 *successes += 1;
-                
+
                 if *successes >= self.config.success_threshold {
                     info!(
                         circuit = %self.name,
@@ -157,14 +154,14 @@ impl CircuitBreaker {
             _ => {}
         }
     }
-    
+
     /// Record a failed request
     pub async fn on_failure(&self) {
         let mut state = self.state.lock().await;
         let mut failures = self.failures.lock().await;
         *failures += 1;
         *self.last_failure.lock().await = Some(Instant::now());
-        
+
         match *state {
             CircuitState::Closed => {
                 if *failures >= self.config.failure_threshold {
@@ -187,7 +184,7 @@ impl CircuitBreaker {
             _ => {}
         }
     }
-    
+
     /// Get current state (for monitoring)
     pub async fn state(&self) -> CircuitState {
         *self.state.lock().await
@@ -267,10 +264,7 @@ impl RetryCondition {
 }
 
 /// Execute a function with retry logic
-pub async fn with_retry<T, E, F, Fut>(
-    config: &RetryConfig,
-    f: F,
-) -> Result<T, E>
+pub async fn with_retry<T, E, F, Fut>(config: &RetryConfig, f: F) -> Result<T, E>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -278,17 +272,14 @@ where
 {
     let mut attempts = 0;
     let mut delay = config.initial_delay;
-    
+
     loop {
         attempts += 1;
-        
+
         match f().await {
             Ok(result) => {
                 if attempts > 1 {
-                    debug!(
-                        attempts = attempts,
-                        "Request succeeded after retries"
-                    );
+                    debug!(attempts = attempts, "Request succeeded after retries");
                 }
                 return Ok(result);
             }
@@ -301,11 +292,11 @@ where
                     );
                     return Err(err);
                 }
-                
+
                 if !config.retry_if.should_retry(&err) {
                     return Err(err);
                 }
-                
+
                 warn!(
                     attempt = attempts,
                     max_attempts = config.max_attempts,
@@ -313,13 +304,13 @@ where
                     error = ?err,
                     "Request failed, retrying..."
                 );
-                
+
                 sleep(delay).await;
-                
+
                 // Exponential backoff with jitter could be added here
                 delay = std::cmp::min(
                     Duration::from_millis(
-                        (delay.as_millis() as f64 * config.backoff_multiplier) as u64
+                        (delay.as_millis() as f64 * config.backoff_multiplier) as u64,
                     ),
                     config.max_delay,
                 );
@@ -344,7 +335,7 @@ where
     if let Err(CircuitError::Open) = circuit.check_state().await {
         return Err(CircuitError::Open);
     }
-    
+
     // Try the request with retries
     match with_retry(retry_config, f).await {
         Ok(result) => {
@@ -376,7 +367,7 @@ impl ServiceCircuitBreakers {
             turnstile: CircuitBreaker::default_config("turnstile"),
         }
     }
-    
+
     /// Create with custom configs
     pub fn with_config(config: CircuitBreakerConfig) -> Self {
         Self {
@@ -397,23 +388,27 @@ impl Default for ServiceCircuitBreakers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn test_circuit_breaker_opens_after_failures() {
-        let cb = CircuitBreaker::new("test", CircuitBreakerConfig {
-            failure_threshold: 3,
-            recovery_timeout: Duration::from_secs(1),
-            success_threshold: 1,
-        });
-        
+        let cb = CircuitBreaker::new(
+            "test",
+            CircuitBreakerConfig {
+                failure_threshold: 3,
+                recovery_timeout: Duration::from_secs(1),
+                success_threshold: 1,
+            },
+        );
+
         // Initial state is closed
         assert_eq!(cb.state().await, CircuitState::Closed);
-        
+
         // Fail 3 times
         for _ in 0..3 {
             let _ = cb.execute(|| async { Err::<(), ()>(()) }).await;
         }
-        
+
         // Circuit should be open
         assert_eq!(cb.state().await, CircuitState::Open);
     }
@@ -427,18 +422,23 @@ mod tests {
             backoff_multiplier: 2.0,
             retry_if: RetryCondition::Always,
         };
-        
-        let mut attempts = 0;
-        let result = with_retry(&config, || async {
-            attempts += 1;
-            if attempts < 3 {
-                Err::<(), ()>(())
-            } else {
-                Ok(42)
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_retry = attempts.clone();
+        let result = with_retry(&config, move || {
+            let attempts = attempts_for_retry.clone();
+            async move {
+                let current = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if current < 3 {
+                    Err::<i32, ()>(())
+                } else {
+                    Ok(42)
+                }
             }
-        }).await;
-        
+        })
+        .await;
+
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(attempts, 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 }

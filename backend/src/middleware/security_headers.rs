@@ -75,7 +75,7 @@ impl SecurityHeadersConfig {
             xss_protection: "1; mode=block".to_string(),
         }
     }
-    
+
     /// Permissive headers for development
     pub fn development() -> Self {
         Self {
@@ -94,7 +94,7 @@ impl SecurityHeadersConfig {
             xss_protection: "1; mode=block".to_string(),
         }
     }
-    
+
     /// API-only headers (no CSP needed for pure API)
     pub fn api_only() -> Self {
         Self {
@@ -122,15 +122,15 @@ impl SecurityHeadersLayer {
     pub fn new(config: SecurityHeadersConfig) -> Self {
         Self { config }
     }
-    
+
     pub fn strict() -> Self {
         Self::new(SecurityHeadersConfig::strict())
     }
-    
+
     pub fn development() -> Self {
         Self::new(SecurityHeadersConfig::development())
     }
-    
+
     pub fn api_only() -> Self {
         Self::new(SecurityHeadersConfig::api_only())
     }
@@ -179,10 +179,7 @@ where
             let headers = response.headers_mut();
 
             // Content Security Policy
-            headers.insert(
-                header::CONTENT_SECURITY_POLICY,
-                config.csp.parse().unwrap(),
-            );
+            headers.insert(header::CONTENT_SECURITY_POLICY, config.csp.parse().unwrap());
 
             // X-Frame-Options
             headers.insert(
@@ -219,7 +216,11 @@ where
                 let hsts_value = format!(
                     "max-age={}{}{}",
                     config.hsts_max_age,
-                    if config.hsts_include_subdomains { "; includeSubDomains" } else { "" },
+                    if config.hsts_include_subdomains {
+                        "; includeSubDomains"
+                    } else {
+                        ""
+                    },
                     if config.hsts_preload { "; preload" } else { "" }
                 );
                 headers.insert(
@@ -229,12 +230,9 @@ where
             }
 
             // Additional security headers
-            
+
             // Prevent MIME sniffing
-            headers.insert(
-                header::X_CONTENT_TYPE_OPTIONS,
-                "nosniff".parse().unwrap(),
-            );
+            headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
 
             // Remove server information (if present)
             headers.remove(header::SERVER);
