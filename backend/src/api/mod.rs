@@ -196,7 +196,7 @@ pub fn router(
         .nest("/health", health::router())
         .nest(
             "/auth",
-            auth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
+            auth::router(state.clone()).layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
         )
         .nest(
             "/users",
@@ -223,13 +223,13 @@ pub fn router(
         .merge(preferences::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(playbooks::router().layer(DefaultBodyLimit::max(MEDIUM_BODY_LIMIT)))
         .merge(calls::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
-        .merge(oauth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
+        .merge(oauth::router(state.clone()).layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(site::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         // WebSocket endpoint doesn't need body limit
-        .merge(ws::router());
+        .merge(ws::router(state.clone()));
 
     // API v4 with route-specific limits
-    let api_v4 = v4::router_with_body_limits(SMALL_BODY_LIMIT, MEDIUM_BODY_LIMIT, LARGE_BODY_LIMIT);
+    let api_v4 = v4::router_with_body_limits(state.clone(), SMALL_BODY_LIMIT, MEDIUM_BODY_LIMIT, LARGE_BODY_LIMIT);
 
     // Configure security headers based on environment
     let security_config = if state.config.is_production() {

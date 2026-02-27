@@ -39,10 +39,11 @@ pub(crate) use sidebar_categories::{
     update_category_order_internal, CreateCategoryRequest, UpdateCategoriesRequest,
 };
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     let login_routes = Router::new()
         .route("/users/login", post(login))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state,
             crate::middleware::rate_limit::auth_ip_rate_limit,
         ));
 

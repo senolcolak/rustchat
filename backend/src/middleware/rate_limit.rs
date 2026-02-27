@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Request},
+    extract::{ConnectInfo, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -233,10 +233,7 @@ async fn enforce_rate_limit_for_request(
 }
 
 /// Centralized middleware for auth endpoint IP rate limiting.
-pub async fn auth_ip_rate_limit(request: Request, next: Next) -> Response {
-    let Some(state) = request.extensions().get::<AppState>().cloned() else {
-        return AppError::Internal("Missing application state".to_string()).into_response();
-    };
+pub async fn auth_ip_rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let client_ip = extract_client_ip_from_request(&request);
 
     let config = RateLimitConfig::auth_per_minute(state.config.security.rate_limit_auth_per_minute);
@@ -250,10 +247,7 @@ pub async fn auth_ip_rate_limit(request: Request, next: Next) -> Response {
 }
 
 /// Stricter centralized middleware for registration endpoint IP limiting.
-pub async fn register_ip_rate_limit(request: Request, next: Next) -> Response {
-    let Some(state) = request.extensions().get::<AppState>().cloned() else {
-        return AppError::Internal("Missing application state".to_string()).into_response();
-    };
+pub async fn register_ip_rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let client_ip = extract_client_ip_from_request(&request);
 
     if let Some(response) = enforce_rate_limit_for_request(
@@ -272,10 +266,7 @@ pub async fn register_ip_rate_limit(request: Request, next: Next) -> Response {
 }
 
 /// Centralized middleware for websocket upgrade attempt limiting.
-pub async fn websocket_ip_rate_limit(request: Request, next: Next) -> Response {
-    let Some(state) = request.extensions().get::<AppState>().cloned() else {
-        return AppError::Internal("Missing application state".to_string()).into_response();
-    };
+pub async fn websocket_ip_rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let client_ip = extract_client_ip_from_request(&request);
 
     let config =
@@ -290,10 +281,7 @@ pub async fn websocket_ip_rate_limit(request: Request, next: Next) -> Response {
 }
 
 /// Centralized middleware for password reset flow endpoint limiting.
-pub async fn password_reset_ip_rate_limit(request: Request, next: Next) -> Response {
-    let Some(state) = request.extensions().get::<AppState>().cloned() else {
-        return AppError::Internal("Missing application state".to_string()).into_response();
-    };
+pub async fn password_reset_ip_rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let client_ip = extract_client_ip_from_request(&request);
 
     if let Some(response) = enforce_rate_limit_for_request(

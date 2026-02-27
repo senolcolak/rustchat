@@ -137,12 +137,13 @@ struct GitHubEmail {
     verified: bool,
 }
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     let auth_routes = Router::new()
         .route("/oauth2/{provider_key}/login", get(oauth_login))
         .route("/oauth2/{provider_key}/callback", get(oauth_callback))
         .route("/oauth2/exchange", post(exchange_token))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state,
             crate::middleware::rate_limit::auth_ip_rate_limit,
         ));
 

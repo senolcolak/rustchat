@@ -20,10 +20,11 @@ use crate::realtime::WsEnvelope;
 use crate::telemetry::metrics;
 
 /// Build WebSocket routes
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/ws", get(ws_handler))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state,
             crate::middleware::rate_limit::websocket_ip_rate_limit,
         ))
 }

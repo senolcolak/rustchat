@@ -19,29 +19,33 @@ use crate::services::password_reset::{
 use crate::services::turnstile;
 
 /// Build auth routes
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     let registration_routes =
         Router::new()
             .route("/register", post(register))
-            .layer(middleware::from_fn(
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
                 crate::middleware::rate_limit::register_ip_rate_limit,
             ));
     let login_routes = Router::new()
         .route("/login", post(login))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             crate::middleware::rate_limit::auth_ip_rate_limit,
         ));
     let verification_routes = Router::new()
         .route("/verify-email", post(verify_email))
         .route("/resend-verification", post(resend_verification))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             crate::middleware::rate_limit::auth_ip_rate_limit,
         ));
     let password_reset_routes = Router::new()
         .route("/password/forgot", post(forgot_password))
         .route("/password/reset", post(reset_password_handler))
         .route("/password/validate", post(validate_token_handler))
-        .layer(middleware::from_fn(
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             crate::middleware::rate_limit::password_reset_ip_rate_limit,
         ));
 

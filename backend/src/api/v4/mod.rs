@@ -57,9 +57,9 @@ pub mod users;
 pub mod websocket;
 
 #[allow(dead_code)]
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     // Default limits for backward compatibility
-    router_with_body_limits(64 * 1024, 1024 * 1024, 50 * 1024 * 1024)
+    router_with_body_limits(state, 64 * 1024, 1024 * 1024, 50 * 1024 * 1024)
 }
 
 /// Create v4 router with configurable body size limits
@@ -69,6 +69,7 @@ pub fn router() -> Router<AppState> {
 /// * `medium_limit` - For larger payloads (posts with content, user profiles)
 /// * `large_limit` - For file uploads
 pub fn router_with_body_limits(
+    state: AppState,
     small_limit: usize,
     medium_limit: usize,
     large_limit: usize,
@@ -78,13 +79,14 @@ pub fn router_with_body_limits(
             "/websocket",
             axum::routing::get(websocket::handle_websocket),
         )
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             crate::middleware::rate_limit::websocket_ip_rate_limit,
         ));
 
     Router::new()
         // User management - medium limit for profiles
-        .merge(users::router().layer(DefaultBodyLimit::max(medium_limit)))
+        .merge(users::router(state.clone()).layer(DefaultBodyLimit::max(medium_limit)))
         // Teams - small limit
         .merge(teams::router().layer(DefaultBodyLimit::max(small_limit)))
         // Groups - small limit
