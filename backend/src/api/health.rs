@@ -23,6 +23,7 @@ pub struct ReadinessResponse {
     status: &'static str,
     database: &'static str,
     redis: &'static str,
+    s3: &'static str,
     checks: HashMap<String, String>,
 }
 
@@ -86,7 +87,47 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<ReadinessRespon
         format!("ok(connections={})", ws_connections),
     );
 
-    let all_healthy = db_healthy && redis_healthy;
+    // Check object storage
+    let s3_healthy = state.s3_client.health_check().await;
+    checks.insert(
+        "s3".to_string(),
+        if s3_healthy {
+            "ok".to_string()
+        } else {
+            "error".to_string()
+        },
+    );
+
+    // Check email outbox lag/pressure (operational readiness signal).
+    let outbox_healthy = match check_email_outbox_pressure(&state.db).await {
+        Ok((queued_old, oldest_age_secs)) => {
+            let healthy = queued_old < 1000 && oldest_age_secs.unwrap_or(0) < 3600;
+            checks.insert(
+                "email_outbox".to_string(),
+                if healthy {
+                    format!(
+                        "ok(queued_old={}, oldest_age_secs={})",
+                        queued_old,
+                        oldest_age_secs.unwrap_or(0)
+                    )
+                } else {
+                    format!(
+                        "degraded(queued_old={}, oldest_age_secs={})",
+                        queued_old,
+                        oldest_age_secs.unwrap_or(0)
+                    )
+                },
+            );
+            healthy
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "Failed to evaluate email outbox readiness");
+            checks.insert("email_outbox".to_string(), "error".to_string());
+            false
+        }
+    };
+
+    let all_healthy = db_healthy && redis_healthy && s3_healthy && outbox_healthy;
 
     let response = ReadinessResponse {
         status: if all_healthy { "ok" } else { "degraded" },
@@ -96,6 +137,11 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<ReadinessRespon
             "disconnected"
         },
         redis: if redis_healthy {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        s3: if s3_healthy {
             "connected"
         } else {
             "disconnected"
@@ -141,6 +187,8 @@ async fn stats(State(state): State<AppState>) -> Json<MetricsResponse> {
     // Update gauges
     metrics::WS_ACTIVE_CONNECTIONS.set(ws_connections);
     metrics::ACTIVE_USERS.set(active_users);
+    metrics::DB_CONNECTIONS_ACTIVE.set(in_use as i64);
+    metrics::DB_POOL_SATURATION.set(db_pool_saturation);
 
     Json(MetricsResponse {
         websocket_connections: ws_connections,
@@ -158,4 +206,34 @@ async fn check_redis(redis: &deadpool_redis::Pool) -> bool {
             .is_ok(),
         Err(_) => false,
     }
+}
+
+/// Check email outbox pressure.
+///
+/// Returns:
+/// - Number of queued emails older than 15 minutes.
+/// - Age (seconds) of the oldest queued email, if any.
+async fn check_email_outbox_pressure(db: &sqlx::PgPool) -> Result<(i64, Option<i64>), sqlx::Error> {
+    let queued_old: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM email_outbox
+        WHERE status = 'queued'
+          AND created_at < NOW() - INTERVAL '15 minutes'
+        "#,
+    )
+    .fetch_one(db)
+    .await?;
+
+    let oldest_age_secs: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint
+        FROM email_outbox
+        WHERE status = 'queued'
+        "#,
+    )
+    .fetch_one(db)
+    .await?;
+
+    Ok((queued_old, oldest_age_secs))
 }

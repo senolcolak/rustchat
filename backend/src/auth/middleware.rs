@@ -7,6 +7,7 @@ use axum::{
 use uuid::Uuid;
 
 use super::jwt::{validate_token_with_policy, Claims};
+use super::policy::{AuthzResult, Permission, PolicyEngine};
 use crate::api::AppState;
 use crate::error::AppError;
 
@@ -35,16 +36,18 @@ impl AuthUser {
         self.role.split_whitespace().any(|r| r == role)
     }
 
-    pub fn is_system_admin(&self) -> bool {
-        self.has_role("system_admin")
+    pub fn has_permission(&self, permission: &Permission) -> bool {
+        matches!(
+            PolicyEngine::check_permission(&self.role, permission),
+            AuthzResult::Allow
+        )
     }
 
-    pub fn is_org_admin(&self) -> bool {
-        self.has_role("org_admin")
-    }
-
-    pub fn is_system_or_org_admin(&self) -> bool {
-        self.is_system_admin() || self.is_org_admin()
+    pub fn can_access_owned(&self, owner_id: Uuid, permission: &Permission) -> bool {
+        matches!(
+            PolicyEngine::check_ownership(&self.role, permission, self.user_id, owner_id),
+            AuthzResult::Allow
+        )
     }
 }
 
@@ -129,7 +132,24 @@ mod tests {
         };
 
         assert!(user.has_role("system_admin"));
-        assert!(user.is_system_admin());
-        assert!(!user.is_org_admin());
+        assert!(user.has_role("team_admin"));
+        assert!(!user.has_role("org_admin"));
+    }
+
+    #[test]
+    fn auth_user_permission_helpers_work() {
+        use crate::auth::policy::permissions;
+
+        let user = AuthUser {
+            user_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            role: "member org_admin".to_string(),
+            org_id: None,
+        };
+
+        assert!(user.has_permission(&permissions::SYSTEM_MANAGE));
+        assert!(!user.has_permission(&permissions::ADMIN_FULL));
+
+        assert!(user.can_access_owned(user.user_id, &permissions::ADMIN_FULL));
     }
 }

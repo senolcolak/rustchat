@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::models::{
@@ -259,7 +260,7 @@ async fn update_post(
     .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
 
     // Only author can edit
-    if post.user_id != auth.user_id && !auth.is_system_admin() {
+    if !auth.can_access_owned(post.user_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot edit this post".to_string()));
     }
 
@@ -320,7 +321,7 @@ async fn delete_post(
     .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
 
     // Only author or admin can delete
-    if post.user_id != auth.user_id && !auth.is_system_admin() {
+    if !auth.can_access_owned(post.user_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot delete this post".to_string()));
     }
 
@@ -544,7 +545,7 @@ async fn pin_post(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && !auth.is_system_admin() {
+    if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
         return Err(AppError::Forbidden("Only admins can pin posts".to_string()));
     }
 
@@ -611,7 +612,7 @@ async fn unpin_post(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && !auth.is_system_admin() {
+    if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
         return Err(AppError::Forbidden(
             "Only admins can unpin posts".to_string(),
         ));

@@ -146,6 +146,7 @@ fn test_config() -> Config {
         database_url: "postgres://fake:fake@localhost:5432/fake".to_string(),
         db_pool: Default::default(),
         redis_url: "redis://localhost:6379/".to_string(),
+        require_cluster_fanout: false,
         jwt_secret: "secret".to_string(),
         jwt_issuer: None,
         jwt_audience: None,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use deadpool_redis::redis::{AsyncCommands, Msg};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::realtime::{WsEnvelope, WsHub};
@@ -233,45 +233,6 @@ impl ClusterBroadcast {
             .map_err(|e| anyhow::anyhow!("Failed to publish heartbeat: {}", e))?;
 
         Ok(())
-    }
-}
-
-/// Cluster-aware broadcaster that handles both local and remote broadcasts
-pub struct ClusterAwareBroadcaster {
-    local_hub: Arc<WsHub>,
-    cluster: Option<Arc<ClusterBroadcast>>,
-    enable_cluster: bool,
-}
-
-impl ClusterAwareBroadcaster {
-    /// Create a new cluster-aware broadcaster
-    pub fn new(local_hub: Arc<WsHub>, cluster: Option<Arc<ClusterBroadcast>>) -> Self {
-        let enable_cluster = cluster.is_some();
-        Self {
-            local_hub,
-            cluster,
-            enable_cluster,
-        }
-    }
-
-    /// Broadcast an event to all connections (local and remote)
-    pub async fn broadcast(&self, envelope: WsEnvelope) {
-        // Always broadcast locally first
-        self.local_hub.broadcast(envelope.clone()).await;
-
-        // Then forward to cluster if enabled
-        if self.enable_cluster {
-            if let Some(ref cluster) = self.cluster {
-                if let Err(e) = cluster.broadcast_to_cluster(envelope).await {
-                    warn!(error = %e, "Failed to broadcast to cluster");
-                }
-            }
-        }
-    }
-
-    /// Check if cluster mode is enabled
-    pub fn is_cluster_enabled(&self) -> bool {
-        self.enable_cluster
     }
 }
 

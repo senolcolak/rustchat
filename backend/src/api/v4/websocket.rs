@@ -39,6 +39,7 @@ use crate::realtime::{
     websocket_actor::{close_codes, WebSocketActor, WsEvent},
     WsBroadcast, WsEnvelope,
 };
+use crate::telemetry::metrics;
 
 /// WebSocket query parameters
 #[derive(Debug, Deserialize)]
@@ -346,6 +347,8 @@ async fn run_connection(
                 "Failed to send missed message"
             );
             break;
+        } else {
+            metrics::record_ws_message("sent", "replay");
         }
     }
 
@@ -369,6 +372,7 @@ async fn run_connection(
             let msg_str = match hub_rx.recv().await {
                 Ok(msg) => msg,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    metrics::record_ws_dropped("hub_receiver_lagged", skipped as u64);
                     warn!(
                         connection_id = %replay_connection_id,
                         skipped = skipped,
@@ -412,7 +416,10 @@ async fn run_connection(
             }
 
             if actor_clone.send(mm_msg).is_err() {
+                metrics::record_ws_dropped("actor_send_failed", 1);
                 break;
+            } else {
+                metrics::record_ws_message("sent", "hub_event");
             }
         }
     });
@@ -424,6 +431,7 @@ async fn run_connection(
             event = actor.recv() => {
                 match event {
                     Some(WsEvent::MessageReceived(text)) => {
+                        metrics::record_ws_message("received", "client_text");
                         handle_client_text_message(
                             &state,
                             &actor,
@@ -435,6 +443,7 @@ async fn run_connection(
                         .await;
                     }
                     Some(WsEvent::BinaryReceived(bytes)) => {
+                        metrics::record_ws_message("received", "client_binary");
                         handle_client_binary_message(
                             &state,
                             &actor,

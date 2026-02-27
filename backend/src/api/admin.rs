@@ -9,6 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::{permissions as policy_permissions, AuthzResult, PolicyEngine};
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
@@ -109,19 +110,19 @@ pub fn router() -> Router<AppState> {
 
 /// Check if user is admin
 pub fn require_admin(auth: &AuthUser) -> ApiResult<()> {
-    if !auth.is_system_or_org_admin() {
-        return Err(AppError::Forbidden("Admin access required".to_string()));
+    match PolicyEngine::check_permission(&auth.role, &policy_permissions::SYSTEM_MANAGE) {
+        AuthzResult::Allow => Ok(()),
+        AuthzResult::Deny(_) => Err(AppError::Forbidden("Admin access required".to_string())),
     }
-    Ok(())
 }
 
 pub fn require_global_admin(auth: &AuthUser) -> ApiResult<()> {
-    if !auth.is_system_admin() {
-        return Err(AppError::Forbidden(
+    match PolicyEngine::check_permission(&auth.role, &policy_permissions::ADMIN_FULL) {
+        AuthzResult::Allow => Ok(()),
+        AuthzResult::Deny(_) => Err(AppError::Forbidden(
             "Global admin access required".to_string(),
-        ));
+        )),
     }
-    Ok(())
 }
 
 async fn insert_admin_audit_log(
@@ -775,7 +776,7 @@ async fn list_retention_policies(
         .bind(org_id)
         .fetch_all(&state.db)
         .await?
-    } else if auth.is_system_admin() {
+    } else if auth.has_permission(&policy_permissions::ADMIN_FULL) {
         sqlx::query_as("SELECT * FROM retention_policies ORDER BY created_at DESC")
             .fetch_all(&state.db)
             .await?

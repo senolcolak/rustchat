@@ -49,7 +49,7 @@ impl SecurityHeadersConfig {
         Self {
             // Strict CSP - adjust based on your frontend needs
             csp: "default-src 'self'; \
-                   script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+                   script-src 'self' 'unsafe-inline'; \
                    style-src 'self' 'unsafe-inline'; \
                    img-src 'self' data: blob: https:; \
                    font-src 'self' data:; \
@@ -247,7 +247,7 @@ where
 pub fn cors_compatible_config() -> SecurityHeadersConfig {
     SecurityHeadersConfig {
         csp: "default-src 'self'; \
-               script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+               script-src 'self' 'unsafe-inline'; \
                style-src 'self' 'unsafe-inline'; \
                img-src 'self' data: blob: https:; \
                font-src 'self' data:; \

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::{create_token_with_policy, hash_password, verify_password};
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
@@ -2027,7 +2028,7 @@ async fn update_user_roles(
     Path(user_id): Path<String>,
     Json(input): Json<UserRolesRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2060,7 +2061,7 @@ async fn update_user_active(
 ) -> ApiResult<Json<serde_json::Value>> {
     let user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
-    if user_id != auth.user_id && !auth.is_system_or_org_admin() {
+    if !auth.can_access_owned(user_id, &permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
@@ -2134,7 +2135,7 @@ async fn demote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2151,7 +2152,7 @@ async fn promote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2168,7 +2169,7 @@ async fn convert_user_to_bot(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)

@@ -76,6 +76,12 @@ async fn main() -> anyhow::Result<()> {
             info!("WebSocket cluster fan-out enabled");
         }
         Err(e) => {
+            if config.require_cluster_fanout {
+                anyhow::bail!(
+                    "Failed to start websocket cluster fan-out and RUSTCHAT_REQUIRE_CLUSTER_FANOUT=true: {}",
+                    e
+                );
+            }
             warn!(error = %e, "Failed to start websocket cluster fan-out; continuing in single-node mode");
         }
     }

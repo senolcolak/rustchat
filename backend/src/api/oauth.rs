@@ -7,8 +7,9 @@
 
 use axum::{
     extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue},
     middleware,
-    response::Redirect,
+    response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
 };
@@ -27,6 +28,8 @@ use crate::services::oidc_discovery::{find_signing_key, OidcDiscoveryService};
 
 const OAUTH_STATE_PREFIX: &str = "rustchat:oauth:state:";
 const OAUTH_STATE_TTL_SECONDS: u64 = 300; // 5 minutes
+const OAUTH_EXCHANGE_COOKIE: &str = "RCOAUTHCODE";
+const OAUTH_EXCHANGE_COOKIE_MAX_AGE_SECONDS: u64 = 120;
 const DEFAULT_OAUTH_REDIRECT_PATH: &str = "/";
 
 // GitHub OAuth endpoints (no OIDC discovery)
@@ -150,7 +153,8 @@ pub fn router() -> Router<AppState> {
 /// Request to exchange a code for a token
 #[derive(Debug, serde::Deserialize)]
 pub struct ExchangeRequest {
-    code: String,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// Response containing the JWT token
@@ -164,17 +168,27 @@ pub struct ExchangeResponse {
 /// Exchange a one-time code for a JWT token
 async fn exchange_token(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<ExchangeRequest>,
-) -> ApiResult<Json<ExchangeResponse>> {
+) -> ApiResult<impl IntoResponse> {
     use crate::services::oauth_token_exchange::{exchange_code, ExchangeError};
 
+    let code = input
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| read_cookie_value(&headers, OAUTH_EXCHANGE_COOKIE))
+        .ok_or_else(|| AppError::BadRequest("Missing exchange code".to_string()))?;
+
     // Validate code length to prevent unnecessary Redis calls
-    if input.code.len() < 10 {
+    if code.len() < 10 {
         return Err(AppError::BadRequest("Invalid exchange code".to_string()));
     }
 
     // Exchange the code for user data
-    let payload = match exchange_code(&state.redis, &input.code).await {
+    let payload = match exchange_code(&state.redis, &code).await {
         Ok(payload) => payload,
         Err(ExchangeError::InvalidCode) => {
             return Err(AppError::BadRequest(
@@ -213,11 +227,21 @@ async fn exchange_token(
         "OAuth token exchanged successfully"
     );
 
-    Ok(Json(ExchangeResponse {
-        token,
-        token_type: "Bearer".to_string(),
-        expires_in: state.jwt_expiry_hours * 3600,
-    }))
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_exchange_code_cookie(state.config.is_production()))
+            .map_err(|e| AppError::Internal(format!("Failed to clear exchange cookie: {}", e)))?,
+    );
+
+    Ok((
+        response_headers,
+        Json(ExchangeResponse {
+            token,
+            token_type: "Bearer".to_string(),
+            expires_in: state.jwt_expiry_hours * 3600,
+        }),
+    ))
 }
 
 /// Generate Redis key for OAuth state
@@ -253,9 +277,36 @@ fn append_query_param(path: &str, key: &str, value: &str) -> String {
     }
 }
 
-/// Append exchange code to redirect URL
-fn append_exchange_code(path: &str, code: &str) -> String {
-    append_query_param(path, "code", code)
+fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())?;
+    cookie_header.split(';').find_map(|pair| {
+        let mut parts = pair.trim().splitn(2, '=');
+        let key = parts.next()?.trim();
+        let value = parts.next()?.trim();
+        if key == name && !value.is_empty() {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn build_exchange_code_cookie(code: &str, secure: bool) -> String {
+    format!(
+        "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{}",
+        OAUTH_EXCHANGE_COOKIE,
+        code,
+        OAUTH_EXCHANGE_COOKIE_MAX_AGE_SECONDS,
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn clear_exchange_code_cookie(secure: bool) -> String {
+    format!(
+        "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        OAUTH_EXCHANGE_COOKIE,
+        if secure { "; Secure" } else { "" }
+    )
 }
 
 async fn send_with_retry(
@@ -540,7 +591,7 @@ async fn oauth_callback(
     State(state): State<AppState>,
     Path(provider_key): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
-) -> Result<Redirect, AppError> {
+) -> Result<axum::response::Response, AppError> {
     // Handle provider error
     if let Some(error) = query.error {
         let desc = query.error_description.unwrap_or_else(|| error.clone());
@@ -549,10 +600,10 @@ async fn oauth_callback(
             error = %error,
             "OAuth provider returned error"
         );
-        return Ok(Redirect::temporary(&format!(
-            "/login?error={}",
-            urlencoding::encode(&desc)
-        )));
+        return Ok(
+            Redirect::temporary(&format!("/login?error={}", urlencoding::encode(&desc)))
+                .into_response(),
+        );
     }
 
     let code = query
@@ -706,10 +757,23 @@ async fn oauth_callback(
             urlencoding::encode(&exchange_code)
         )
     } else {
-        append_exchange_code(&stored_state.redirect_after, &exchange_code)
+        append_query_param(&stored_state.redirect_after, "oauth", "1")
     };
+    if stored_state.is_mobile {
+        return Ok(Redirect::temporary(&redirect_url).into_response());
+    }
 
-    Ok(Redirect::temporary(&redirect_url))
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&build_exchange_code_cookie(
+            &exchange_code,
+            state.config.is_production(),
+        ))
+        .map_err(|e| AppError::Internal(format!("Failed to set exchange cookie: {}", e)))?,
+    );
+
+    Ok((response_headers, Redirect::temporary(&redirect_url)).into_response())
 }
 
 /// User info extracted from OAuth provider
@@ -1365,4 +1429,43 @@ async fn generate_unique_username(
         .unwrap_or("user")
         .to_string();
     Ok(format!("{}_{}", base_username, unique_suffix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_cookie_value_extracts_named_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("foo=bar; RCOAUTHCODE=abc123; baz=qux"),
+        );
+
+        let value = read_cookie_value(&headers, "RCOAUTHCODE");
+        assert_eq!(value.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn read_cookie_value_returns_none_when_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("foo=bar; baz=qux"));
+
+        let value = read_cookie_value(&headers, "RCOAUTHCODE");
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn exchange_cookie_builders_include_security_attributes() {
+        let set_cookie = build_exchange_code_cookie("code123", true);
+        assert!(set_cookie.contains("RCOAUTHCODE=code123"));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+        assert!(set_cookie.contains("Secure"));
+
+        let clear_cookie = clear_exchange_code_cookie(true);
+        assert!(clear_cookie.contains("RCOAUTHCODE="));
+        assert!(clear_cookie.contains("Max-Age=0"));
+    }
 }

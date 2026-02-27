@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::{hash_password, AuthUser};
 use crate::error::{ApiResult, AppError};
 use crate::models::{ChangePassword, UpdateUser, User, UserResponse};
@@ -69,7 +70,7 @@ async fn list_users(
     let offset = ((page - 1) * per_page) as i64;
     let search_term = query.q.map(|s| format!("%{}%", s));
 
-    let users: Vec<User> = if auth.is_system_admin() {
+    let users: Vec<User> = if auth.has_permission(&permissions::ADMIN_FULL) {
         // System admin can see all users
         if let Some(term) = search_term {
             sqlx::query_as(
@@ -130,7 +131,7 @@ async fn get_user(
 
     // Check access: same user, same org, or system admin
     let can_view = auth.user_id == user.id
-        || auth.is_system_admin()
+        || auth.has_permission(&permissions::ADMIN_FULL)
         || (auth.org_id.is_some() && auth.org_id == user.org_id);
 
     if !can_view {
@@ -148,7 +149,7 @@ async fn update_user(
     Json(input): Json<UpdateUser>,
 ) -> ApiResult<Json<UserResponse>> {
     // Only the user themselves or an admin can update
-    if auth.user_id != id && !auth.is_system_or_org_admin() {
+    if !auth.can_access_owned(id, &permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Cannot update this user".to_string()));
     }
 

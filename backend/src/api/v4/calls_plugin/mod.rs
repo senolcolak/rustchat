@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
 use crate::realtime::{EventType, WsBroadcast, WsEnvelope};
@@ -362,7 +363,7 @@ struct HostMakeRequest {
 }
 
 fn can_manage_call(auth: &MmAuthUser, call: &CallState) -> bool {
-    call.host_id == auth.user_id || auth.is_system_admin()
+    call.host_id == auth.user_id || auth.has_permission(&permissions::ADMIN_FULL)
 }
 
 fn is_host_session_active(_state: &AppState, call: &CallState) -> bool {

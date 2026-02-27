@@ -33,6 +33,11 @@ pub struct Config {
     #[serde(default = "default_redis_url")]
     pub redis_url: String,
 
+    /// Require cluster websocket fan-out at startup.
+    /// If true, startup fails when cluster pub/sub cannot be initialized.
+    #[serde(default = "default_require_cluster_fanout")]
+    pub require_cluster_fanout: bool,
+
     /// JWT secret key
     pub jwt_secret: String,
 
@@ -393,6 +398,10 @@ fn default_redis_url() -> String {
     "redis://localhost:6379".to_string()
 }
 
+fn default_require_cluster_fanout() -> bool {
+    false
+}
+
 fn default_jwt_expiry() -> u64 {
     24
 }
@@ -555,6 +564,29 @@ impl Config {
         }
 
         if self.is_production() {
+            if self
+                .jwt_issuer
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "RUSTCHAT_JWT_ISSUER is required in production and must be non-empty."
+                );
+            }
+            if self
+                .jwt_audience
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "RUSTCHAT_JWT_AUDIENCE is required in production and must be non-empty."
+                );
+            }
+
             if let Ok(site_url) = std::env::var("RUSTCHAT_SITE_URL") {
                 let normalized = site_url.trim().to_ascii_lowercase();
                 if !normalized.is_empty() && !normalized.starts_with("https://") {
@@ -563,6 +595,8 @@ impl Config {
                         site_url
                     );
                 }
+            } else {
+                anyhow::bail!("RUSTCHAT_SITE_URL is required in production and must use https://.");
             }
 
             if let Some(origins) = self.cors_allowed_origins.as_deref() {

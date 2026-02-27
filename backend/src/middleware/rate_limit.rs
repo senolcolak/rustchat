@@ -15,6 +15,7 @@ use deadpool_redis::redis::AsyncCommands;
 
 use crate::api::AppState;
 use crate::error::AppError;
+use crate::telemetry::metrics;
 
 /// Rate limit configuration for different endpoint categories
 #[derive(Debug, Clone)]
@@ -203,6 +204,7 @@ async fn enforce_rate_limit_for_request(
             if result.allowed {
                 None
             } else {
+                metrics::record_rate_limit_hit(scope, "ip");
                 tracing::warn!(
                     scope = scope,
                     ip = %client_ip,
@@ -280,6 +282,28 @@ pub async fn websocket_ip_rate_limit(request: Request, next: Next) -> Response {
         RateLimitConfig::websocket_per_minute(state.config.security.rate_limit_ws_per_minute);
     if let Some(response) =
         enforce_rate_limit_for_request(&state, client_ip, config, "ws", true).await
+    {
+        return response;
+    }
+
+    next.run(request).await
+}
+
+/// Centralized middleware for password reset flow endpoint limiting.
+pub async fn password_reset_ip_rate_limit(request: Request, next: Next) -> Response {
+    let Some(state) = request.extensions().get::<AppState>().cloned() else {
+        return AppError::Internal("Missing application state".to_string()).into_response();
+    };
+    let client_ip = extract_client_ip_from_request(&request);
+
+    if let Some(response) = enforce_rate_limit_for_request(
+        &state,
+        client_ip,
+        RateLimitConfig::password_reset_default(),
+        "password_reset",
+        false,
+    )
+    .await
     {
         return response;
     }

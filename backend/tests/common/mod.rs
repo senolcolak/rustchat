@@ -95,6 +95,7 @@ fn test_config() -> Config {
         database_url: "postgres://rustchat:rustchat@localhost:5432/rustchat".to_string(),
         db_pool: Default::default(),
         redis_url: "redis://localhost:6379/".to_string(),
+        require_cluster_fanout: false,
         jwt_secret: "test-secret".to_string(),
         jwt_issuer: None,
         jwt_audience: None,

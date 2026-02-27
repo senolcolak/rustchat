@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::cluster_broadcast::ClusterBroadcast;
 use super::events::WsEnvelope;
+use crate::telemetry::metrics;
 
 /// Connection info for a WebSocket client
 #[derive(Debug, Clone)]
@@ -70,6 +71,8 @@ impl WsHub {
         let mut usernames = self.usernames.write().await;
         usernames.insert(user_id, username);
 
+        metrics::record_ws_connection();
+
         (connection_id, rx)
     }
 
@@ -80,6 +83,7 @@ impl WsHub {
 
         if let Some(user_connections) = connections.get_mut(&user_id) {
             user_connections.remove(&connection_id);
+            metrics::record_ws_disconnection();
             if user_connections.is_empty() {
                 connections.remove(&user_id);
                 should_clear_presence = true;
@@ -150,6 +154,7 @@ impl WsHub {
     /// Broadcast only to local in-process subscribers.
     /// Used by cluster subscribers to avoid rebroadcast loops.
     pub async fn broadcast_local(&self, envelope: WsEnvelope) {
+        let _timer = metrics::BroadcastTimer::new();
         let message = match serde_json::to_string(&envelope) {
             Ok(m) => m,
             Err(_) => return,

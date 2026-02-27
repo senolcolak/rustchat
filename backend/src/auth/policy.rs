@@ -128,6 +128,25 @@ impl Role {
         }
     }
 
+    /// Create an organization admin role.
+    ///
+    /// This maps to the existing `org_admin` semantics used in API handlers.
+    pub fn org_admin() -> Self {
+        use permissions::*;
+        let mut permissions = HashSet::new();
+
+        permissions.insert(TEAM_MANAGE);
+        permissions.insert(CHANNEL_MANAGE);
+        permissions.insert(USER_MANAGE);
+        permissions.insert(SYSTEM_MANAGE);
+        permissions.insert(POST_DELETE);
+
+        Self {
+            name: "org_admin".to_string(),
+            permissions,
+        }
+    }
+
     /// Create a standard member role
     pub fn member() -> Self {
         use permissions::*;
@@ -179,7 +198,8 @@ impl Role {
         match name {
             "system_admin" => Some(Self::system_admin()),
             "team_admin" => Some(Self::team_admin()),
-            "admin" => Some(Self::team_admin()), // Alias
+            "org_admin" => Some(Self::org_admin()),
+            "admin" => Some(Self::org_admin()), // Alias
             "member" => Some(Self::member()),
             "guest" => Some(Self::guest()),
             _ => None,
@@ -198,22 +218,36 @@ pub enum AuthzResult {
 pub struct PolicyEngine;
 
 impl PolicyEngine {
+    fn parse_roles(role: &str) -> impl Iterator<Item = &str> {
+        role.split(|c: char| c.is_whitespace() || c == ',')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+    }
+
     /// Check if user has permission
     pub fn check_permission(role: &str, permission: &Permission) -> AuthzResult {
-        let role = match Role::from_name(role) {
-            Some(r) => r,
-            None => return AuthzResult::Deny("Unknown role"),
-        };
+        let mut has_known_role = false;
 
-        // Admin role has all permissions
-        if role.has_permission(&permissions::ADMIN_FULL) {
-            return AuthzResult::Allow;
+        for role_name in Self::parse_roles(role) {
+            let Some(role_def) = Role::from_name(role_name) else {
+                continue;
+            };
+            has_known_role = true;
+
+            // Admin role has all permissions
+            if role_def.has_permission(&permissions::ADMIN_FULL) {
+                return AuthzResult::Allow;
+            }
+
+            if role_def.has_permission(permission) {
+                return AuthzResult::Allow;
+            }
         }
 
-        if role.has_permission(permission) {
-            AuthzResult::Allow
-        } else {
+        if has_known_role {
             AuthzResult::Deny("Permission denied")
+        } else {
+            AuthzResult::Deny("Unknown role")
         }
     }
 
@@ -311,6 +345,18 @@ mod tests {
             PolicyEngine::check_permission("guest", &POST_CREATE),
             AuthzResult::Deny(_)
         ));
+    }
+
+    #[test]
+    fn test_policy_engine_multi_role_support() {
+        assert_eq!(
+            PolicyEngine::check_permission("member org_admin", &permissions::SYSTEM_MANAGE),
+            AuthzResult::Allow
+        );
+        assert_eq!(
+            PolicyEngine::check_permission("member,org_admin", &permissions::SYSTEM_MANAGE),
+            AuthzResult::Allow
+        );
     }
 
     #[test]

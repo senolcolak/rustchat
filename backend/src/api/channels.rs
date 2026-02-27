@@ -9,6 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::models::{Channel, ChannelMember, ChannelType, CreateChannel, UpdateChannel};
@@ -395,7 +396,7 @@ async fn update_channel(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && !auth.is_system_admin() {
+    if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
         return Err(AppError::Forbidden(
             "Not an admin of this channel".to_string(),
         ));
@@ -447,7 +448,7 @@ async fn archive_channel(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && !auth.is_system_admin() {
+    if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
         return Err(AppError::Forbidden(
             "Not an admin of this channel".to_string(),
         ));
@@ -518,7 +519,7 @@ async fn add_member(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-            if member.role != "admin" && !auth.is_system_admin() {
+            if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
                 return Err(AppError::Forbidden(
                     "Cannot join private channel without invite".to_string(),
                 ));
@@ -535,7 +536,7 @@ async fn add_member(
                 .await?
                 .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-        if member.role != "admin" && !auth.is_system_admin() {
+        if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
             return Err(AppError::Forbidden(
                 "Not an admin of this channel".to_string(),
             ));
@@ -604,7 +605,7 @@ async fn remove_member(
                 .await?
                 .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-        if member.role != "admin" && !auth.is_system_admin() {
+        if member.role != "admin" && !auth.has_permission(&permissions::CHANNEL_MANAGE) {
             return Err(AppError::Forbidden(
                 "Not an admin of this channel".to_string(),
             ));

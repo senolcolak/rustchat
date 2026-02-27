@@ -4,11 +4,9 @@
 //! tracking to avoid split-brain counters across parallel implementations.
 
 use deadpool_redis::redis::AsyncCommands;
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
-use crate::error::AppError;
 
 const PRESENCE_HEARTBEAT_TTL_SECONDS: u64 = 90;
 
@@ -18,42 +16,6 @@ fn presence_connection_key(user_id: Uuid) -> String {
 
 fn presence_heartbeat_key(user_id: Uuid, connection_id: &str) -> String {
     format!("rustchat:presence:user:{user_id}:connection:{connection_id}:heartbeat")
-}
-
-/// Check if user has exceeded cluster-wide connection limit.
-pub async fn check_cluster_connection_limit(
-    state: &AppState,
-    user_id: Uuid,
-    max_connections: usize,
-) -> Result<bool, AppError> {
-    let local_count = state.ws_hub.user_connection_count(user_id).await;
-    if local_count >= max_connections {
-        return Ok(false);
-    }
-
-    match get_global_connection_count(state, user_id).await {
-        Ok(global_count) => {
-            if global_count >= max_connections {
-                debug!(
-                    user_id = %user_id,
-                    global_count = global_count,
-                    max = max_connections,
-                    "Cluster connection limit exceeded"
-                );
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        }
-        Err(e) => {
-            warn!(
-                user_id = %user_id,
-                error = %e,
-                "Failed to get global connection count, using local count only"
-            );
-            Ok(local_count < max_connections)
-        }
-    }
 }
 
 /// Get global connection count from presence registry and prune stale entries.

@@ -31,15 +31,25 @@ pub fn router() -> Router<AppState> {
         .layer(middleware::from_fn(
             crate::middleware::rate_limit::auth_ip_rate_limit,
         ));
+    let verification_routes = Router::new()
+        .route("/verify-email", post(verify_email))
+        .route("/resend-verification", post(resend_verification))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::auth_ip_rate_limit,
+        ));
+    let password_reset_routes = Router::new()
+        .route("/password/forgot", post(forgot_password))
+        .route("/password/reset", post(reset_password_handler))
+        .route("/password/validate", post(validate_token_handler))
+        .layer(middleware::from_fn(
+            crate::middleware::rate_limit::password_reset_ip_rate_limit,
+        ));
 
     Router::new()
         .merge(registration_routes)
         .merge(login_routes)
-        .route("/verify-email", post(verify_email))
-        .route("/resend-verification", post(resend_verification))
-        .route("/password/forgot", post(forgot_password))
-        .route("/password/reset", post(reset_password_handler))
-        .route("/password/validate", post(validate_token_handler))
+        .merge(verification_routes)
+        .merge(password_reset_routes)
         .route("/me", get(me))
         .route("/policy", get(get_auth_policy))
         .route("/config", get(get_public_auth_config))

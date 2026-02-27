@@ -1,5 +1,6 @@
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
@@ -347,7 +348,7 @@ pub async fn delete_emoji(
     .ok_or_else(|| AppError::NotFound("Emoji not found".to_string()))?;
 
     // Authorization
-    if emoji.creator_id != auth.user_id && !auth.is_system_admin() {
+    if !auth.can_access_owned(emoji.creator_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Cannot delete emoji created by another user".to_string(),
         ));

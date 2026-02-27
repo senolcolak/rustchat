@@ -80,6 +80,16 @@ pub static WS_MESSAGES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric can be created")
 });
 
+/// WebSocket dropped/lagged message counter
+pub static WS_DROPPED_MESSAGES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "rustchat_websocket_dropped_messages_total",
+        "Total dropped websocket messages",
+        &["reason"]
+    )
+    .expect("metric can be created")
+});
+
 /// WebSocket broadcast duration
 pub static WS_BROADCAST_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
     register_histogram!(
@@ -231,6 +241,13 @@ pub fn record_ws_message(direction: &str, event_type: &str) {
     WS_MESSAGES_TOTAL
         .with_label_values(&[direction, event_type])
         .inc();
+}
+
+/// Record dropped websocket messages
+pub fn record_ws_dropped(reason: &str, count: u64) {
+    WS_DROPPED_MESSAGES_TOTAL
+        .with_label_values(&[reason])
+        .inc_by(count);
 }
 
 /// Record authentication attempt

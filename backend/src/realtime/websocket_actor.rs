@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::mattermost_compat::models as mm;
 use crate::realtime::connection_store::{ConnectionState, ConnectionStore};
+use crate::telemetry::metrics;
 
 // Heartbeat constants
 /// Write timeout for WebSocket operations (30 seconds)
@@ -47,6 +48,7 @@ fn emit_event(event_tx: &mpsc::Sender<WsEvent>, connection_id: &str, event: WsEv
     match event_tx.try_send(event) {
         Ok(()) => true,
         Err(TrySendError::Full(_)) => {
+            metrics::record_ws_dropped("actor_event_queue_full", 1);
             warn!(
                 connection_id = %connection_id,
                 "Dropping websocket event because event queue is full"

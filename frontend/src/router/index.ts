@@ -147,10 +147,13 @@ router.beforeEach(async (to, _from, next) => {
     // Handle OAuth redirects before auth checks.
     const urlParams = new URLSearchParams(window.location.search)
     const code = urlParams.get('code')
+    const oauth = urlParams.get('oauth')
     const auth = useAuthStore()
-    if (code) {
+    if (code || oauth === '1') {
         try {
-            const response = await client.post('/oauth2/exchange', { code })
+            const response = code
+                ? await client.post('/oauth2/exchange', { code })
+                : await client.post('/oauth2/exchange', {})
             const accessToken = response.data?.token
 
             if (!accessToken) {
@@ -161,6 +164,7 @@ router.beforeEach(async (to, _from, next) => {
             await auth.fetchMe()
 
             urlParams.delete('code')
+            urlParams.delete('oauth')
             const remaining = urlParams.toString()
             const newUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ''}${window.location.hash}`
             window.history.replaceState({}, document.title, newUrl)

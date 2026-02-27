@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
@@ -741,7 +742,7 @@ async fn get_flagged_posts(
     } else {
         let parsed = parse_mm_or_uuid(&user_id)
             .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
-        if parsed != auth.user_id && !auth.is_system_or_org_admin() {
+        if !auth.can_access_owned(parsed, &permissions::USER_MANAGE) {
             return Err(AppError::Forbidden(
                 "Cannot access another user's posts".to_string(),
             ));

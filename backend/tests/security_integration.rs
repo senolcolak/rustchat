@@ -63,6 +63,7 @@ fn test_secret_entropy_validation() {
         database_url: "postgres://rustchat:rustchat@localhost:5432/rustchat".to_string(),
         db_pool: DbPoolConfig::default(),
         redis_url: "redis://localhost:6379".to_string(),
+        require_cluster_fanout: false,
         jwt_secret: jwt_secret.to_string(),
         jwt_issuer: None,
         jwt_audience: None,

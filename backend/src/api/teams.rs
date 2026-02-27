@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::{
     auth::middleware::AuthUser,
+    auth::policy::permissions,
     error::AppError,
     models::team::{AddTeamMember, CreateTeam, Team, TeamMember, TeamMemberResponse},
 };
@@ -171,7 +172,7 @@ async fn add_member(
     Json(payload): Json<AddTeamMember>,
 ) -> Result<Json<TeamMember>, AppError> {
     // Permission check
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)
@@ -222,7 +223,7 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<(), AppError> {
     // Permission check
-    if !auth.is_system_or_org_admin() {
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)
@@ -409,20 +410,24 @@ async fn update_team(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateTeam>,
 ) -> Result<Json<Team>, AppError> {
-    // Check if user is admin of the team
-    let member: Option<TeamMember> =
-        sqlx::query_as("SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2")
-            .bind(id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let can_manage_team = auth.has_permission(&permissions::TEAM_MANAGE);
 
-    match member {
-        Some(m) if m.role == "admin" || m.role == "owner" => {}
-        _ => {
-            return Err(AppError::Forbidden(
-                "Only team admins can update team settings".into(),
-            ))
+    // Check if user is admin of the team
+    if !can_manage_team {
+        let member: Option<TeamMember> =
+            sqlx::query_as("SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2")
+                .bind(id)
+                .bind(auth.user_id)
+                .fetch_optional(&state.db)
+                .await?;
+
+        match member {
+            Some(m) if m.role == "admin" || m.role == "owner" => {}
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Only team admins can update team settings".into(),
+                ))
+            }
         }
     }
 

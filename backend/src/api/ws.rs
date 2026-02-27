@@ -17,6 +17,7 @@ use tokio::time::Duration;
 use super::AppState;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::realtime::WsEnvelope;
+use crate::telemetry::metrics;
 
 /// Build WebSocket routes
 pub fn router() -> Router<AppState> {
@@ -119,9 +120,19 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
 
     // Spawn task to forward hub messages to client
     let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if sender.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                    metrics::record_ws_message("sent", "hub_event");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    metrics::record_ws_dropped("hub_receiver_lagged", skipped as u64);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -134,6 +145,7 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(Message::Text(text)) => {
+                    metrics::record_ws_message("received", "client_message");
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
                             if crate::api::v4::calls_plugin::handle_ws_action(
