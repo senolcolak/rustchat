@@ -15,6 +15,8 @@ pub struct TestApp {
     pub address: String,
     #[allow(dead_code)]
     pub db_pool: PgPool,
+    #[allow(dead_code)]
+    pub redis_pool: deadpool_redis::Pool,
     pub api_client: reqwest::Client,
 }
 
@@ -63,7 +65,7 @@ pub async fn spawn_app() -> TestApp {
 
     let app = api::router(
         db_pool.clone(),
-        redis_pool,
+        redis_pool.clone(),
         jwt_secret,
         jwt_expiry_hours,
         ws_hub,
@@ -79,6 +81,7 @@ pub async fn spawn_app() -> TestApp {
     TestApp {
         address,
         db_pool,
+        redis_pool,
         api_client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .cookie_store(true)

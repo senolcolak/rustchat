@@ -25,6 +25,7 @@ pub struct UserStatusResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateStatusRequest {
     pub status: String,
+    #[allow(dead_code)]
     #[serde(default)]
     pub dnd_end_time: Option<i64>,
 }

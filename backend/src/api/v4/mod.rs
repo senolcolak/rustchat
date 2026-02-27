@@ -56,6 +56,7 @@ pub mod usage;
 pub mod users;
 pub mod websocket;
 
+#[allow(dead_code)]
 pub fn router() -> Router<AppState> {
     // Default limits for backward compatibility
     router_with_body_limits(64 * 1024, 1024 * 1024, 50 * 1024 * 1024)

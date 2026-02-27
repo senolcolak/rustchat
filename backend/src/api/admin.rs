@@ -1890,6 +1890,7 @@ pub struct TestEmailRequest {
 }
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
+#[allow(dead_code)]
 struct EmailEventRow {
     id: Uuid,
     action: String,
@@ -1898,6 +1899,7 @@ struct EmailEventRow {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct EmailEventResponse {
     id: Uuid,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -2004,6 +2006,7 @@ async fn record_provider_email_test_event(
     }
 }
 
+#[allow(dead_code)]
 async fn list_email_events(
     State(state): State<AppState>,
     auth: AuthUser,

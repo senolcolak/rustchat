@@ -14,7 +14,6 @@ use super::users::{
 use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{id::parse_mm_or_uuid, models as mm};
-use crate::models::Team;
 
 pub fn router() -> Router<AppState> {
     Router::new()

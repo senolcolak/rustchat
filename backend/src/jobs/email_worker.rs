@@ -268,7 +268,7 @@ impl EmailWorker {
         // Check cache
         {
             let cache = self.provider_cache.lock().unwrap();
-            if let Some(provider) = cache.get(&settings.id) {
+            if cache.contains_key(&settings.id) {
                 // In a real implementation, we'd need to clone the provider or use Arc
                 // For now, we'll create a new one each time (not optimal but works)
             }
@@ -370,7 +370,7 @@ impl EmailWorker {
     }
 
     /// Mark email as sent
-    async fn mark_sent(&self, id: Uuid, server_response: &str) -> Result<(), sqlx::Error> {
+    async fn mark_sent(&self, id: Uuid, _server_response: &str) -> Result<(), sqlx::Error> {
         let now = Utc::now();
 
         sqlx::query(
@@ -513,6 +513,7 @@ impl EmailWorker {
 
 /// Errors specific to the worker
 #[derive(Debug)]
+#[allow(dead_code)]
 enum WorkerError {
     Database(sqlx::Error),
     Configuration(String),

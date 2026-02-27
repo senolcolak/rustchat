@@ -95,15 +95,54 @@ Production guidance:
 
 We recommend using **Nginx**, **Traefik**, or **Caddy** for TLS termination and basic load balancing.
 
+### How It Works
+
+```
+┌─────────────────┐     HTTPS      ┌─────────────────┐     HTTP       ┌─────────────────┐
+│   Web Browser   │───────────────▶│  Reverse Proxy  │───────────────▶│  RustChat API   │
+│                 │                │  (TLS Termination)               │   (Port 3000)   │
+└─────────────────┘                └─────────────────┘                └─────────────────┘
+       https://chat.example.com         proxy_pass http://rustchat:3000
+```
+
+### CORS Configuration Behind Proxy
+
+When running behind a reverse proxy, configure RustChat with the **public HTTPS URLs**:
+
+```bash
+# .env - Production behind reverse proxy
+RUSTCHAT_ENVIRONMENT=production
+RUSTCHAT_SITE_URL=https://chat.example.com
+RUSTCHAT_CORS_ALLOWED_ORIGINS=https://chat.example.com
+```
+
+**Important:** Even though internal communication uses HTTP, you must configure `https://` origins for CORS because:
+- Browsers see only the public HTTPS URL
+- CORS validation happens against the `Origin` header sent by browsers
+- Production mode requires `https://` for security
+
 ### Nginx Example Config
+
 Crucially, ensure your proxy supports WebSockets:
 ```nginx
-location /api/v1/ws {
-    proxy_pass http://rustchat_backend;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "Upgrade";
-    proxy_set_header Host $host;
+server {
+    listen 443 ssl http2;
+    server_name chat.example.com;
+    
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+    
+    location / {
+        proxy_pass http://rustchat_backend;  # Internal HTTP backend
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        
+        # Forward client IP for rate limiting
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
 }
 ```
 

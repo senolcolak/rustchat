@@ -8,14 +8,14 @@ Reduce complexity and drift between `/api/v1/ws` and `/api/v4/websocket` while k
 
 | Endpoint | Primary clients | Wire protocol | Adapter-specific responsibilities |
 |---|---|---|---|
-| `/api/v1/ws` | RustChat web app and legacy internal clients | Internal envelope (`type`, `event`, `data`, `channel_id`) | Query/protocol token handshake, envelope hello (`WsEnvelope::hello`) |
+| `/api/v1/ws` | RustChat web app and legacy internal clients | Internal envelope (`type`, `event`, `data`, `channel_id`) | Secure header/protocol token handshake, envelope hello (`WsEnvelope::hello`) |
 | `/api/v4/websocket` | Mattermost-compatible clients (mobile/desktop) | Mattermost websocket message shape (`event`, `data`, `broadcast`, `seq`) | Optional auth challenge exchange, MM event mapping, session resumption (`connection_id`, `sequence_number`) |
 
 ## Shared Core (Strict Boundary)
 
 Both adapters now use `backend/src/api/websocket_core.rs` for:
 
-1. Auth token normalization and extraction (`query`, `Authorization`, optional protocol fallback).
+1. Auth token normalization and extraction (`Authorization`, optional `Sec-WebSocket-Protocol` fallback).
 2. Connection limit enforcement.
 3. Connection bootstrap:
 1. default team/channel subscriptions (policy controlled per adapter),

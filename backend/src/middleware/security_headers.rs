@@ -7,7 +7,6 @@
 use axum::{
     body::Body,
     http::{header, Request, Response},
-    response::IntoResponse,
 };
 use std::task::{Context, Poll};
 use tower::{Layer, Service};

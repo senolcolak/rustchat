@@ -155,8 +155,7 @@ export function useAuth() {
   // Check for OAuth callback on mount
   useEffect(() => {
     const handleCallback = async () => {
-      if (!window.location.search.includes('code=') && 
-          !window.location.search.includes('token=')) {
+      if (!window.location.search.includes('code=')) {
         setState(s => ({ ...s, isLoading: false }));
         return;
       }
@@ -204,7 +203,7 @@ export function useAuth() {
 }
 ```
 
-### WebSocket Connection with Authorization Header
+### WebSocket Connection with Secure Handshake Token
 
 ```typescript
 // websocket/client.ts

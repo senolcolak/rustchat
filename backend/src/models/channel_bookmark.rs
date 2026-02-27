@@ -2,7 +2,6 @@
 //!
 //! Bookmarks are saved links or files in channels.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;

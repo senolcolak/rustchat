@@ -3713,6 +3713,7 @@ async fn check_channel_permission(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn is_dm_or_gm_channel(state: &AppState, channel_id: Uuid) -> ApiResult<bool> {
     let channel_type: Option<String> =
         sqlx::query_scalar("SELECT type::text FROM channels WHERE id = $1")

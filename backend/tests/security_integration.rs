@@ -6,48 +6,278 @@
 //! - WebSocket token handling
 //! - Secret validation
 
+mod common;
+
+use axum::http::StatusCode;
+use deadpool_redis::redis::AsyncCommands;
+use serde_json::json;
 use std::time::Duration;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use uuid::Uuid;
+
+use common::spawn_app;
+use rustchat::services::oauth_token_exchange::{create_exchange_code, ExchangeCodePayload};
+
+fn unique_test_ip() -> String {
+    let bytes = Uuid::new_v4().as_bytes().to_owned();
+    format!("203.0.113.{}", 1 + (bytes[0] % 200))
+}
+
+async fn create_test_user_token(app: &common::TestApp) -> String {
+    let client_ip = unique_test_ip();
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, $2)")
+        .bind(org_id)
+        .bind("Security Test Org")
+        .execute(&app.db_pool)
+        .await
+        .expect("Failed to create organization");
+
+    let username = format!("sec_user_{}", Uuid::new_v4().simple());
+    let email = format!("{}@example.com", username);
+
+    let register_response = app
+        .api_client
+        .post(format!("{}/api/v1/auth/register", app.address))
+        .header("X-Forwarded-For", &client_ip)
+        .json(&json!({
+            "username": username,
+            "email": email,
+            "password": "Str0ng!Passw0rd",
+            "display_name": "Security Test User",
+            "org_id": org_id
+        }))
+        .send()
+        .await
+        .expect("Failed to register user");
+    assert_eq!(register_response.status(), StatusCode::OK);
+
+    let login_response = app
+        .api_client
+        .post(format!("{}/api/v1/auth/login", app.address))
+        .header("X-Forwarded-For", &client_ip)
+        .json(&json!({
+            "email": email,
+            "password": "Str0ng!Passw0rd"
+        }))
+        .send()
+        .await
+        .expect("Failed to login user");
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let body: serde_json::Value = login_response
+        .json()
+        .await
+        .expect("Failed to parse login response");
+    body["token"]
+        .as_str()
+        .expect("Missing login token")
+        .to_string()
+}
 
 /// Test rate limiting on login endpoint
 #[tokio::test]
 async fn test_login_rate_limiting() {
-    // This would require a test harness with Redis
-    // Placeholder for actual implementation
+    let app = spawn_app().await;
+    let client_ip = unique_test_ip();
+    let redis_key = format!("ratelimit:auth:{client_ip}");
+    let now = chrono::Utc::now().timestamp();
 
-    // Test: Make 15 rapid login attempts
-    // Expect: Last 5 should return 429 Too Many Requests
+    // Pre-fill auth rate limiter window for this synthetic IP so the next request is blocked.
+    let mut redis_conn = app
+        .redis_pool
+        .get()
+        .await
+        .expect("Failed to get Redis connection");
+    let _: usize = redis_conn
+        .del(&redis_key)
+        .await
+        .expect("Failed to cleanup key");
+    for i in 0..10_i64 {
+        let ts = now - i;
+        let _: () = redis_conn
+            .zadd(&redis_key, ts, ts)
+            .await
+            .expect("Failed to seed auth rate limit key");
+    }
+    let _: () = redis_conn
+        .expire(&redis_key, 60)
+        .await
+        .expect("Failed to expire auth rate limit key");
 
-    // Test: Wait for rate limit window to reset
-    // Expect: Login should succeed again
+    let response = app
+        .api_client
+        .post(format!("{}/api/v1/auth/login", app.address))
+        .header("X-Forwarded-For", &client_ip)
+        .json(&json!({
+            "email": "nobody@example.com",
+            "password": "bad-password"
+        }))
+        .send()
+        .await
+        .expect("Failed to call login");
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.headers().get("Retry-After").is_some());
 }
 
 /// Test OAuth exchange code flow
 #[tokio::test]
 async fn test_oauth_exchange_code() {
-    // Test: Exchange valid code for token
-    // Expect: Returns JWT token
+    let app = spawn_app().await;
+    let exchange_url = format!("{}/api/v1/oauth2/exchange", app.address);
+    let exchange_ip = unique_test_ip();
 
-    // Test: Exchange same code again
-    // Expect: Returns 400 (code already used)
+    let code = create_exchange_code(
+        &app.redis_pool,
+        Uuid::new_v4(),
+        "oauth-security@example.com".to_string(),
+        "member".to_string(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect("Failed to create exchange code");
 
-    // Test: Exchange expired code
-    // Expect: Returns 400 (code expired)
+    // First exchange succeeds.
+    let first = app
+        .api_client
+        .post(&exchange_url)
+        .header("X-Forwarded-For", &exchange_ip)
+        .json(&json!({ "code": code.clone() }))
+        .send()
+        .await
+        .expect("Failed to exchange code");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body: serde_json::Value = first.json().await.expect("Invalid exchange response");
+    assert!(first_body["token"].as_str().is_some());
+    assert_eq!(first_body["token_type"], "Bearer");
 
-    // Test: Exchange invalid code
-    // Expect: Returns 400 (invalid code)
+    // Same code is one-time use and must fail.
+    let replay = app
+        .api_client
+        .post(&exchange_url)
+        .header("X-Forwarded-For", &exchange_ip)
+        .json(&json!({ "code": code }))
+        .send()
+        .await
+        .expect("Failed replay request");
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+
+    // Invalid code fails.
+    let invalid = app
+        .api_client
+        .post(&exchange_url)
+        .header("X-Forwarded-For", &exchange_ip)
+        .json(&json!({ "code": "invalid-code" }))
+        .send()
+        .await
+        .expect("Failed invalid-code request");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    // Expired code fails.
+    let expired_code = format!("expired-{}", Uuid::new_v4().simple());
+    let expired_payload = ExchangeCodePayload {
+        user_id: Uuid::new_v4(),
+        email: "expired@example.com".to_string(),
+        role: "member".to_string(),
+        org_id: Some(Uuid::new_v4()),
+        created_at: chrono::Utc::now().timestamp() - 120,
+    };
+    let mut redis_conn = app
+        .redis_pool
+        .get()
+        .await
+        .expect("Failed to get Redis connection");
+    let _: () = redis_conn
+        .set_ex(
+            format!("rustchat:oauth:code:{expired_code}"),
+            serde_json::to_string(&expired_payload).expect("Failed to serialize payload"),
+            60u64,
+        )
+        .await
+        .expect("Failed to seed expired exchange code");
+
+    let expired = app
+        .api_client
+        .post(&exchange_url)
+        .header("X-Forwarded-For", &exchange_ip)
+        .json(&json!({ "code": expired_code }))
+        .send()
+        .await
+        .expect("Failed expired-code request");
+    assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Test WebSocket token handling
 #[tokio::test]
 async fn test_websocket_token_sources() {
-    // Test: Connect with token in Authorization header
-    // Expect: Success
+    let app = spawn_app().await;
+    let token = create_test_user_token(&app).await;
+    let ws_base = app.address.replacen("http://", "ws://", 1);
+    let ws_url = format!("{}/api/v1/ws", ws_base);
 
-    // Test: Connect with token in query param (when disabled)
-    // Expect: 401 Unauthorized
+    // Authorization header works.
+    let mut auth_req = ws_url
+        .clone()
+        .into_client_request()
+        .expect("Failed to build WS request");
+    auth_req
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    auth_req
+        .headers_mut()
+        .insert("X-Forwarded-For", unique_test_ip().parse().unwrap());
+    let (mut auth_socket, _) = connect_async(auth_req)
+        .await
+        .expect("Authorization header websocket connection should succeed");
+    auth_socket
+        .close(None)
+        .await
+        .expect("Failed to close socket");
 
-    // Test: Connect with token in Sec-WebSocket-Protocol
-    // Expect: Success
+    // Query token is rejected.
+    let mut query_req = format!("{ws_url}?token={token}")
+        .into_client_request()
+        .expect("Failed to build query-token WS request");
+    query_req
+        .headers_mut()
+        .insert("X-Forwarded-For", unique_test_ip().parse().unwrap());
+    let query_err = connect_async(query_req)
+        .await
+        .expect_err("Query-token websocket connection should fail");
+    match query_err {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        other => panic!("Expected HTTP error for query token, got {other:?}"),
+    }
+
+    // Sec-WebSocket-Protocol token fallback works.
+    let mut protocol_req = ws_url
+        .into_client_request()
+        .expect("Failed to build protocol-token WS request");
+    protocol_req
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", token.parse().unwrap());
+    protocol_req
+        .headers_mut()
+        .insert("X-Forwarded-For", unique_test_ip().parse().unwrap());
+    let (mut protocol_socket, response) = connect_async(protocol_req)
+        .await
+        .expect("Protocol header websocket connection should succeed");
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        Some(token.as_str())
+    );
+    protocol_socket
+        .close(None)
+        .await
+        .expect("Failed to close protocol socket");
 }
 
 /// Test secret validation at startup

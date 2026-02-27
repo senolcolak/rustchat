@@ -60,9 +60,6 @@ struct VerifyResponse {
     success: bool,
     #[serde(rename = "error-codes")]
     error_codes: Option<Vec<String>>,
-    #[serde(rename = "challenge-ts")]
-    challenge_ts: Option<String>,
-    hostname: Option<String>,
 }
 
 /// Verify a Turnstile token

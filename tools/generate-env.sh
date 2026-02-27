@@ -43,6 +43,8 @@ if [ -f "$ENV_FILE" ]; then
     echo ""
     echo "The following secrets will be regenerated:"
     echo "  • RUSTCHAT_JWT_SECRET (48 bytes base64)"
+    echo "  • RUSTCHAT_JWT_ISSUER (unique issuer ID)"
+    echo "  • RUSTCHAT_JWT_AUDIENCE (audience)"
     echo "  • RUSTCHAT_ENCRYPTION_KEY (48 bytes base64)"
     echo "  • RUSTCHAT_S3_ACCESS_KEY (32 bytes hex)"
     echo "  • RUSTCHAT_S3_SECRET_KEY (64 bytes base64)"
@@ -90,6 +92,8 @@ generate_hex_secret() {
 
 # Generate secrets
 JWT_SECRET=$(generate_base64_secret 48)
+JWT_ISSUER="rustchat-$(generate_hex_secret 8)"
+JWT_AUDIENCE="rustchat-users"
 ENCRYPTION_KEY=$(generate_base64_secret 48)
 S3_ACCESS_KEY=$(generate_hex_secret 16)
 S3_SECRET_KEY=$(generate_base64_secret 48)
@@ -99,6 +103,8 @@ TURN_USERNAME=$(generate_hex_secret 16)
 TURN_CREDENTIAL=$(generate_base64_secret 48)
 
 echo -e "  ${GREEN}✓${NC} JWT_SECRET generated (48 bytes base64)"
+echo -e "  ${GREEN}✓${NC} JWT_ISSUER generated (unique issuer)"
+echo -e "  ${GREEN}✓${NC} JWT_AUDIENCE generated (audience)"
 echo -e "  ${GREEN}✓${NC} ENCRYPTION_KEY generated (48 bytes base64)"
 echo -e "  ${GREEN}✓${NC} S3_ACCESS_KEY generated (32 hex chars)"
 echo -e "  ${GREEN}✓${NC} S3_SECRET_KEY generated (48 bytes base64)"
@@ -113,6 +119,8 @@ echo -e "${BLUE}Creating .env file...${NC}"
 
 # Read .env.example and substitute secrets
 sed -e "s|^RUSTCHAT_JWT_SECRET=.*|RUSTCHAT_JWT_SECRET=$JWT_SECRET|" \
+    -e "s|^RUSTCHAT_JWT_ISSUER=.*|RUSTCHAT_JWT_ISSUER=$JWT_ISSUER|" \
+    -e "s|^RUSTCHAT_JWT_AUDIENCE=.*|RUSTCHAT_JWT_AUDIENCE=$JWT_AUDIENCE|" \
     -e "s|^RUSTCHAT_ENCRYPTION_KEY=.*|RUSTCHAT_ENCRYPTION_KEY=$ENCRYPTION_KEY|" \
     -e "s|^RUSTCHAT_S3_ACCESS_KEY=.*|RUSTCHAT_S3_ACCESS_KEY=$S3_ACCESS_KEY|" \
     -e "s|^RUSTCHAT_S3_SECRET_KEY=.*|RUSTCHAT_S3_SECRET_KEY=$S3_SECRET_KEY|" \
@@ -135,7 +143,8 @@ echo "     nano $ENV_FILE"
 echo ""
 echo "  2. For production deployment, make sure to:"
 echo "     • Set RUSTCHAT_ENVIRONMENT=production"
-echo "     • Configure RUSTCHAT_SITE_URL to your public URL"
+echo "     • Configure RUSTCHAT_SITE_URL to your public URL (must be https://)"
+echo "     • Update RUSTCHAT_CORS_ALLOWED_ORIGINS to https:// origins ONLY"
 echo "     • Update database and Redis connection strings"
 echo "     • Configure S3 endpoint and bucket settings"
 echo "     • Review security settings at the bottom of the file"

@@ -298,11 +298,6 @@ fn default_db_pool_max_lifetime() -> u64 {
 /// Security policy configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct SecurityConfig {
-    /// Deprecated compatibility toggle (query-token auth was removed).
-    /// Any `true` value now fails config validation.
-    #[serde(default = "default_ws_allow_query_token")]
-    pub ws_allow_query_token: bool,
-
     /// OAuth token delivery method. Only `cookie` is supported.
     #[serde(default = "default_oauth_token_delivery")]
     pub oauth_token_delivery: String,
@@ -323,18 +318,12 @@ pub struct SecurityConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            ws_allow_query_token: default_ws_allow_query_token(),
             oauth_token_delivery: default_oauth_token_delivery(),
             rate_limit_enabled: default_rate_limit_enabled(),
             rate_limit_auth_per_minute: default_rate_limit_auth_per_minute(),
             rate_limit_ws_per_minute: default_rate_limit_ws_per_minute(),
         }
     }
-}
-
-fn default_ws_allow_query_token() -> bool {
-    // Secure-by-default: query tokens leak via logs/referrers.
-    false
 }
 
 fn default_oauth_token_delivery() -> String {
@@ -557,10 +546,17 @@ impl Config {
             );
         }
 
-        if self.security.ws_allow_query_token {
-            anyhow::bail!(
-                "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true is no longer supported. WebSocket query-token authentication has been removed."
-            );
+        if let Ok(raw) = std::env::var("RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN") {
+            let enabled = parse_bool_env("RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN", &raw)?;
+            if enabled {
+                anyhow::bail!(
+                    "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true is no longer supported. WebSocket query-token authentication has been removed."
+                );
+            } else {
+                tracing::warn!(
+                    "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN is deprecated and ignored. Remove it from your environment."
+                );
+            }
         }
 
         if self.is_production() {

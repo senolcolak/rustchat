@@ -37,9 +37,6 @@ const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL: &str = "https://api.github.com";
 
-// Google OAuth endpoints (as fallback if discovery fails)
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-
 /// State parameter stored in Redis
 #[derive(Debug, Serialize, Deserialize)]
 struct OAuthStatePayload {
@@ -73,6 +70,7 @@ pub struct OAuthLoginQuery {
 
 /// Token response from OAuth provider
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TokenResponse {
     access_token: String,
     token_type: String,
@@ -84,6 +82,7 @@ struct TokenResponse {
 
 /// User info from OIDC userinfo endpoint
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct UserInfoResponse {
     sub: String,
     email: Option<String>,
@@ -99,6 +98,7 @@ struct UserInfoResponse {
 
 /// Claims from ID token
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct IdTokenClaims {
     iss: String,
     sub: String,
@@ -120,6 +120,7 @@ struct IdTokenClaims {
 
 /// GitHub user info
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GitHubUser {
     id: i64,
     login: String,

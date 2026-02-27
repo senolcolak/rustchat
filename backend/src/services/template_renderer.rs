@@ -433,8 +433,6 @@ pub struct EmailLayout {
 impl EmailLayout {
     /// Apply the layout to rendered content
     pub fn apply(&self, content: &RenderedEmail) -> RenderedEmail {
-        let mut context = RenderContext::new();
-
         // In a real implementation, we'd use Handlebars to inject
         // the content into the layout template
         // For now, simple string replacement

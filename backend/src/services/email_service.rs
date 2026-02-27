@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::models::email::*;
@@ -406,16 +406,15 @@ impl EmailService {
 
         if in_quiet_hours {
             // Calculate when quiet hours end
-            let mut send_after = now;
-            if current_minutes >= start_minutes {
+            let send_after = if current_minutes >= start_minutes {
                 // Same day end
                 let minutes_until_end = (24 * 60 - current_minutes) + end_minutes;
-                send_after = now + Duration::minutes(minutes_until_end as i64);
+                now + Duration::minutes(minutes_until_end as i64)
             } else {
                 // Same day (before midnight)
                 let minutes_until_end = end_minutes - current_minutes;
-                send_after = now + Duration::minutes(minutes_until_end as i64);
-            }
+                now + Duration::minutes(minutes_until_end as i64)
+            };
             return Ok(Some(send_after));
         }
 

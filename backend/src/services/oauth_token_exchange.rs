@@ -3,8 +3,6 @@
 //! Provides one-time code exchange for OAuth callbacks to prevent
 //! token leakage via browser history, logs, and referrers.
 
-use std::time::Duration;
-
 use deadpool_redis::redis::AsyncCommands;
 use uuid::Uuid;
 

@@ -147,6 +147,7 @@ pub struct UpdateStatusRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateMyStatusRequest {
     // Legacy fields for backwards compatibility
+    #[allow(dead_code)]
     #[serde(default)]
     pub user_id: Option<String>,
 
@@ -343,7 +344,7 @@ async fn update_user_status_internal(
     state: &AppState,
     user_id: Uuid,
     status: String,
-    dnd_end_time: Option<i64>,
+    _dnd_end_time: Option<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     // Validate status
     let valid_statuses = ["online", "away", "dnd", "offline"];

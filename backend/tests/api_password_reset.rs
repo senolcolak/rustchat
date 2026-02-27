@@ -92,7 +92,7 @@ async fn setup_site_url(db: &PgPool) {
 #[tokio::test]
 async fn test_request_password_reset_creates_token() {
     let app = spawn_app().await;
-    let (user_id, _) = create_test_user(&app.db_pool, "test_reset@example.com").await;
+    let (_user_id, _) = create_test_user(&app.db_pool, "test_reset@example.com").await;
     setup_mail_provider(&app.db_pool).await;
     setup_site_url(&app.db_pool).await;
 
@@ -171,6 +171,7 @@ async fn test_password_reset_full_flow() {
     .fetch_one(&app.db_pool)
     .await
     .expect("Failed to get token hash");
+    assert!(!token_hash.is_empty());
 
     // For testing, we need to find the raw token - in production this would be from email
     // Since we hash tokens, we'll create a test token directly

@@ -954,6 +954,7 @@ struct AttachDeviceRequest {
     device_id: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     platform: Option<String>,
     // Fields sent by mobile app but not used

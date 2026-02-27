@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::email::{EmailPriority, EnqueueEmailRequest};
+use crate::models::email::EmailPriority;
 use crate::services::email_service::{EmailService, EnqueueOptions};
 
 /// Token validity duration (24 hours)

@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use lettre::{
-    message::{header::ContentType, Mailbox, MessageBuilder},
+    message::Mailbox,
     transport::smtp::authentication::Credentials,
     transport::smtp::client::{Tls, TlsParameters},
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
@@ -533,8 +533,7 @@ impl MailProviderManager {
     }
 
     /// Get a provider by ID
-    pub async fn get(&self, id: uuid::Uuid) -> Option<Box<dyn MailProvider>> {
-        let providers = self.providers.read().await;
+    pub async fn get(&self, _id: uuid::Uuid) -> Option<Box<dyn MailProvider>> {
         // Note: We can't easily clone Box<dyn Trait>, so this would need
         // to be implemented differently for actual usage.
         // For now, this is a placeholder.

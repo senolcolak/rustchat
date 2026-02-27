@@ -1095,6 +1095,7 @@ struct SendTestEmailRequest {
     provider_id: Option<Uuid>,
     to_email: String,
     workflow_key: Option<String>,
+    #[allow(dead_code)]
     template_family_id: Option<Uuid>,
     locale: Option<String>,
     subject: Option<String>,

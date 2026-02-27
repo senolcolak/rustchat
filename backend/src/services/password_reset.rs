@@ -19,9 +19,9 @@ use std::net::IpAddr;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::auth::{hash_password, verify_password};
+use crate::auth::hash_password;
 use crate::error::AppError;
-use crate::models::email::{EmailPriority, WorkflowKey};
+use crate::models::email::EmailPriority;
 use crate::services::email_service::{EmailService, EnqueueOptions};
 
 /// Token validity duration (60 minutes for password reset)
