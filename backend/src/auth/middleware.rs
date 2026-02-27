@@ -30,6 +30,24 @@ impl From<Claims> for AuthUser {
     }
 }
 
+impl AuthUser {
+    pub fn has_role(&self, role: &str) -> bool {
+        self.role.split_whitespace().any(|r| r == role)
+    }
+
+    pub fn is_system_admin(&self) -> bool {
+        self.has_role("system_admin")
+    }
+
+    pub fn is_org_admin(&self) -> bool {
+        self.has_role("org_admin")
+    }
+
+    pub fn is_system_or_org_admin(&self) -> bool {
+        self.is_system_admin() || self.is_org_admin()
+    }
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -93,5 +111,25 @@ pub trait FromRef<T> {
 impl FromRef<AppState> for AppState {
     fn from_ref(input: &AppState) -> Self {
         input.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuthUser;
+    use uuid::Uuid;
+
+    #[test]
+    fn auth_user_role_helpers_support_multi_role_strings() {
+        let user = AuthUser {
+            user_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            role: "system_admin team_admin".to_string(),
+            org_id: None,
+        };
+
+        assert!(user.has_role("system_admin"));
+        assert!(user.is_system_admin());
+        assert!(!user.is_org_admin());
     }
 }

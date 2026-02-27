@@ -169,7 +169,7 @@ async fn update_bookmark(
 
     let owner_id = owner_id.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
-    if owner_id != auth.user_id && auth.role != "admin" {
+    if owner_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only update your own bookmarks".to_string(),
         ));
@@ -230,7 +230,7 @@ async fn delete_bookmark(
 
     let bookmark = bookmark.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
-    if bookmark.owner_id != auth.user_id && auth.role != "admin" {
+    if bookmark.owner_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only delete your own bookmarks".to_string(),
         ));
@@ -276,7 +276,7 @@ async fn reorder_bookmark(
 
     let bookmark = bookmark.ok_or_else(|| AppError::NotFound("Bookmark not found".to_string()))?;
 
-    if bookmark.owner_id != auth.user_id && auth.role != "admin" {
+    if bookmark.owner_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only reorder your own bookmarks".to_string(),
         ));

@@ -395,7 +395,7 @@ async fn update_channel(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && auth.role != "system_admin" {
+    if member.role != "admin" && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Not an admin of this channel".to_string(),
         ));
@@ -447,7 +447,7 @@ async fn archive_channel(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && auth.role != "system_admin" {
+    if member.role != "admin" && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Not an admin of this channel".to_string(),
         ));
@@ -518,7 +518,7 @@ async fn add_member(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-            if member.role != "admin" && auth.role != "system_admin" {
+            if member.role != "admin" && !auth.is_system_admin() {
                 return Err(AppError::Forbidden(
                     "Cannot join private channel without invite".to_string(),
                 ));
@@ -535,7 +535,7 @@ async fn add_member(
                 .await?
                 .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-        if member.role != "admin" && auth.role != "system_admin" {
+        if member.role != "admin" && !auth.is_system_admin() {
             return Err(AppError::Forbidden(
                 "Not an admin of this channel".to_string(),
             ));
@@ -604,7 +604,7 @@ async fn remove_member(
                 .await?
                 .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-        if member.role != "admin" && auth.role != "system_admin" {
+        if member.role != "admin" && !auth.is_system_admin() {
             return Err(AppError::Forbidden(
                 "Not an admin of this channel".to_string(),
             ));

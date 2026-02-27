@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { Smile, Paperclip, Send, X, File as FileIcon, Video, Phone, Type } from 'lucide-vue-next';
+import { Smile, Paperclip, Send, X, File as FileIcon, Phone, Type } from 'lucide-vue-next';
 import { useToast } from '../../composables/useToast';
 import { filesApi, type FileUploadResponse } from '../../api/files';
 import FileUploader from '../atomic/FileUploader.vue';
@@ -9,18 +9,16 @@ import FormattingToolbar from './FormattingToolbar.vue';
 import MarkdownPreview from './MarkdownPreview.vue';
 import MentionAutocomplete from './MentionAutocomplete.vue';
 import { useTeamStore } from '../../stores/teams';
-import { useConfigStore } from '../../stores/config';
 import { useCallsStore } from '../../stores/calls';
 import { useChannelStore } from '../../stores/channels';
 
-const emit = defineEmits(['send', 'typing', 'startCall', 'startAudioCall'])
+const emit = defineEmits(['send', 'typing', 'startAudioCall'])
 const content = ref('')
 const showEmojiPicker = ref(false)
 const showPreview = ref(false)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const toast = useToast()
 const teamStore = useTeamStore()
-const configStore = useConfigStore()
 const callsStore = useCallsStore()
 const channelStore = useChannelStore()
 
@@ -464,15 +462,6 @@ function formatFileSize(bytes: number): string {
                     <Type class="w-4.5 h-4.5" />
                 </button>
 
-                <button
-                  v-if="configStore.siteConfig.mirotalk_enabled"
-                  @click="$emit('startCall')"
-                  class="p-2 hover:bg-green-500/10 hover:text-green-500 rounded-lg transition-colors"
-                  title="Start video call"
-                >
-                    <Video class="w-4.5 h-4.5" />
-                </button>
-                
                 <!-- Native Audio Call Button -->
                 <button
                   v-if="!callsStore.isInCall"

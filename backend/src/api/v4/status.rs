@@ -328,7 +328,7 @@ async fn update_user_status(
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
     // Users can only update their own status unless admin
-    if target_user_id != auth.user_id && auth.role != "admin" {
+    if target_user_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only update your own status".to_string(),
         ));
@@ -490,7 +490,7 @@ async fn update_user_custom_status(
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
     // Users can only update their own custom status unless admin
-    if target_user_id != auth.user_id && auth.role != "admin" {
+    if target_user_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only update your own custom status".to_string(),
         ));
@@ -534,7 +534,7 @@ async fn clear_user_custom_status(
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
     // Users can only clear their own custom status unless admin
-    if target_user_id != auth.user_id && auth.role != "admin" {
+    if target_user_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only clear your own custom status".to_string(),
         ));
@@ -556,7 +556,7 @@ async fn get_recent_custom_statuses(
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
     // Users can only get their own recent statuses unless admin
-    if target_user_id != auth.user_id && auth.role != "admin" {
+    if target_user_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only get your own recent custom statuses".to_string(),
         ));
@@ -591,7 +591,7 @@ async fn delete_recent_custom_status(
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
     // Users can only delete their own recent statuses unless admin
-    if target_user_id != auth.user_id && auth.role != "admin" {
+    if target_user_id != auth.user_id && !auth.has_role("admin") {
         return Err(AppError::Forbidden(
             "Can only delete your own recent custom statuses".to_string(),
         ));

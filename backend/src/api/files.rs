@@ -246,7 +246,7 @@ async fn delete_file(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     // Only uploader or admin can delete
-    if file.uploader_id != auth.user_id && auth.role != "system_admin" {
+    if file.uploader_id != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden("Cannot delete this file".to_string()));
     }
 

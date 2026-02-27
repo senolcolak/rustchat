@@ -20,7 +20,6 @@ mod teams;
 mod unreads;
 mod users;
 mod v4;
-mod video;
 mod websocket_core;
 mod ws;
 
@@ -226,10 +225,6 @@ pub fn router(
         .merge(calls::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(oauth::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
         .merge(site::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)))
-        .nest(
-            "/video",
-            video::router().layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT)),
-        )
         // WebSocket endpoint doesn't need body limit
         .merge(ws::router());
 

@@ -20,25 +20,20 @@ import TypingIndicator from '../../components/channel/TypingIndicator.vue';
 import ActiveCall from '../../components/calls/ActiveCall.vue';
 import IncomingCallModal from '../../components/calls/IncomingCallModal.vue';
 import { useUIStore } from '../../stores/ui';
-import callsApi from '../../api/calls';
-import { useConfigStore } from '../../stores/config';
+
+
 
 const channelStore = useChannelStore();
 const messageStore = useMessageStore();
 const unreadStore = useUnreadStore();
 const callsStore = useCallsStore();
 const uiStore = useUIStore();
-const configStore = useConfigStore();
 const { sendTyping, sendMessage, subscribe, unsubscribe } = useWebSocket();
 
 // Load active calls on mount
 onMounted(async () => {
-    // Check if calls plugin is enabled
-    const enabled = await callsApi.getEnabled()
-    if (enabled) {
-        await callsStore.loadConfig()
-        await callsStore.loadCalls()
-    }
+    await callsStore.loadConfig()
+    await callsStore.loadCalls()
 })
 
 const currentChannel = computed(() => channelStore.currentChannel);
@@ -117,21 +112,6 @@ function handleChannelDeleted() {
     channelStore.removeChannel(currentChannel.value?.id || '');
 }
 
-async function onStartCall() {
-    if (!channelId.value || !configStore.siteConfig.mirotalk_enabled) return;
-    try {
-        const { data } = await callsApi.createMeeting('channel', channelId.value);
-        if (data.mode === 'embed_iframe') {
-            uiStore.openVideoCall(data.meeting_url);
-        } else {
-            window.open(data.meeting_url, '_blank', 'noopener,noreferrer');
-        }
-    } catch (e) {
-        console.error('Failed to start call', e);
-        alert('Failed to start call');
-    }
-}
-
 async function onStartAudioCall() {
     if (!channelId.value) return;
     
@@ -197,7 +177,6 @@ async function onStartAudioCall() {
                   <MessageComposer 
                     @send="onSendMessage" 
                     @typing="onTyping" 
-                    @startCall="onStartCall"
                     @startAudioCall="onStartAudioCall"
                   />
               </template>

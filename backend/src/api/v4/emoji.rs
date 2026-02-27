@@ -347,7 +347,7 @@ pub async fn delete_emoji(
     .ok_or_else(|| AppError::NotFound("Emoji not found".to_string()))?;
 
     // Authorization
-    if emoji.creator_id != auth.user_id && auth.role != "system_admin" {
+    if emoji.creator_id != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Cannot delete emoji created by another user".to_string(),
         ));

@@ -259,7 +259,7 @@ async fn update_post(
     .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
 
     // Only author can edit
-    if post.user_id != auth.user_id && auth.role != "system_admin" {
+    if post.user_id != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden("Cannot edit this post".to_string()));
     }
 
@@ -320,7 +320,7 @@ async fn delete_post(
     .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
 
     // Only author or admin can delete
-    if post.user_id != auth.user_id && auth.role != "system_admin" {
+    if post.user_id != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden("Cannot delete this post".to_string()));
     }
 
@@ -544,7 +544,7 @@ async fn pin_post(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && auth.role != "system_admin" {
+    if member.role != "admin" && !auth.is_system_admin() {
         return Err(AppError::Forbidden("Only admins can pin posts".to_string()));
     }
 
@@ -611,7 +611,7 @@ async fn unpin_post(
             .await?
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
-    if member.role != "admin" && auth.role != "system_admin" {
+    if member.role != "admin" && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Only admins can unpin posts".to_string(),
         ));

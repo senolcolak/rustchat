@@ -67,9 +67,9 @@ async fn list_commands(
         "id": "builtin-call",
         "trigger": "call",
         "display_name": "Call",
-        "description": "Start a Mirotalk call",
+        "description": "Start a call",
         "auto_complete": true,
-        "auto_complete_desc": "Start a Mirotalk call",
+        "auto_complete_desc": "Start a call",
         "auto_complete_hint": "[end]",
     })];
 
@@ -146,7 +146,7 @@ async fn autocomplete_suggestions(
             "complete": "/call",
             "suggestion": "/call",
             "hint": "[end]",
-            "description": "Start a Mirotalk call",
+            "description": "Start a call",
         })]
     } else {
         vec![]

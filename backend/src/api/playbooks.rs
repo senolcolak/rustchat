@@ -171,7 +171,7 @@ async fn update_playbook(
         .await?
         .ok_or_else(|| AppError::NotFound("Playbook not found".to_string()))?;
 
-    if current.created_by != auth.user_id && auth.role != "system_admin" {
+    if current.created_by != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Only the creator can edit this playbook".to_string(),
         ));
@@ -218,7 +218,7 @@ async fn delete_playbook(
         .await?
         .ok_or_else(|| AppError::NotFound("Playbook not found".to_string()))?;
 
-    if current != auth.user_id && auth.role != "system_admin" {
+    if current != auth.user_id && !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Only the creator can archive this playbook".to_string(),
         ));

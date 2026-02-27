@@ -171,7 +171,7 @@ async fn add_member(
     Json(payload): Json<AddTeamMember>,
 ) -> Result<Json<TeamMember>, AppError> {
     // Permission check
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.is_system_or_org_admin() {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)
@@ -222,7 +222,7 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<(), AppError> {
     // Permission check
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.is_system_or_org_admin() {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)

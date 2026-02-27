@@ -11,7 +11,7 @@ pub mod email;
 pub mod enterprise;
 pub mod file;
 pub mod integration;
-pub mod mirotalk;
+
 pub mod organization;
 pub mod playbook;
 pub mod post;
@@ -32,7 +32,7 @@ pub use scheduled_post::*;
 pub use enterprise::*;
 pub use file::*;
 pub use integration::*;
-pub use mirotalk::*;
+
 pub use organization::*;
 pub use playbook::*;
 pub use post::*;

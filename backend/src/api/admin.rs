@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
+use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 use crate::models::{
     AddTeamMember, AuditLog, AuditLogQuery, CreateChannel, CreateRetentionPolicy, CreateSsoConfig,
     Permission, RetentionPolicy, ServerConfig, ServerConfigResponse, SsoConfig, SsoConfigResponse,
@@ -19,6 +20,7 @@ use crate::models::{
 use crate::services::email_provider::{EmailAddress, EmailContent, MailProvider, SmtpProvider};
 use crate::services::oidc_discovery::OidcDiscoveryService;
 use sqlx::FromRow;
+use std::time::Duration;
 
 /// Build admin routes
 pub fn router() -> Router<AppState> {
@@ -107,14 +109,14 @@ pub fn router() -> Router<AppState> {
 
 /// Check if user is admin
 pub fn require_admin(auth: &AuthUser) -> ApiResult<()> {
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.is_system_or_org_admin() {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
     Ok(())
 }
 
 pub fn require_global_admin(auth: &AuthUser) -> ApiResult<()> {
-    if auth.role != "system_admin" {
+    if !auth.is_system_admin() {
         return Err(AppError::Forbidden(
             "Global admin access required".to_string(),
         ));
@@ -652,15 +654,30 @@ async fn test_sso_config(
 /// Test GitHub OAuth configuration
 async fn test_github_config(config: &SsoConfig) -> ApiResult<Json<SsoTestResult>> {
     let client = reqwest::Client::new();
+    let retry_config = RetryConfig {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(150),
+        max_delay: Duration::from_secs(2),
+        backoff_multiplier: 2.0,
+        retry_if: RetryCondition::Default,
+    };
 
     // Test that we can reach GitHub's token endpoint
     // We can't actually test authentication without a valid code,
     // but we can verify the endpoint is reachable
-    let response = client
-        .get("https://api.github.com")
-        .header("User-Agent", "RustChat-SSO-Test")
-        .send()
-        .await;
+    let response = send_reqwest_with_retry(
+        client
+            .get("https://api.github.com")
+            .header("User-Agent", "RustChat-SSO-Test"),
+        &retry_config,
+        |e| AppError::ExternalService(format!("Failed to reach GitHub API: {}", e)),
+        || {
+            AppError::Internal(
+                "Failed to reach GitHub API: request could not be cloned for retry".to_string(),
+            )
+        },
+    )
+    .await;
 
     match response {
         Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 401 => {
@@ -683,7 +700,7 @@ async fn test_github_config(config: &SsoConfig) -> ApiResult<Json<SsoTestResult>
         })),
         Err(e) => Ok(Json(SsoTestResult {
             success: false,
-            message: format!("Failed to reach GitHub API: {}", e),
+            message: e.to_string(),
             details: None,
         })),
     }
@@ -758,7 +775,7 @@ async fn list_retention_policies(
         .bind(org_id)
         .fetch_all(&state.db)
         .await?
-    } else if auth.role == "system_admin" {
+    } else if auth.is_system_admin() {
         sqlx::query_as("SELECT * FROM retention_policies ORDER BY created_at DESC")
             .fetch_all(&state.db)
             .await?

@@ -25,14 +25,9 @@ RUSTCHAT_ENVIRONMENT=production  # Enables strict validation
 ### 2. WebSocket Token Transport Security
 **Files:** `backend/src/api/websocket_core.rs`, `backend/src/api/ws.rs`, `backend/src/api/v4/websocket.rs`
 
-- Configurable token sources (query param vs Authorization header)
-- `TokenResolutionConfig` for security hardening
-- Query token disabled in production (`ws_allow_query_token=false`)
-
-**Config:**
-```bash
-RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false  # Production
-```
+- Secure token sources only: Authorization header and `Sec-WebSocket-Protocol`
+- Query-token authentication removed from runtime resolution
+- Startup validation fails if `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true`
 
 ### 3. OAuth Secure Token Delivery
 **Files:** `backend/src/services/oauth_token_exchange.rs`, `backend/src/api/oauth.rs`
@@ -93,8 +88,7 @@ RUSTCHAT_SECURITY_RATE_LIMIT_WS_PER_MINUTE=30
 
 **Redis Keys:**
 - `rustchat:presence:user:{user_id}:connections`
-- `rustchat:conn:count:{user_id}`
-- `rustchat:conn:heartbeat:{user_id}:{connection_id}`
+- `rustchat:presence:user:{user_id}:connection:{connection_id}:heartbeat`
 
 ### 3. Database Pool Tuning
 **Files:** `backend/src/config/mod.rs`, `backend/src/db/mod.rs`
@@ -225,7 +219,6 @@ let result = with_resilience(
 RUSTCHAT_ENVIRONMENT=production
 RUSTCHAT_JWT_SECRET="$(openssl rand -base64 48)"
 RUSTCHAT_ENCRYPTION_KEY="$(openssl rand -base64 48)"
-RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false
 RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie
 RUSTCHAT_SECURITY_RATE_LIMIT_ENABLED=true
 
@@ -323,7 +316,6 @@ wrk -t12 -c400 -d30s http://localhost:3000/api/v1/health
 2. **Update environment:**
    ```bash
    export RUSTCHAT_ENVIRONMENT=production
-   export RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false
    ```
 
 3. **Test OAuth flow** (if using OAuth):

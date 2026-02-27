@@ -361,14 +361,8 @@ struct HostMakeRequest {
     new_host_id: String,
 }
 
-fn is_system_admin(auth: &MmAuthUser) -> bool {
-    auth.role
-        .split_whitespace()
-        .any(|role| role == "system_admin")
-}
-
 fn can_manage_call(auth: &MmAuthUser, call: &CallState) -> bool {
-    call.host_id == auth.user_id || is_system_admin(auth)
+    call.host_id == auth.user_id || auth.is_system_admin()
 }
 
 fn is_host_session_active(_state: &AppState, call: &CallState) -> bool {

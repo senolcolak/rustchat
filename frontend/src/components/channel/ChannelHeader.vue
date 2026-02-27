@@ -5,8 +5,6 @@ import { useCallsStore } from '../../stores/calls';
 import { useChannelStore } from '../../stores/channels';
 import { useAuthStore } from '../../stores/auth';
 import { useUIStore } from '../../stores/ui';
-import { useConfigStore } from '../../stores/config';
-import callsApi from '../../api/calls';
 
 const props = defineProps<{
   name: string
@@ -24,8 +22,6 @@ const callsStore = useCallsStore()
 const channelStore = useChannelStore()
 const authStore = useAuthStore()
 const uiStore = useUIStore()
-const configStore = useConfigStore()
-
 const showMenu = ref(false)
 
 const hasActiveCall = computed(() => {
@@ -35,24 +31,6 @@ const hasActiveCall = computed(() => {
 const isInCurrentCall = computed(() => {
     return callsStore.isInCall && callsStore.currentCall?.channelId === props.channelId
 })
-
-const startCall = async () => {
-    if (configStore.siteConfig.mirotalk_enabled) {
-        try {
-             // Use 'channel' scope since we have channelId
-            const { data } = await callsApi.createMeeting('channel', props.channelId);
-
-            if (data.mode === 'embed_iframe') {
-                uiStore.openVideoCall(data.meeting_url);
-            } else {
-                window.open(data.meeting_url, '_blank', 'noopener,noreferrer');
-            }
-        } catch (e) {
-            console.error('Failed to start video call', e);
-            alert('Failed to start video call');
-        }
-    }
-}
 
 const startNativeCall = async () => {
     if (!props.channelId) return
@@ -204,15 +182,6 @@ const handleLeave = async () => {
             <Phone class="w-4 h-4" />
         </button>
 
-        <!-- MiroTalk Video Call Button -->
-        <button 
-          v-if="configStore.siteConfig.mirotalk_enabled"
-          @click="startCall"
-          class="w-8 h-8 flex items-center justify-center hover:bg-blue-50 dark:hover:bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-full transition-all duration-200"
-          title="Start video call"
-        >
-            <PhoneCall class="w-4 h-4" />
-        </button>
         <button 
           @click="toggleView('search')"
           class="w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200"

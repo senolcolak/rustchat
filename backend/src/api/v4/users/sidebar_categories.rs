@@ -120,7 +120,7 @@ pub(crate) fn resolve_user_id(user_id_str: &str, auth: &MmAuthUser) -> ApiResult
     let user_id = parse_mm_or_uuid(user_id_str)
         .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
 
-    if user_id != auth.user_id && auth.role != "system_admin" && auth.role != "org_admin" {
+    if user_id != auth.user_id && !auth.is_system_or_org_admin() {
         return Err(AppError::Forbidden(
             "Cannot access another user's categories".to_string(),
         ));

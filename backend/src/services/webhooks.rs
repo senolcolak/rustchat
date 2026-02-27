@@ -5,8 +5,10 @@
 
 use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
+use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 use crate::models::{IncomingWebhook, OutgoingWebhook, OutgoingWebhookPayload, WebhookPayload};
 use crate::services::posts;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Execute an incoming webhook - creates a post in the target channel
@@ -119,13 +121,27 @@ pub async fn check_outgoing_triggers(
 
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
-                    let result = client
+                    let request = client
                         .post(&url)
                         .header("Content-Type", &content_type)
                         .json(&payload)
-                        .timeout(std::time::Duration::from_secs(30))
-                        .send()
-                        .await;
+                        .timeout(Duration::from_secs(30));
+
+                    let retry_config = RetryConfig {
+                        max_attempts: 3,
+                        initial_delay: Duration::from_millis(150),
+                        max_delay: Duration::from_secs(2),
+                        backoff_multiplier: 2.0,
+                        retry_if: RetryCondition::Default,
+                    };
+
+                    let result = send_reqwest_with_retry(
+                        request,
+                        &retry_config,
+                        |e| e.to_string(),
+                        || "failed to clone outgoing webhook request".to_string(),
+                    )
+                    .await;
 
                     if let Err(e) = result {
                         tracing::warn!("Outgoing webhook to {} failed: {}", url, e);

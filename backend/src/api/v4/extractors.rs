@@ -33,6 +33,24 @@ impl From<Claims> for MmAuthUser {
     }
 }
 
+impl MmAuthUser {
+    pub fn has_role(&self, role: &str) -> bool {
+        self.role.split_whitespace().any(|r| r == role)
+    }
+
+    pub fn is_system_admin(&self) -> bool {
+        self.has_role("system_admin")
+    }
+
+    pub fn is_org_admin(&self) -> bool {
+        self.has_role("org_admin")
+    }
+
+    pub fn is_system_or_org_admin(&self) -> bool {
+        self.is_system_admin() || self.is_org_admin()
+    }
+}
+
 impl<S> FromRequestParts<S> for MmAuthUser
 where
     S: Send + Sync,
@@ -85,5 +103,25 @@ where
         ensure_user_access_active(&app_state, token_data.claims.sub).await?;
 
         Ok(MmAuthUser::from(token_data.claims))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MmAuthUser;
+    use uuid::Uuid;
+
+    #[test]
+    fn mm_auth_user_role_helpers_support_multi_role_strings() {
+        let user = MmAuthUser {
+            user_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            role: "member admin".to_string(),
+            org_id: None,
+        };
+
+        assert!(user.has_role("admin"));
+        assert!(!user.is_system_admin());
+        assert!(!user.is_org_admin());
     }
 }

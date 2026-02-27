@@ -14,11 +14,13 @@ use axum::{
 };
 use deadpool_redis::redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::AppState;
 use crate::crypto;
 use crate::error::{ApiResult, AppError};
+use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 use crate::models::{OAuthProviderInfo, SsoConfig, SsoProviderType};
 use crate::services::oauth_token_exchange::create_exchange_code;
 use crate::services::oidc_discovery::{find_signing_key, OidcDiscoveryService};
@@ -254,6 +256,27 @@ fn append_query_param(path: &str, key: &str, value: &str) -> String {
 /// Append exchange code to redirect URL
 fn append_exchange_code(path: &str, code: &str) -> String {
     append_query_param(path, "code", code)
+}
+
+async fn send_with_retry(
+    request: reqwest::RequestBuilder,
+    context: &'static str,
+) -> Result<reqwest::Response, AppError> {
+    let retry_config = RetryConfig {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(150),
+        max_delay: Duration::from_secs(2),
+        backoff_multiplier: 2.0,
+        retry_if: RetryCondition::Default,
+    };
+
+    send_reqwest_with_retry(
+        request,
+        &retry_config,
+        move |e| AppError::ExternalService(format!("{}: {}", context, e)),
+        move || AppError::Internal(format!("Failed to clone request builder: {}", context)),
+    )
+    .await
 }
 
 /// Generate PKCE code verifier (43-128 chars per RFC 7636)
@@ -709,19 +732,20 @@ async fn exchange_github_token(
     let client = reqwest::Client::new();
 
     // Exchange code for token
-    let token_response = client
-        .post(GITHUB_TOKEN_URL)
-        .header("Accept", "application/json")
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-        ])
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("GitHub token exchange failed: {}", e)))?;
+    let token_response = send_with_retry(
+        client
+            .post(GITHUB_TOKEN_URL)
+            .header("Accept", "application/json")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+            ]),
+        "GitHub token exchange failed",
+    )
+    .await?;
 
     if !token_response.status().is_success() {
         let status = token_response.status();
@@ -738,13 +762,14 @@ async fn exchange_github_token(
         .map_err(|e| AppError::Internal(format!("Failed to parse GitHub token: {}", e)))?;
 
     // Get user info
-    let user_response = client
-        .get(format!("{}/user", GITHUB_API_URL))
-        .header("Authorization", format!("token {}", tokens.access_token))
-        .header("User-Agent", "RustChat")
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("GitHub user request failed: {}", e)))?;
+    let user_response = send_with_retry(
+        client
+            .get(format!("{}/user", GITHUB_API_URL))
+            .header("Authorization", format!("token {}", tokens.access_token))
+            .header("User-Agent", "RustChat"),
+        "GitHub user request failed",
+    )
+    .await?;
 
     if !user_response.status().is_success() {
         return Err(AppError::Internal(
@@ -762,13 +787,14 @@ async fn exchange_github_token(
         github_user.email.unwrap()
     } else {
         // Fetch emails from /user/emails endpoint
-        let emails_response = client
-            .get(format!("{}/user/emails", GITHUB_API_URL))
-            .header("Authorization", format!("token {}", tokens.access_token))
-            .header("User-Agent", "RustChat")
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("GitHub emails request failed: {}", e)))?;
+        let emails_response = send_with_retry(
+            client
+                .get(format!("{}/user/emails", GITHUB_API_URL))
+                .header("Authorization", format!("token {}", tokens.access_token))
+                .header("User-Agent", "RustChat"),
+            "GitHub emails request failed",
+        )
+        .await?;
 
         if !emails_response.status().is_success() {
             return Err(AppError::Internal(
@@ -795,16 +821,17 @@ async fn exchange_github_token(
 
     // Check GitHub organization/team restrictions if configured
     if let Some(ref org) = config.github_org {
-        let org_check = client
-            .get(format!(
-                "{}/orgs/{}/members/{}",
-                GITHUB_API_URL, org, github_user.login
-            ))
-            .header("Authorization", format!("token {}", tokens.access_token))
-            .header("User-Agent", "RustChat")
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("GitHub org check failed: {}", e)))?;
+        let org_check = send_with_retry(
+            client
+                .get(format!(
+                    "{}/orgs/{}/members/{}",
+                    GITHUB_API_URL, org, github_user.login
+                ))
+                .header("Authorization", format!("token {}", tokens.access_token))
+                .header("User-Agent", "RustChat"),
+            "GitHub org check failed",
+        )
+        .await?;
 
         if org_check.status() != reqwest::StatusCode::NO_CONTENT {
             return Err(AppError::Forbidden(format!(
@@ -816,13 +843,14 @@ async fn exchange_github_token(
         // Check team if specified
         if let Some(ref team) = config.github_team {
             // First get the team ID by name
-            let teams_response = client
-                .get(format!("{}/orgs/{}/teams", GITHUB_API_URL, org))
-                .header("Authorization", format!("token {}", tokens.access_token))
-                .header("User-Agent", "RustChat")
-                .send()
-                .await
-                .map_err(|e| AppError::Internal(format!("GitHub teams request failed: {}", e)))?;
+            let teams_response = send_with_retry(
+                client
+                    .get(format!("{}/orgs/{}/teams", GITHUB_API_URL, org))
+                    .header("Authorization", format!("token {}", tokens.access_token))
+                    .header("User-Agent", "RustChat"),
+                "GitHub teams request failed",
+            )
+            .await?;
 
             if !teams_response.status().is_success() {
                 return Err(AppError::Internal(
@@ -843,16 +871,17 @@ async fn exchange_github_token(
                     AppError::Internal(format!("GitHub team '{}' not found in org '{}'", team, org))
                 })?;
 
-            let team_check = client
-                .get(format!(
-                    "{}/teams/{}/memberships/{}",
-                    GITHUB_API_URL, team_id, github_user.login
-                ))
-                .header("Authorization", format!("token {}", tokens.access_token))
-                .header("User-Agent", "RustChat")
-                .send()
-                .await
-                .map_err(|e| AppError::Internal(format!("GitHub team check failed: {}", e)))?;
+            let team_check = send_with_retry(
+                client
+                    .get(format!(
+                        "{}/teams/{}/memberships/{}",
+                        GITHUB_API_URL, team_id, github_user.login
+                    ))
+                    .header("Authorization", format!("token {}", tokens.access_token))
+                    .header("User-Agent", "RustChat"),
+                "GitHub team check failed",
+            )
+            .await?;
 
             if !team_check.status().is_success() {
                 return Err(AppError::Forbidden(format!(
@@ -909,12 +938,13 @@ async fn exchange_oidc_token(
     }
 
     // Exchange code for tokens
-    let token_response = client
-        .post(&discovery_result.token_endpoint)
-        .form(&form_params)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("OIDC token exchange failed: {}", e)))?;
+    let token_response = send_with_retry(
+        client
+            .post(&discovery_result.token_endpoint)
+            .form(&form_params),
+        "OIDC token exchange failed",
+    )
+    .await?;
 
     if !token_response.status().is_success() {
         let status = token_response.status();
@@ -958,12 +988,11 @@ async fn exchange_oidc_token(
         }
     } else if let Some(ref userinfo_url) = discovery_result.userinfo_endpoint {
         // Fall back to userinfo endpoint
-        let userinfo_response = client
-            .get(userinfo_url)
-            .bearer_auth(&tokens.access_token)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("UserInfo request failed: {}", e)))?;
+        let userinfo_response = send_with_retry(
+            client.get(userinfo_url).bearer_auth(&tokens.access_token),
+            "UserInfo request failed",
+        )
+        .await?;
 
         if !userinfo_response.status().is_success() {
             return Err(AppError::Internal("Failed to fetch UserInfo".to_string()));

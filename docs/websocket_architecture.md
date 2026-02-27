@@ -50,7 +50,7 @@ Both adapters now use `backend/src/api/websocket_core.rs` for:
 
 | Category | v1 (`/api/v1/ws`) | v4 (`/api/v4/websocket`) |
 |---|---|---|
-| Auth at handshake | token query/protocol/auth header | token query/auth header |
+| Auth at handshake | protocol/auth header | protocol/auth header |
 | Auth after connect | n/a | `action=authentication_challenge` |
 | Subscribe | `event=subscribe_channel` | same envelope command |
 | Unsubscribe | `event=unsubscribe_channel` | same envelope command |

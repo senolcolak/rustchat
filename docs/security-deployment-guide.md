@@ -27,10 +27,7 @@ RUSTCHAT_ENCRYPTION_KEY="another-256-bit-secret-for-encryption-ops"
 # Required: Set to production
 RUSTCHAT_ENVIRONMENT=production
 
-# Required: Disable insecure token-in-query for WebSockets
-RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false
-
-# Recommended: Use secure OAuth token delivery (one-time codes)
+# Required: Secure OAuth token delivery (one-time codes only)
 RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie
 
 # Recommended: Enable rate limiting (enabled by default)
@@ -62,17 +59,14 @@ RUSTCHAT_JWT_SECRET=$(head -c 48 /dev/urandom | base64)
 
 ### WebSocket Authentication
 
-By default, RustChat accepts authentication tokens via:
-1. Query parameter: `?token=xyz` (⚠️ **Insecure - logs may capture this**)
-2. Authorization header: `Authorization: Bearer xyz` (✅ **Secure**)
-3. Sec-WebSocket-Protocol header (✅ **Secure**)
+RustChat accepts authentication tokens via:
+1. Authorization header: `Authorization: Bearer xyz` (✅ **Secure**)
+2. Sec-WebSocket-Protocol header (✅ **Secure**)
 
-**Production Configuration:**
-```bash
-RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false
-```
+Query-token authentication is removed and rejected at startup if
+`RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true`.
 
-When disabled, WebSocket connections MUST use the Authorization header:
+WebSocket connections MUST use secure headers:
 ```javascript
 const ws = new WebSocket('wss://chat.example.com/api/v1/ws');
 // Token is sent in the handshake headers, not visible in URL
@@ -80,30 +74,11 @@ const ws = new WebSocket('wss://chat.example.com/api/v1/ws');
 
 ### OAuth Token Delivery
 
-Two modes are supported:
+Only secure mode is supported: `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie`.
 
-#### 1. Legacy Mode (Insecure) - `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=query`
-- Token appended to redirect URL: `/login?token=xyz`
-- **Risks:** Token appears in browser history, server logs, referrer headers
-- Only use for mobile apps or backward compatibility
-
-#### 2. Secure Mode (Recommended) - `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie`
 - One-time exchange code in URL: `/login?code=xyz`
-- Client exchanges code for token via POST request
-- **Benefits:** Token never appears in URLs
-
-**Migration Path:**
-1. Set `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie`
-2. Update frontend to handle exchange codes:
-   ```javascript
-   // On OAuth callback with ?code=xyz
-   const response = await fetch('/api/v1/oauth2/exchange', {
-     method: 'POST',
-     headers: { 'Content-Type': 'application/json' },
-     body: JSON.stringify({ code })
-   });
-   const { token } = await response.json();
-   ```
+- Client exchanges code for token via `POST /api/v1/oauth2/exchange`
+- Token never appears in redirect URLs
 
 ---
 
@@ -261,8 +236,7 @@ Before going to production:
 - [ ] Set `RUSTCHAT_ENVIRONMENT=production`
 - [ ] Generate strong JWT_SECRET (≥32 chars, random)
 - [ ] Generate strong ENCRYPTION_KEY (different from JWT_SECRET)
-- [ ] Set `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false`
-- [ ] Set `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie` (if frontend supports it)
+- [ ] Set `RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie`
 - [ ] Configure CORS with specific origins
 - [ ] Enable TLS 1.2+ only
 - [ ] Configure rate limiting
@@ -278,7 +252,7 @@ Before going to production:
 If currently running with insecure defaults:
 
 1. **Immediate (P0):** Rotate to strong secrets
-2. **Week 1:** Deploy with `WS_ALLOW_QUERY_TOKEN=false`
+2. **Week 1:** Update frontend to use header-based WebSocket auth
 3. **Week 2:** Update frontend to support OAuth exchange codes
 4. **Week 3:** Deploy with `OAUTH_TOKEN_DELIVERY=cookie`
 

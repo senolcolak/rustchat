@@ -53,14 +53,6 @@ class OAuthService {
       throw new Error(`OAuth error: ${error}`);
     }
     
-    // Legacy mode: token directly in URL (deprecated)
-    const legacyToken = urlParams.get('token');
-    if (legacyToken) {
-      console.warn('Using legacy OAuth flow - consider upgrading to exchange code flow');
-      this.storeToken(legacyToken);
-      return legacyToken;
-    }
-    
     // Secure mode: exchange code for token
     const code = urlParams.get('code');
     if (!code) {
@@ -325,27 +317,17 @@ export function Login() {
 }
 ```
 
-## Migration from Legacy Flow
-
-If you're currently using the legacy flow (token in URL):
+## Secure Integration Checklist
 
 ### 1. Backend Configuration
 
 ```bash
-# Enable secure mode
+# Required secure mode
 RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=cookie
 ```
 
 ### 2. Frontend Changes
 
-**Before (Legacy):**
-```typescript
-// Token directly in URL
-const token = new URLSearchParams(window.location.search).get('token');
-localStorage.setItem('token', token); // ❌ Insecure
-```
-
-**After (Secure):**
 ```typescript
 // Exchange code for token
 const code = new URLSearchParams(window.location.search).get('code');
@@ -360,13 +342,6 @@ const { token } = await response.json();
 
 ### 3. WebSocket Changes
 
-**Before (Legacy):**
-```typescript
-// Token in query string (leaks to logs)
-const ws = new WebSocket(`wss://api.example.com/ws?token=${token}`);
-```
-
-**After (Secure):**
 ```typescript
 // Token in subprotocol header
 const ws = new WebSocket('wss://api.example.com/ws', [`token.${token}`]);
@@ -452,7 +427,6 @@ describe('OAuth Service', () => {
 
 ### "Token not found in WebSocket"
 
-- Ensure `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=false` on server
 - Verify token is being sent via Sec-WebSocket-Protocol header
 - Check browser console for connection errors
 

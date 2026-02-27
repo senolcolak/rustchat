@@ -16,7 +16,7 @@ Verification signals from this repo:
 - Frontend builds: `npm run build` passes.
 - Test health is not green yet:
   - `cargo test` fails to compile several integration tests because `api::router` call sites were not updated after adding a new `Config` argument.
-  - `cargo test --lib` runs, but 5 MiroTalk-related tests fail on `system-configuration` runtime panic; 20 lib tests pass.
+  - `cargo test --lib` runs, and lib tests pass.
 
 ## Implemented Functions
 
@@ -44,7 +44,6 @@ RustChat currently includes these major function groups.
 - Bot accounts and bot tokens.
 - OAuth provider integration endpoints.
 - Playbooks/checklists/runs APIs.
-- Video meeting integration path for MiroTalk.
 
 ### Calls
 - Mattermost Calls plugin route namespace under `/api/v4/plugins/com.mattermost.calls/*`.

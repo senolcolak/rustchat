@@ -4,7 +4,6 @@
 //! dependencies like OIDC, S3, and email providers.
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -317,6 +316,36 @@ where
             }
         }
     }
+}
+
+/// Execute a reqwest request builder with retry semantics.
+///
+/// The request builder must be cloneable for full retry behavior.
+/// If cloning is not possible, this will execute a single attempt.
+pub async fn send_reqwest_with_retry<E, MapError, CloneError>(
+    request: reqwest::RequestBuilder,
+    config: &RetryConfig,
+    map_error: MapError,
+    clone_error: CloneError,
+) -> Result<reqwest::Response, E>
+where
+    E: std::fmt::Debug,
+    MapError: Fn(reqwest::Error) -> E + Clone,
+    CloneError: Fn() -> E + Clone,
+{
+    if let Some(template) = request.try_clone() {
+        return with_retry(config, move || {
+            let request = template.try_clone().ok_or_else(|| clone_error.clone()());
+            let map_error = map_error.clone();
+            async move {
+                let request = request?;
+                request.send().await.map_err(map_error)
+            }
+        })
+        .await;
+    }
+
+    request.send().await.map_err(map_error)
 }
 
 /// Combined retry + circuit breaker wrapper

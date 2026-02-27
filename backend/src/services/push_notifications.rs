@@ -11,10 +11,12 @@
 
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 
 /// Push notification payload
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +165,16 @@ fn get_push_proxy_url() -> Option<String> {
     std::env::var("RUSTCHAT_PUSH_PROXY_URL").ok()
 }
 
+fn outbound_retry_config() -> RetryConfig {
+    RetryConfig {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(150),
+        max_delay: Duration::from_secs(2),
+        backoff_multiplier: 2.0,
+        retry_if: RetryCondition::Default,
+    }
+}
+
 /// Send notification via push proxy service
 async fn send_via_push_proxy(
     proxy_url: &str,
@@ -251,13 +263,20 @@ async fn send_via_push_proxy(
     };
 
     let client = reqwest::Client::new();
-    let response = client.post(&url).json(&payload).send().await.map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            PushNotificationError::NotConfigured
-        } else {
-            PushNotificationError::NetworkError(format!("Push proxy connection failed: {}", e))
-        }
-    })?;
+    let retry_config = outbound_retry_config();
+    let response = send_reqwest_with_retry(
+        client.post(&url).json(&payload),
+        &retry_config,
+        |e| {
+            if e.is_connect() || e.is_timeout() {
+                PushNotificationError::NotConfigured
+            } else {
+                PushNotificationError::NetworkError(format!("Push proxy connection failed: {}", e))
+            }
+        },
+        || PushNotificationError::NetworkError("Push proxy request clone failed".to_string()),
+    )
+    .await?;
 
     let status = response.status();
 
@@ -781,14 +800,18 @@ async fn send_fcm_message(
     );
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.access_token))
-        .header("Content-Type", "application/json")
-        .json(message)
-        .send()
-        .await
-        .map_err(|e| PushNotificationError::NetworkError(e.to_string()))?;
+    let retry_config = outbound_retry_config();
+    let response = send_reqwest_with_retry(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", config.access_token))
+            .header("Content-Type", "application/json")
+            .json(message),
+        &retry_config,
+        |e| PushNotificationError::NetworkError(e.to_string()),
+        || PushNotificationError::NetworkError("FCM request clone failed".to_string()),
+    )
+    .await?;
 
     let status = response.status();
     let response_text = response
