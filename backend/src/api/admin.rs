@@ -1594,7 +1594,7 @@ async fn add_team_member(
         r#"
         INSERT INTO channel_members (channel_id, user_id)
         SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.channel_type = 'public'::channel_type
+        WHERE c.team_id = $2 AND c.type = 'public'::channel_type
         ON CONFLICT (channel_id, user_id) DO NOTHING
         "#,
     )
