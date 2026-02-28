@@ -323,10 +323,6 @@ function onKeydown(event: KeyboardEvent) {
                 event.preventDefault()
                 onItalic()
                 return
-            case 'k':
-                event.preventDefault()
-                onLink()
-                return
         }
     }
     
@@ -565,7 +561,7 @@ const canSend = computed(() => {
                 <button 
                     @click="onLink"
                     class="p-1.5 rounded hover:bg-bg-surface-1 text-text-2 hover:text-text-1 transition-standard"
-                    title="Link (Ctrl+K)"
+                    title="Link"
                     aria-label="Link"
                 >
                     <Link class="w-4 h-4" />

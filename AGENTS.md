@@ -107,6 +107,12 @@ docker compose up -d --build
 - Use typed API/client models; avoid introducing untyped payload handling.
 - Maintain compatibility-sensitive event names and payload formats.
 
+### Command Invocation Policy (Permanent)
+- Rustchat uses command invocation via `Ctrl/Cmd+K` (desktop) and `^k` token (mobile/typed input).
+- Do not introduce `/`-triggered slash command UX as the primary command entry path.
+- Command discovery UX must be command-menu based and keyboard-first.
+- If backward compatibility paths exist, keep them internal-only and never present `/` as the user-facing standard.
+
 ## Testing Expectations
 
 - Every bug fix should include or update a regression test when feasible.

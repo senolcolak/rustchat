@@ -10,7 +10,7 @@ import MarkdownPreview from './MarkdownPreview.vue'
 import MentionAutocomplete from './MentionAutocomplete.vue'
 import EmojiAutocomplete from './autocomplete/EmojiAutocomplete.vue'
 import ChannelAutocomplete from './autocomplete/ChannelAutocomplete.vue'
-import SlashCommandAutocomplete from './autocomplete/SlashCommandAutocomplete.vue'
+import CommandAutocomplete from './autocomplete/CommandAutocomplete.vue'
 import { useTeamStore } from '../../stores/teams'
 import { useCallsStore } from '../../stores/calls'
 import { useChannelStore } from '../../stores/channels'
@@ -31,18 +31,18 @@ const showPreview = ref(false)
 const showMentionMenu = ref(false)
 const showEmojiAutocomplete = ref(false)
 const showChannelAutocomplete = ref(false)
-const showSlashAutocomplete = ref(false)
+const showCommandAutocomplete = ref(false)
 const showFormatting = ref(true)
 const mentionQuery = ref('')
 const emojiQuery = ref('')
 const channelQuery = ref('')
-const slashQuery = ref('')
+const commandQuery = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const emojiButtonRef = ref<HTMLElement | null>(null)
 const fileUploaderRef = ref<InstanceType<typeof FileUploader> | null>(null)
 const emojiAutocompleteRef = ref<InstanceType<typeof EmojiAutocomplete> | null>(null)
 const channelAutocompleteRef = ref<InstanceType<typeof ChannelAutocomplete> | null>(null)
-const slashAutocompleteRef = ref<InstanceType<typeof SlashCommandAutocomplete> | null>(null)
+const commandAutocompleteRef = ref<InstanceType<typeof CommandAutocomplete> | null>(null)
 const isMac = ref(false)
 const autocompleteStartPos = ref(0)
 
@@ -57,6 +57,7 @@ let lastTypingEmit = 0
 const TYPING_ACTIVITY_INTERVAL_MS = 2000
 const DRAFT_STORAGE_PREFIX = 'rustchat_draft:'
 const MAX_TEXTAREA_HEIGHT = 320
+const COMMAND_PREFIX = '^k'
 
 const placeholderText = computed(() => {
     const channelName = channelStore.currentChannel?.display_name || channelStore.currentChannel?.name
@@ -104,13 +105,13 @@ const hasChannelSuggestions = computed(() => {
     })
 })
 
-const slashCommands = ['/call start', '/call join', '/call leave', '/call end']
+const commandEntries = ['call start', 'call join', 'call leave', 'call end']
 
-const hasSlashSuggestions = computed(() => {
-    if (!showSlashAutocomplete.value) return false
-    const query = slashQuery.value.trim().toLowerCase()
-    if (!query) return slashCommands.length > 0
-    return slashCommands.some((command) => command.toLowerCase().startsWith(`/${query}`))
+const hasCommandSuggestions = computed(() => {
+    if (!showCommandAutocomplete.value) return false
+    const query = commandQuery.value.trim().toLowerCase().replace(/^\^k\s*/, '')
+    if (!query) return commandEntries.length > 0
+    return commandEntries.some((command) => command.toLowerCase().startsWith(query))
 })
 
 function getDraftKey(channelId?: string): string | null {
@@ -179,7 +180,7 @@ function resetComposer() {
     showMentionMenu.value = false
     showEmojiAutocomplete.value = false
     showChannelAutocomplete.value = false
-    showSlashAutocomplete.value = false
+    showCommandAutocomplete.value = false
     showEmojiPicker.value = false
 
     nextTick(() => {
@@ -197,12 +198,12 @@ function resetForChannelChange(channelId?: string) {
     showMentionMenu.value = false
     showEmojiAutocomplete.value = false
     showChannelAutocomplete.value = false
-    showSlashAutocomplete.value = false
+    showCommandAutocomplete.value = false
     showEmojiPicker.value = false
     mentionQuery.value = ''
     emojiQuery.value = ''
     channelQuery.value = ''
-    slashQuery.value = ''
+    commandQuery.value = ''
 
     nextTick(() => {
         autoResize()
@@ -221,12 +222,12 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     }
 }
 
-async function handleSlashCommand(command: string, args: string[]): Promise<boolean> {
+async function handleCommandAction(command: string, args: string[]): Promise<boolean> {
     const channelId = channelStore.currentChannelId
     if (!channelId) return false
 
     switch (command) {
-        case '/call': {
+        case 'call': {
             const subCommand = args[0]
 
             if (subCommand === 'start' || !subCommand) {
@@ -283,17 +284,26 @@ async function handleSend() {
     if (!canSend.value) return
 
     const trimmedText = content.value.trim()
-    if (trimmedText.startsWith('/')) {
-        const parts = trimmedText.split(' ')
-        const command = parts[0] ?? ''
-        const args = parts.slice(1)
-        const handled = await handleSlashCommand(command, args)
+    const commandMatch = trimmedText.match(/^\^k\s*(.*)$/i)
+    if (commandMatch) {
+        const commandPayload = (commandMatch[1] ?? '').trim()
+        if (!commandPayload) {
+            toast.error('No command selected', 'Use Ctrl/Cmd+K or type ^k and choose a command')
+            return
+        }
 
+        const parts = commandPayload.split(/\s+/)
+        const command = (parts[0] ?? '').toLowerCase()
+        const args = parts.slice(1)
+        const handled = await handleCommandAction(command, args)
         if (handled) {
             clearDraft()
             resetComposer()
             return
         }
+
+        toast.error('Unknown command', `The command "${commandPayload}" is not available`)
+        return
     }
 
     const fileIds = attachedFiles.value
@@ -310,20 +320,26 @@ async function handleSend() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-    if (hasSlashSuggestions.value) {
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        openCommandMenu()
+        return
+    }
+
+    if (hasCommandSuggestions.value) {
         if (event.key === 'ArrowUp') {
             event.preventDefault()
-            slashAutocompleteRef.value?.selectPrevious()
+            commandAutocompleteRef.value?.selectPrevious()
             return
         }
         if (event.key === 'ArrowDown') {
             event.preventDefault()
-            slashAutocompleteRef.value?.selectNext()
+            commandAutocompleteRef.value?.selectNext()
             return
         }
         if (event.key === 'Enter' || event.key === 'Tab') {
             event.preventDefault()
-            slashAutocompleteRef.value?.selectCurrent()
+            commandAutocompleteRef.value?.selectCurrent()
             return
         }
     }
@@ -376,7 +392,7 @@ function handleKeydown(event: KeyboardEvent) {
         showMentionMenu.value = false
         showEmojiAutocomplete.value = false
         showChannelAutocomplete.value = false
-        showSlashAutocomplete.value = false
+        showCommandAutocomplete.value = false
         showEmojiPicker.value = false
         event.preventDefault()
         return
@@ -392,12 +408,6 @@ function handleKeydown(event: KeyboardEvent) {
         if (event.key.toLowerCase() === 'i') {
             event.preventDefault()
             applyFormat('italic')
-            return
-        }
-
-        if (event.key.toLowerCase() === 'k') {
-            event.preventDefault()
-            applyFormat('link')
             return
         }
 
@@ -453,10 +463,11 @@ function handleInput() {
     const cursorPos = textarea.selectionStart
     const textBefore = content.value.substring(0, cursorPos)
 
-    if (!textBefore.includes('\n') && textBefore.startsWith('/')) {
-        slashQuery.value = textBefore.substring(1)
+    const commandPrefixMatch = !textBefore.includes('\n') ? textBefore.match(/^\^k\s*(.*)$/i) : null
+    if (commandPrefixMatch) {
+        commandQuery.value = commandPrefixMatch[1] ?? ''
         autocompleteStartPos.value = 0
-        showSlashAutocomplete.value = true
+        showCommandAutocomplete.value = true
         showMentionMenu.value = false
         showEmojiAutocomplete.value = false
         showChannelAutocomplete.value = false
@@ -470,7 +481,7 @@ function handleInput() {
         showMentionMenu.value = true
         showEmojiAutocomplete.value = false
         showChannelAutocomplete.value = false
-        showSlashAutocomplete.value = false
+        showCommandAutocomplete.value = false
         if (teamStore.members.length === 0 && teamStore.currentTeamId) {
             teamStore.fetchMembers(teamStore.currentTeamId as string)
         }
@@ -485,7 +496,7 @@ function handleInput() {
         showEmojiAutocomplete.value = true
         showMentionMenu.value = false
         showChannelAutocomplete.value = false
-        showSlashAutocomplete.value = false
+        showCommandAutocomplete.value = false
         return
     }
 
@@ -496,14 +507,14 @@ function handleInput() {
         showChannelAutocomplete.value = true
         showMentionMenu.value = false
         showEmojiAutocomplete.value = false
-        showSlashAutocomplete.value = false
+        showCommandAutocomplete.value = false
         return
     }
 
     showMentionMenu.value = false
     showEmojiAutocomplete.value = false
     showChannelAutocomplete.value = false
-    showSlashAutocomplete.value = false
+    showCommandAutocomplete.value = false
 }
 
 function handleMentionSelect(username: string) {
@@ -553,16 +564,16 @@ function handleChannelAutocompleteSelect(channelName: string) {
     })
 }
 
-function handleSlashAutocompleteSelect(command: string) {
+function handleCommandAutocompleteSelect(command: string) {
     const textarea = textareaRef.value
     if (!textarea) return
 
     const cursorPos = textarea.selectionStart
     const suffix = content.value.substring(cursorPos).replace(/^\s+/, '')
-    const prefix = `${command} `
+    const prefix = `${COMMAND_PREFIX} ${command} `
     content.value = suffix.length > 0 ? `${prefix}${suffix}` : prefix
 
-    showSlashAutocomplete.value = false
+    showCommandAutocomplete.value = false
     saveDraft()
 
     nextTick(() => {
@@ -578,8 +589,30 @@ function handleTextareaBlur() {
         showMentionMenu.value = false
         showEmojiAutocomplete.value = false
         showChannelAutocomplete.value = false
-        showSlashAutocomplete.value = false
+        showCommandAutocomplete.value = false
     }, 120)
+}
+
+function openCommandMenu() {
+    const existing = content.value.trim()
+    if (!existing.toLowerCase().startsWith(COMMAND_PREFIX)) {
+        content.value = existing ? `${COMMAND_PREFIX} ${existing}` : `${COMMAND_PREFIX} `
+    }
+
+    commandQuery.value = content.value.replace(/^\^k\s*/i, '')
+    showCommandAutocomplete.value = true
+    showMentionMenu.value = false
+    showEmojiAutocomplete.value = false
+    showChannelAutocomplete.value = false
+
+    saveDraft()
+    nextTick(() => {
+        if (!textareaRef.value) return
+        const pos = content.value.length
+        textareaRef.value.focus()
+        textareaRef.value.setSelectionRange(pos, pos)
+        autoResize()
+    })
 }
 
 function applyFormat(type: string) {
@@ -803,12 +836,12 @@ onUnmounted(() => {
           @select="handleMentionSelect"
           @close="showMentionMenu = false"
         />
-        <SlashCommandAutocomplete
-          ref="slashAutocompleteRef"
-          :show="showSlashAutocomplete"
-          :query="slashQuery"
-          @select="handleSlashAutocompleteSelect"
-          @close="showSlashAutocomplete = false"
+        <CommandAutocomplete
+          ref="commandAutocompleteRef"
+          :show="showCommandAutocomplete"
+          :query="commandQuery"
+          @select="handleCommandAutocompleteSelect"
+          @close="showCommandAutocomplete = false"
         />
         <EmojiAutocomplete
           ref="emojiAutocompleteRef"
@@ -899,10 +932,13 @@ onUnmounted(() => {
         </div>
 
         <div class="flex items-center gap-3">
+          <div class="text-[11px] text-text-3 md:hidden">
+            <span><kbd class="rounded bg-bg-surface-2 px-1 py-0.5">^k</kbd> command</span>
+          </div>
           <div class="hidden items-center gap-2 text-[11px] text-text-3 md:flex">
             <span><kbd class="rounded bg-bg-surface-2 px-1 py-0.5">{{ sendShortcutLabel }}</kbd> to send</span>
             <span><kbd class="rounded bg-bg-surface-2 px-1 py-0.5">Shift+Enter</kbd> newline</span>
-            <span><kbd class="rounded bg-bg-surface-2 px-1 py-0.5">/</kbd> commands</span>
+            <span><kbd class="rounded bg-bg-surface-2 px-1 py-0.5">Ctrl/Cmd+K</kbd> command</span>
           </div>
 
           <button

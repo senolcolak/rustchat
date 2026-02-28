@@ -91,12 +91,12 @@ onUnmounted(() => {
       <div class="mt-2 space-y-1 text-xs text-text-2">
         <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+B</kbd> Bold</p>
         <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+I</kbd> Italic</p>
-        <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+K</kbd> Link</p>
+        <p><kbd class="rounded bg-bg-surface-2 px-1">Toolbar</kbd> Insert link</p>
         <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+Shift+X</kbd> Strikethrough</p>
         <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+Shift+7</kbd> Numbered list</p>
         <p><kbd class="rounded bg-bg-surface-2 px-1">Ctrl/Cmd+Shift+8</kbd> Bulleted list</p>
       </div>
-      <p class="mt-2 text-[11px] text-text-3">Use <code>:emoji:</code>, <code>@mention</code>, <code>~channel</code>, and <code>/</code> for command menu.</p>
+      <p class="mt-2 text-[11px] text-text-3">Use <code>:emoji:</code>, <code>@mention</code>, <code>~channel</code>, and <code>^k</code> (or Ctrl/Cmd+K) for command menu.</p>
     </div>
   </div>
 </template>

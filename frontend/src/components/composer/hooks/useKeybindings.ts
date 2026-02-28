@@ -28,7 +28,7 @@ export interface KeybindingOptions {
     onEscape?: () => void
     onToggleFormatting?: () => void
     onTogglePreview?: () => void
-    onFocusComposer?: () => void
+    onFocusComposer?: () => void // Ctrl/Cmd+K command menu trigger
     
     // Autocomplete
     onAutocompleteUp?: () => void
@@ -113,7 +113,7 @@ export function useKeybindings(options: KeybindingOptions) {
                     return
                 case 'k':
                     event.preventDefault()
-                    onLink?.()
+                    onFocusComposer?.()
                     return
                 case 'u':
                     // Mattermost uses Ctrl+U for underline but MM markdown doesn't support it
@@ -220,13 +220,6 @@ export function useKeybindings(options: KeybindingOptions) {
             return
         }
 
-        // Focus composer (Ctrl/Cmd + /)
-        if (isMod && key === '/') {
-            event.preventDefault()
-            onFocusComposer?.()
-            return
-        }
-
         // Attach file (Ctrl/Cmd + U)
         if (isMod && key.toLowerCase() === 'u') {
             event.preventDefault()
@@ -240,8 +233,8 @@ export function useKeybindings(options: KeybindingOptions) {
         const { key, ctrlKey, metaKey } = event
         const isMod = ctrlKey || metaKey
 
-        // Focus composer shortcut
-        if (isMod && key === '/') {
+        // Focus composer / command menu shortcut
+        if (isMod && key.toLowerCase() === 'k') {
             // Don't prevent default here - let the focused handler do it
             // This is just a fallback
         }

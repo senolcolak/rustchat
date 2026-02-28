@@ -12,24 +12,24 @@ const emit = defineEmits<{
     close: []
 }>()
 
-type SlashCommandItem = {
+type CommandItem = {
     command: string
     description: string
 }
 
-const commands: SlashCommandItem[] = [
-    { command: '/call start', description: 'Start a call in this channel' },
-    { command: '/call join', description: 'Join the active channel call' },
-    { command: '/call leave', description: 'Leave your current call' },
-    { command: '/call end', description: 'End the active channel call' },
+const commands: CommandItem[] = [
+    { command: 'call start', description: 'Start a call in this channel' },
+    { command: 'call join', description: 'Join the active channel call' },
+    { command: 'call leave', description: 'Leave your current call' },
+    { command: 'call end', description: 'End the active channel call' },
 ]
 
 const selectedIndex = ref(0)
 
 const filteredCommands = computed(() => {
-    const query = props.query.trim().toLowerCase()
+    const query = props.query.trim().toLowerCase().replace(/^\^k\s*/, '')
     if (!query) return commands
-    return commands.filter((item) => item.command.toLowerCase().startsWith(`/${query}`))
+    return commands.filter((item) => item.command.toLowerCase().startsWith(query))
 })
 
 watch(
@@ -87,7 +87,7 @@ defineExpose({
     >
         <div class="flex items-center gap-2 border-b border-border-1 px-3 py-2 text-xs font-medium text-text-3">
             <Command class="h-3.5 w-3.5" />
-            <span>Slash commands</span>
+            <span>Command menu (^k)</span>
         </div>
 
         <button
@@ -97,7 +97,7 @@ defineExpose({
             :class="index === selectedIndex ? 'bg-bg-surface-2 text-text-1' : 'text-text-2 hover:bg-bg-surface-2 hover:text-text-1'"
             @click="$emit('select', item.command)"
         >
-            <div class="text-sm font-semibold">{{ item.command }}</div>
+            <div class="text-sm font-semibold">^k {{ item.command }}</div>
             <div class="text-xs text-text-3">{{ item.description }}</div>
         </button>
     </div>

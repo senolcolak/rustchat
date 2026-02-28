@@ -84,6 +84,13 @@ Run these when touching v4 API/websocket/compatibility-sensitive behavior:
 - Add or update tests for bug fixes and behavior changes whenever feasible.
 - Preserve API and websocket contract behavior unless the change explicitly targets it.
 
+## Command UX Standard (Permanent)
+
+- Primary command invocation is `Ctrl/Cmd+K` on desktop.
+- Mobile/typed equivalent is `^k`.
+- Do not implement `/` as the primary command trigger in the UI.
+- New command features must integrate with the command menu flow, not slash-triggered UX.
+
 ## Pull Request Process
 
 1. Create a branch from `main` (for example: `feature/my-change` or `fix/my-change`).
