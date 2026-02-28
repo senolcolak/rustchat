@@ -219,6 +219,179 @@ async fn test_oauth_login_redirects_to_provider() {
 }
 
 #[tokio::test]
+async fn test_legacy_mobile_login_route_redirects_to_oauth2_login() {
+    let app = spawn_app().await;
+    let (token, _org_id) = create_test_admin(&app).await;
+
+    let _config_id = create_test_sso_config(
+        &app,
+        &token,
+        "google",
+        "test-google",
+        Some("https://accounts.google.com"),
+    )
+    .await;
+
+    let response = app
+        .api_client
+        .get(format!(
+            "{}/oauth/google/mobile_login?redirect_to={}&state=test-state&code_challenge=test-challenge&code_challenge_method=S256",
+            app.address,
+            urlencoding::encode("mmauth://callback")
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_redirection());
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(location.starts_with("/api/v1/oauth2/test-google/login?"));
+    assert!(location.contains("mobile=true"));
+    assert!(location.contains("redirect_to=mmauth%3A%2F%2Fcallback"));
+    assert!(location.contains("state=test-state"));
+    assert!(location.contains("code_challenge=test-challenge"));
+}
+
+#[tokio::test]
+async fn test_legacy_mobile_login_route_rejects_invalid_custom_scheme() {
+    let app = spawn_app().await;
+    let (token, _org_id) = create_test_admin(&app).await;
+
+    let _config_id = create_test_sso_config(
+        &app,
+        &token,
+        "google",
+        "test-google-2",
+        Some("https://accounts.google.com"),
+    )
+    .await;
+
+    let response = app
+        .api_client
+        .get(format!(
+            "{}/oauth/google/mobile_login?redirect_to={}",
+            app.address,
+            urlencoding::encode("javascript:alert('hello')")
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_legacy_mobile_login_route_rejects_unconfigured_custom_scheme() {
+    let app = spawn_app().await;
+    let (token, _org_id) = create_test_admin(&app).await;
+
+    let _config_id = create_test_sso_config(
+        &app,
+        &token,
+        "google",
+        "test-google-3",
+        Some("https://accounts.google.com"),
+    )
+    .await;
+
+    let response = app
+        .api_client
+        .get(format!(
+            "{}/oauth/google/mobile_login?redirect_to={}",
+            app.address,
+            urlencoding::encode("customscheme://callback")
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_legacy_mobile_login_route_accepts_configured_custom_scheme() {
+    let app = spawn_app().await;
+    let (token, _org_id) = create_test_admin(&app).await;
+
+    let _config_id = create_test_sso_config(
+        &app,
+        &token,
+        "google",
+        "test-google-4",
+        Some("https://accounts.google.com"),
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE server_config
+         SET site = jsonb_set(
+             COALESCE(site, '{}'::jsonb),
+             '{app_custom_url_schemes}',
+             $1::jsonb,
+             true
+         )
+         WHERE id = 'default'",
+    )
+    .bind(serde_json::json!(["customscheme://"]))
+    .execute(&app.db_pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .api_client
+        .get(format!(
+            "{}/oauth/google/mobile_login?redirect_to={}",
+            app.address,
+            urlencoding::encode("customscheme://callback")
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_redirection());
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(location.contains("redirect_to=customscheme%3A%2F%2Fcallback"));
+}
+
+#[tokio::test]
+async fn test_legacy_login_route_redirects_to_oauth2_login() {
+    let app = spawn_app().await;
+    let (token, _org_id) = create_test_admin(&app).await;
+
+    let _config_id = create_test_sso_config(&app, &token, "github", "legacy-github", None).await;
+
+    let response = app
+        .api_client
+        .get(format!(
+            "{}/oauth/legacy-github/login?redirect_to=/channels/town-square",
+            app.address
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_redirection());
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(location.starts_with("/api/v1/oauth2/legacy-github/login"));
+    assert!(location.contains("redirect_uri=%2Fchannels%2Ftown-square"));
+}
+
+#[tokio::test]
 async fn test_oauth_callback_invalid_state_returns_error() {
     let app = spawn_app().await;
     let (token, _org_id) = create_test_admin(&app).await;

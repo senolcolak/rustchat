@@ -75,21 +75,22 @@ pub async fn get_client_config(
             &auth,
             provider_settings.as_ref(),
             &diagnostic_id,
+            state.config.compatibility.mobile_sso_code_exchange,
         )),
     ))
 }
 
 pub async fn get_client_license(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(query): Query<LicenseQuery>,
 ) -> ApiResult<impl IntoResponse> {
     let body = if matches!(query.format.as_deref(), Some("old")) {
         serde_json::json!({
-            "IsLicensed": "false"
+            "IsLicensed": if state.config.compatibility.is_licensed { "true" } else { "false" }
         })
     } else {
         serde_json::to_value(mm::License {
-            is_licensed: false,
+            is_licensed: state.config.compatibility.is_licensed,
             issued_at: 0,
             starts_at: 0,
             expires_at: 0,
@@ -105,6 +106,7 @@ fn legacy_config(
     auth: &AuthConfig,
     provider_settings: Option<&MailProviderSettings>,
     diagnostic_id: &str,
+    mobile_sso_code_exchange_enabled: bool,
 ) -> serde_json::Value {
     // Extract email settings from provider or use defaults
     let send_email_notifications = provider_settings
@@ -277,7 +279,11 @@ fn legacy_config(
         "FeatureFlagExperimentalAuditSettingsSystemConsoleUI",
         "true",
     );
-    insert(&mut map, "FeatureFlagMobileSSOCodeExchange", "true");
+    insert(
+        &mut map,
+        "FeatureFlagMobileSSOCodeExchange",
+        bool_str(mobile_sso_code_exchange_enabled),
+    );
     insert(&mut map, "FeatureFlagMoveThreadsEnabled", "false");
     insert(&mut map, "FeatureFlagNormalizeLdapDNs", "false");
     insert(&mut map, "FeatureFlagNotificationMonitoring", "true");

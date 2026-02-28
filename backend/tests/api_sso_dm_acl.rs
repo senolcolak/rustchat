@@ -345,6 +345,30 @@ async fn v4_sso_code_exchange_supports_success_replay_invalid_and_expired() {
 }
 
 #[tokio::test]
+async fn v4_sso_code_exchange_feature_disabled_returns_bad_request() {
+    let mut cfg = test_config();
+    cfg.compatibility.mobile_sso_code_exchange = false;
+    let app = spawn_app_with_config(cfg).await;
+
+    let response = app
+        .api_client
+        .post(format!(
+            "{}/api/v4/users/login/sso/code-exchange",
+            app.address
+        ))
+        .json(&json!({
+            "login_code": "any-code",
+            "code_verifier": "any-verifier",
+            "state": "any-state",
+        }))
+        .send()
+        .await
+        .expect("Failed feature-disabled request");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn dm_acl_disabled_allows_direct_channel_without_shared_keycloak_group() {
     let app = spawn_app().await;
 

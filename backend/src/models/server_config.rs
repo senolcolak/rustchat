@@ -47,6 +47,8 @@ pub struct SiteConfig {
     pub android_app_download_link: String,
     #[serde(default = "default_ios_app_download_link")]
     pub ios_app_download_link: String,
+    #[serde(default = "default_app_custom_url_schemes")]
+    pub app_custom_url_schemes: Vec<String>,
     #[serde(default)]
     pub custom_brand_text: String,
     #[serde(default)]
@@ -120,6 +122,9 @@ fn default_android_app_download_link() -> String {
 }
 fn default_ios_app_download_link() -> String {
     "https://mattermost.com/mattermost-ios-app/".to_string()
+}
+fn default_app_custom_url_schemes() -> Vec<String> {
+    vec!["mmauth://".to_string(), "mmauthbeta://".to_string()]
 }
 fn default_service_environment() -> String {
     "production".to_string()

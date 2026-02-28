@@ -134,6 +134,11 @@ pub fn test_config() -> Config {
         keycloak_sync: Default::default(),
         messaging: Default::default(),
         unread: Default::default(),
+        compatibility: rustchat::config::CompatibilityConfig {
+            is_licensed: true,
+            ldap_groups_enabled: true,
+            mobile_sso_code_exchange: true,
+        },
     }
 }
 

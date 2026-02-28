@@ -120,6 +120,10 @@ pub struct Config {
     /// Messaging policy configuration
     #[serde(default)]
     pub messaging: MessagingConfig,
+
+    /// Compatibility-oriented feature and license gates.
+    #[serde(default)]
+    pub compatibility: CompatibilityConfig,
 }
 
 /// Calls plugin configuration
@@ -283,6 +287,34 @@ impl Default for MessagingConfig {
             dm_acl_enabled: false,
         }
     }
+}
+
+/// Compatibility and enterprise-gated feature flags.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompatibilityConfig {
+    /// Mirrors client-visible IsLicensed state.
+    #[serde(default)]
+    pub is_licensed: bool,
+    /// Mirrors LDAPGroups feature availability.
+    #[serde(default)]
+    pub ldap_groups_enabled: bool,
+    /// Mirrors FeatureFlagMobileSSOCodeExchange behavior.
+    #[serde(default = "default_compat_mobile_sso_code_exchange")]
+    pub mobile_sso_code_exchange: bool,
+}
+
+impl Default for CompatibilityConfig {
+    fn default() -> Self {
+        Self {
+            is_licensed: false,
+            ldap_groups_enabled: false,
+            mobile_sso_code_exchange: default_compat_mobile_sso_code_exchange(),
+        }
+    }
+}
+
+fn default_compat_mobile_sso_code_exchange() -> bool {
+    true
 }
 
 fn default_calls_enabled() -> bool {
@@ -681,6 +713,21 @@ impl Config {
         Ok(())
     }
 
+    fn apply_compatibility_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_COMPAT_IS_LICENSED") {
+            self.compatibility.is_licensed = parse_bool_env("RUSTCHAT_COMPAT_IS_LICENSED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_COMPAT_LDAP_GROUPS_ENABLED") {
+            self.compatibility.ldap_groups_enabled =
+                parse_bool_env("RUSTCHAT_COMPAT_LDAP_GROUPS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_COMPAT_MOBILE_SSO_CODE_EXCHANGE") {
+            self.compatibility.mobile_sso_code_exchange =
+                parse_bool_env("RUSTCHAT_COMPAT_MOBILE_SSO_CODE_EXCHANGE", &raw)?;
+        }
+        Ok(())
+    }
+
     /// Load configuration from environment variables
     pub fn load() -> anyhow::Result<Self> {
         let mut builder = config::Config::builder();
@@ -706,6 +753,7 @@ impl Config {
         settings.apply_unread_env_overrides()?;
         settings.apply_keycloak_env_overrides()?;
         settings.apply_messaging_env_overrides()?;
+        settings.apply_compatibility_env_overrides()?;
 
         // Validate security settings
         settings.validate_security()?;

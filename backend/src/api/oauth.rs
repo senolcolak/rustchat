@@ -22,7 +22,7 @@ use super::AppState;
 use crate::crypto;
 use crate::error::{ApiResult, AppError};
 use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
-use crate::models::{OAuthProviderInfo, SsoConfig, SsoProviderType};
+use crate::models::{OAuthProviderInfo, SiteConfig, SsoConfig, SsoProviderType};
 use crate::services::oauth_token_exchange::{
     create_exchange_code, create_exchange_code_with_sso, SsoExchangeChallenge,
 };
@@ -33,6 +33,7 @@ const OAUTH_STATE_TTL_SECONDS: u64 = 300; // 5 minutes
 const OAUTH_EXCHANGE_COOKIE: &str = "RCOAUTHCODE";
 const OAUTH_EXCHANGE_COOKIE_MAX_AGE_SECONDS: u64 = 120;
 const DEFAULT_OAUTH_REDIRECT_PATH: &str = "/";
+const DEFAULT_APP_CUSTOM_URL_SCHEMES: [&str; 2] = ["mmauth://", "mmauthbeta://"];
 
 // GitHub OAuth endpoints (no OIDC discovery)
 const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
@@ -59,6 +60,8 @@ struct OAuthStatePayload {
     mobile_sso_code_challenge: Option<String>,
     #[serde(default)]
     mobile_sso_code_challenge_method: Option<String>,
+    #[serde(default)]
+    mobile_redirect_to: Option<String>,
 }
 
 /// OAuth callback query parameters
@@ -74,10 +77,24 @@ pub struct OAuthCallbackQuery {
 #[derive(Debug, Deserialize)]
 pub struct OAuthLoginQuery {
     pub redirect_uri: Option<String>,
+    pub redirect_to: Option<String>,
     pub mobile: Option<bool>, // If true, redirect to mobile app scheme instead of web
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyOAuthLoginQuery {
+    redirect_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyOAuthMobileLoginQuery {
+    redirect_to: Option<String>,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
 }
 
 /// Token response from OAuth provider
@@ -162,6 +179,208 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(auth_routes)
         .route("/oauth2/providers", get(list_providers))
+}
+
+pub fn web_compat_router() -> Router<AppState> {
+    Router::new()
+        .route("/oauth/{service}/login", get(legacy_oauth_login))
+        .route(
+            "/oauth/{service}/mobile_login",
+            get(legacy_oauth_mobile_login),
+        )
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyProviderRow {
+    provider_key: String,
+    provider_type: String,
+    provider: String,
+}
+
+async fn legacy_oauth_login(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Query(query): Query<LegacyOAuthLoginQuery>,
+) -> ApiResult<Redirect> {
+    let provider_key = resolve_legacy_service_provider_key(&state, &service).await?;
+
+    let mut params = Vec::new();
+    if let Some(redirect_to) = query.redirect_to.as_deref() {
+        let trimmed = redirect_to.trim();
+        if !trimmed.is_empty() {
+            params.push(format!("redirect_uri={}", urlencoding::encode(trimmed)));
+        }
+    }
+
+    let target = if params.is_empty() {
+        format!("/api/v1/oauth2/{provider_key}/login")
+    } else {
+        format!("/api/v1/oauth2/{provider_key}/login?{}", params.join("&"))
+    };
+
+    Ok(Redirect::temporary(&target))
+}
+
+async fn legacy_oauth_mobile_login(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Query(query): Query<LegacyOAuthMobileLoginQuery>,
+) -> ApiResult<Redirect> {
+    let provider_key = resolve_legacy_service_provider_key(&state, &service).await?;
+    let app_custom_url_schemes = get_mobile_custom_url_schemes(&state.db).await;
+
+    let mut params = vec!["mobile=true".to_string()];
+    if let Some(redirect_to) = query.redirect_to.as_deref() {
+        let validated = validate_mobile_redirect_to(redirect_to, &app_custom_url_schemes)?;
+        params.push(format!("redirect_to={}", urlencoding::encode(&validated)));
+    }
+    if let Some(state_value) = query.state.as_deref() {
+        let trimmed = state_value.trim();
+        if !trimmed.is_empty() {
+            params.push(format!("state={}", urlencoding::encode(trimmed)));
+        }
+    }
+    if let Some(code_challenge) = query.code_challenge.as_deref() {
+        let trimmed = code_challenge.trim();
+        if !trimmed.is_empty() {
+            params.push(format!("code_challenge={}", urlencoding::encode(trimmed)));
+        }
+    }
+    if let Some(method) = query.code_challenge_method.as_deref() {
+        let trimmed = method.trim();
+        if !trimmed.is_empty() {
+            params.push(format!(
+                "code_challenge_method={}",
+                urlencoding::encode(trimmed)
+            ));
+        }
+    }
+
+    let target = format!("/api/v1/oauth2/{provider_key}/login?{}", params.join("&"));
+    Ok(Redirect::temporary(&target))
+}
+
+async fn resolve_legacy_service_provider_key(state: &AppState, service: &str) -> ApiResult<String> {
+    let normalized = service.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(AppError::BadRequest("Invalid OAuth service".to_string()));
+    }
+
+    let providers: Vec<LegacyProviderRow> = sqlx::query_as(
+        r#"
+        SELECT provider_key, provider_type, provider
+        FROM sso_configs
+        WHERE is_active = true
+        ORDER BY updated_at DESC, created_at DESC
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    if let Some(exact) = providers.iter().find(|provider| {
+        provider.provider_key.eq_ignore_ascii_case(&normalized)
+            || provider.provider.eq_ignore_ascii_case(&normalized)
+    }) {
+        return Ok(exact.provider_key.clone());
+    }
+
+    let mapped_provider_type = match normalized.as_str() {
+        "google" => Some("google"),
+        "github" => Some("github"),
+        "gitlab" | "office365" | "openid" => Some("oidc"),
+        _ => None,
+    };
+
+    if let Some(provider_type) = mapped_provider_type {
+        if provider_type == "oidc" {
+            if let Some(preferred) = providers.iter().find(|provider| {
+                provider.provider_type == "oidc"
+                    && provider.provider_key == state.config.keycloak_sync.provider_key
+            }) {
+                return Ok(preferred.provider_key.clone());
+            }
+        }
+
+        if let Some(first_match) = providers
+            .iter()
+            .find(|provider| provider.provider_type == provider_type)
+        {
+            return Ok(first_match.provider_key.clone());
+        }
+    }
+
+    Err(AppError::NotFound(format!(
+        "OAuth provider '{}' not found or disabled",
+        service
+    )))
+}
+
+fn validate_mobile_redirect_to(redirect_to: &str, allowed_schemes: &[String]) -> ApiResult<String> {
+    let trimmed = redirect_to.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest(
+            "Invalid mobile redirect URL".to_string(),
+        ));
+    }
+
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| AppError::BadRequest("Invalid mobile redirect URL".to_string()))?;
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let effective_schemes: Vec<String> = if allowed_schemes.is_empty() {
+        DEFAULT_APP_CUSTOM_URL_SCHEMES
+            .iter()
+            .map(|value| value.to_string())
+            .collect()
+    } else {
+        allowed_schemes.to_vec()
+    };
+
+    let is_allowed_scheme = effective_schemes
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .any(|value| normalized.starts_with(&value.to_ascii_lowercase()));
+
+    if !is_allowed_scheme {
+        return Err(AppError::BadRequest(
+            "Invalid mobile redirect URL scheme".to_string(),
+        ));
+    }
+
+    if parsed.host_str().unwrap_or_default() != "callback"
+        || !parsed.path().is_empty()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::BadRequest(
+            "Invalid mobile redirect callback host".to_string(),
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+async fn get_mobile_custom_url_schemes(db: &sqlx::PgPool) -> Vec<String> {
+    let config_row: Option<(sqlx::types::Json<SiteConfig>,)> =
+        sqlx::query_as("SELECT site FROM server_config WHERE id = 'default'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+    let schemes = config_row
+        .map(|(site,)| site.0.app_custom_url_schemes)
+        .unwrap_or_default();
+
+    if schemes.is_empty() {
+        DEFAULT_APP_CUSTOM_URL_SCHEMES
+            .iter()
+            .map(|value| value.to_string())
+            .collect()
+    } else {
+        schemes
+    }
 }
 
 /// Request to exchange a code for a token
@@ -506,7 +725,20 @@ async fn oauth_login(
 
     // Generate state parameter
     let oauth_state = Uuid::new_v4().to_string();
-    let redirect_after = sanitize_redirect_path(query.redirect_uri);
+    let is_mobile = query.mobile.unwrap_or(false);
+    let redirect_after = sanitize_redirect_path(query.redirect_uri.clone());
+    let mobile_redirect_to = if is_mobile {
+        let app_custom_url_schemes = get_mobile_custom_url_schemes(&state.db).await;
+        query
+            .redirect_to
+            .clone()
+            .or_else(|| query.redirect_uri.clone())
+            .as_deref()
+            .map(|redirect_to| validate_mobile_redirect_to(redirect_to, &app_custom_url_schemes))
+            .transpose()?
+    } else {
+        None
+    };
 
     // Generate PKCE and nonce for OIDC providers
     let (code_verifier, code_challenge, nonce) = match provider_type {
@@ -544,10 +776,11 @@ async fn oauth_login(
         nonce: nonce.clone(),
         code_verifier: code_verifier.clone(),
         code_challenge_method: code_challenge.as_ref().map(|_| "S256".to_string()),
-        is_mobile: query.mobile.unwrap_or(false),
+        is_mobile,
         mobile_sso_state,
         mobile_sso_code_challenge,
         mobile_sso_code_challenge_method,
+        mobile_redirect_to,
     };
 
     // Store state in Redis
@@ -833,13 +1066,17 @@ async fn oauth_callback(
         "OAuth callback using secure exchange code"
     );
 
+    let site_url = get_site_url(&state.db).await;
     let redirect_url = if stored_state.is_mobile {
         // Mobile apps also use exchange codes
-        format!(
-            "rustchat://oauth/complete?login_code={}&code={}",
-            urlencoding::encode(&exchange_code),
-            urlencoding::encode(&exchange_code)
-        )
+        let mobile_redirect_base = stored_state
+            .mobile_redirect_to
+            .clone()
+            .unwrap_or_else(|| "rustchat://callback".to_string());
+        let with_login_code =
+            append_query_param(&mobile_redirect_base, "login_code", &exchange_code);
+        let with_legacy_code = append_query_param(&with_login_code, "code", &exchange_code);
+        append_query_param(&with_legacy_code, "srv", &site_url)
     } else {
         append_query_param(&stored_state.redirect_after, "oauth", "1")
     };

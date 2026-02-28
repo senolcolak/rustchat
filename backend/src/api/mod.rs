@@ -293,6 +293,7 @@ pub fn router(
     };
 
     Router::new()
+        .merge(oauth::web_compat_router())
         .nest("/api/v1", api_v1)
         .nest("/api/v4", api_v4)
         .layer(CatchPanicLayer::custom(handle_panic))
