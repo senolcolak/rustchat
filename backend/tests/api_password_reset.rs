@@ -85,6 +85,20 @@ async fn setup_site_url(db: &PgPool) {
     .expect("Failed to set site_url");
 }
 
+async fn set_auth_policy_defaults(db: &PgPool) {
+    sqlx::query(
+        r#"
+        UPDATE server_config
+        SET authentication = authentication
+            || '{"password_min_length":8,"password_require_lowercase":true,"password_require_uppercase":true,"password_require_number":true,"password_require_symbol":false}'::jsonb
+        WHERE id = 'default'
+        "#,
+    )
+    .execute(db)
+    .await
+    .expect("Failed to set auth policy defaults");
+}
+
 // ============================================
 // Unit Tests for Token Functions
 // ============================================
@@ -286,6 +300,17 @@ async fn test_password_reset_invalid_token() {
 async fn test_password_policy_validation() {
     let app = spawn_app().await;
     let (user_id, _) = create_test_user(&app.db_pool, "test_policy@example.com").await;
+    sqlx::query(
+        r#"
+        UPDATE server_config
+        SET authentication = authentication
+            || '{"password_min_length":8,"password_require_lowercase":true,"password_require_uppercase":true,"password_require_number":true,"password_require_symbol":true}'::jsonb
+        WHERE id = 'default'
+        "#,
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to set strict auth policy");
 
     // Create a test token
     let test_token = "test_token_policy_12345";
@@ -338,13 +363,106 @@ async fn test_password_policy_validation() {
         result,
         Err(PasswordResetError::InvalidPassword(_))
     ));
+}
 
-    // Test common password
-    let result = reset_password(&app.db_pool, test_token, "Password123!").await;
-    assert!(matches!(
-        result,
-        Err(PasswordResetError::InvalidPassword(_))
-    ));
+#[tokio::test]
+async fn test_password_reset_respects_server_auth_policy() {
+    let app = spawn_app().await;
+    let (user_id, _) = create_test_user(&app.db_pool, "test_policy_config@example.com").await;
+    set_auth_policy_defaults(&app.db_pool).await;
+
+    let test_token = "test_policy_config_token_12345";
+    let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
+
+    sqlx::query(
+        r#"
+        INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
+        VALUES ($1, $2, $3, 'password_reset', NOW() + INTERVAL '1 hour')
+        "#,
+    )
+    .bind(&test_token_hash)
+    .bind(user_id)
+    .bind("test_policy_config@example.com")
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to insert token");
+
+    // Valid according to default auth policy (8 chars, upper/lower/number, symbol optional)
+    let result = reset_password(&app.db_pool, test_token, "Abcdef12").await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_passwordless_registration_stays_inactive_until_password_setup() {
+    let app = spawn_app().await;
+    set_auth_policy_defaults(&app.db_pool).await;
+    let email = "pending_setup@example.com";
+
+    let register_response = app
+        .api_client
+        .post(format!("{}/api/v1/auth/register", &app.address))
+        .json(&serde_json::json!({
+            "username": "pending_setup_user",
+            "email": email
+        }))
+        .send()
+        .await
+        .expect("Failed to execute register request");
+
+    assert_eq!(200, register_response.status().as_u16());
+
+    let (user_id, is_active, has_password, email_verified): (Uuid, bool, bool, bool) =
+        sqlx::query_as(
+            r#"
+            SELECT id, is_active, password_hash IS NOT NULL AS has_password, email_verified
+            FROM users
+            WHERE email = $1
+            "#,
+        )
+        .bind(email)
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to query registered user");
+
+    assert!(!is_active);
+    assert!(!has_password);
+    assert!(!email_verified);
+
+    let test_token = "test_password_setup_token_12345";
+    let test_token_hash = format!("{:x}", sha2::Sha256::digest(test_token.as_bytes()));
+
+    sqlx::query(
+        r#"
+        INSERT INTO password_reset_tokens (token_hash, user_id, email, purpose, expires_at)
+        VALUES ($1, $2, $3, 'password_setup', NOW() + INTERVAL '1 hour')
+        "#,
+    )
+    .bind(&test_token_hash)
+    .bind(user_id)
+    .bind(email)
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to insert password setup token");
+
+    let result = reset_password(&app.db_pool, test_token, "Abcdef12").await;
+    assert!(result.is_ok());
+
+    let (is_active_after, has_password_after, email_verified_after): (bool, bool, bool) =
+        sqlx::query_as(
+            r#"
+            SELECT is_active, password_hash IS NOT NULL AS has_password, email_verified
+            FROM users
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to query updated user");
+
+    assert!(is_active_after);
+    assert!(has_password_after);
+    assert!(email_verified_after);
 }
 
 #[tokio::test]

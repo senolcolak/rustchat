@@ -32,8 +32,6 @@ const TOKEN_LENGTH: usize = 32;
 const RATE_LIMIT_IP_HOURLY: i32 = 10;
 /// Max attempts per email per hour
 const RATE_LIMIT_EMAIL_HOURLY: i32 = 3;
-/// Minimum password length
-const MIN_PASSWORD_LENGTH: usize = 12;
 
 /// Error types specific to password reset
 #[derive(Debug, Clone, PartialEq)]
@@ -159,57 +157,6 @@ async fn check_rate_limits(
         if ip_count >= RATE_LIMIT_IP_HOURLY as i64 {
             warn!("Rate limit exceeded for IP: {}", ip);
             return Err(PasswordResetError::RateLimitExceeded);
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate password against security policy
-fn validate_password_policy(password: &str) -> Result<(), PasswordResetError> {
-    if password.len() < MIN_PASSWORD_LENGTH {
-        return Err(PasswordResetError::InvalidPassword(format!(
-            "Password must be at least {} characters long",
-            MIN_PASSWORD_LENGTH
-        )));
-    }
-
-    // Check for at least one uppercase letter
-    if !password.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err(PasswordResetError::InvalidPassword(
-            "Password must contain at least one uppercase letter".to_string(),
-        ));
-    }
-
-    // Check for at least one lowercase letter
-    if !password.chars().any(|c| c.is_ascii_lowercase()) {
-        return Err(PasswordResetError::InvalidPassword(
-            "Password must contain at least one lowercase letter".to_string(),
-        ));
-    }
-
-    // Check for at least one digit
-    if !password.chars().any(|c| c.is_ascii_digit()) {
-        return Err(PasswordResetError::InvalidPassword(
-            "Password must contain at least one digit".to_string(),
-        ));
-    }
-
-    // Check for at least one special character
-    if !password.chars().any(|c| !c.is_alphanumeric()) {
-        return Err(PasswordResetError::InvalidPassword(
-            "Password must contain at least one special character".to_string(),
-        ));
-    }
-
-    // Check against common passwords (basic list)
-    let common_passwords = ["password", "123456", "qwerty", "admin", "letmein"];
-    let password_lower = password.to_lowercase();
-    for common in &common_passwords {
-        if password_lower.contains(common) {
-            return Err(PasswordResetError::InvalidPassword(
-                "Password is too common or easily guessed".to_string(),
-            ));
         }
     }
 
@@ -375,30 +322,50 @@ pub async fn reset_password(
     token: &str,
     new_password: &str,
 ) -> Result<Uuid, PasswordResetError> {
-    // Validate password policy first
-    validate_password_policy(new_password)?;
+    // Use the same policy source and validation logic as registration.
+    let auth_config = crate::services::auth_config::get_password_rules(db)
+        .await
+        .map_err(|e| {
+            error!("Failed to load auth policy: {}", e);
+            PasswordResetError::Internal("Failed to load password policy".to_string())
+        })?;
+
+    crate::services::auth_config::validate_password(new_password, &auth_config).map_err(|e| {
+        if let AppError::Validation(msg) = e {
+            PasswordResetError::InvalidPassword(msg)
+        } else {
+            error!("Password validation failed: {}", e);
+            PasswordResetError::Internal("Failed to validate password".to_string())
+        }
+    })?;
 
     let token_hash = hash_token(token);
 
     // Find and validate token (with row lock to prevent race conditions)
-    let result: Option<(Uuid, String, String, Option<DateTime<Utc>>, DateTime<Utc>)> =
-        sqlx::query_as(
-            r#"
-        SELECT user_id, email, token_hash, used_at, expires_at
+    let result: Option<(
+        Uuid,
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        DateTime<Utc>,
+        String,
+    )> = sqlx::query_as(
+        r#"
+        SELECT user_id, email, token_hash, used_at, expires_at, purpose
         FROM password_reset_tokens 
         WHERE token_hash = $1
         FOR UPDATE
         "#,
-        )
-        .bind(&token_hash)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| {
-            error!("Token fetch failed: {}", e);
-            PasswordResetError::Internal("Token validation failed".to_string())
-        })?;
+    )
+    .bind(&token_hash)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        error!("Token fetch failed: {}", e);
+        PasswordResetError::Internal("Token validation failed".to_string())
+    })?;
 
-    let (user_id, email, stored_hash, used_at, expires_at) = match result {
+    let (user_id, email, stored_hash, used_at, expires_at, purpose) = match result {
         Some(r) => r,
         None => return Err(PasswordResetError::TokenNotFound),
     };
@@ -415,6 +382,8 @@ pub async fn reset_password(
     if Utc::now() > expires_at {
         return Err(PasswordResetError::TokenExpired);
     }
+
+    let activate_user = purpose == "password_setup";
 
     // Hash new password
     let password_hash = hash_password(new_password).map_err(|e| {
@@ -451,12 +420,14 @@ pub async fn reset_password(
         SET password_hash = $1, 
             updated_at = NOW(),
             email_verified = true,
-            email_verified_at = COALESCE(email_verified_at, NOW())
+            email_verified_at = COALESCE(email_verified_at, NOW()),
+            is_active = CASE WHEN $3 THEN true ELSE is_active END
         WHERE id = $2
         "#,
     )
     .bind(&password_hash)
     .bind(user_id)
+    .bind(activate_user)
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -732,66 +703,5 @@ mod tests {
         // Empty strings
         assert!(constant_time_compare("", ""));
         assert!(!constant_time_compare("a", ""));
-    }
-
-    #[test]
-    fn test_validate_password_policy_too_short() {
-        let result = validate_password_policy("short1!");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_missing_uppercase() {
-        let result = validate_password_policy("lowercase123!");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_missing_lowercase() {
-        let result = validate_password_policy("UPPERCASE123!");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_missing_digit() {
-        let result = validate_password_policy("PasswordNoDigit!");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_missing_special() {
-        let result = validate_password_policy("PasswordNoSpecial123");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_common_password() {
-        let result = validate_password_policy("Password123!");
-        assert!(matches!(
-            result,
-            Err(PasswordResetError::InvalidPassword(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_password_policy_valid() {
-        // Valid password meeting all criteria
-        let result = validate_password_policy("MyStr0ng!Passw0rd");
-        assert!(result.is_ok());
     }
 }

@@ -168,11 +168,14 @@ async fn register(
         None
     };
 
+    // Passwordless registrations stay inactive until password setup succeeds.
+    let is_active = has_password;
+
     // Insert user (email_verified defaults to false, password_hash may be NULL for passwordless)
     let user: User = sqlx::query_as(
         r#"
-        INSERT INTO users (username, email, password_hash, display_name, org_id, role, email_verified)
-        VALUES ($1, $2, $3, $4, $5, 'member', false)
+        INSERT INTO users (username, email, password_hash, display_name, org_id, role, is_active, email_verified)
+        VALUES ($1, $2, $3, $4, $5, 'member', $6, false)
         RETURNING *
         "#,
     )
@@ -181,6 +184,7 @@ async fn register(
     .bind(&password_hash)
     .bind(&input.display_name)
     .bind(input.org_id)
+    .bind(is_active)
     .fetch_one(&state.db)
     .await?;
 

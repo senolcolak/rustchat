@@ -23,6 +23,12 @@ pub fn validate_password(password: &str, config: &AuthConfig) -> Result<(), AppE
         )));
     }
 
+    if config.password_require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
+        return Err(AppError::Validation(
+            "Password must contain at least one lowercase letter".to_string(),
+        ));
+    }
+
     if config.password_require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
         return Err(AppError::Validation(
             "Password must contain at least one uppercase letter".to_string(),
