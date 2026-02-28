@@ -1,5 +1,6 @@
 use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
+use crate::services::membership_policies::apply_auto_membership_for_team_join;
 use serde_json::Value;
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -153,27 +154,47 @@ pub async fn apply_default_channel_membership_for_team_join(
         }
     }
 
+    // Apply legacy default channel membership
     let default_names = get_team_default_channel_names(state).await?;
-    if default_names.is_empty() {
-        return Ok(());
+    if !default_names.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (channel_id, user_id)
+            SELECT c.id, $1
+            FROM channels c
+            WHERE c.team_id = $2
+              AND c.type = 'public'::channel_type
+              AND c.name = ANY($3::text[])
+            ON CONFLICT (channel_id, user_id) DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(team_id)
+        .bind(&default_names)
+        .execute(&state.db)
+        .await?;
     }
 
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1
-        FROM channels c
-        WHERE c.team_id = $2
-          AND c.type = 'public'::channel_type
-          AND c.name = ANY($3::text[])
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(user_id)
-    .bind(team_id)
-    .bind(default_names)
-    .execute(&state.db)
-    .await?;
+    // Apply auto-membership policies (soft-fail for parity)
+    let policy_results = apply_auto_membership_for_team_join(state, user_id, team_id, "team_join").await;
+    
+    // Log policy application results but don't fail the join if policies fail
+    if let Ok(audit_entries) = policy_results {
+        let success_count = audit_entries.iter().filter(|e| e.status == "success").count();
+        let failed_count = audit_entries.iter().filter(|e| e.status == "failed").count();
+        
+        if failed_count > 0 {
+            tracing::warn!(
+                "Auto-membership policy partially failed for user {} joining team {}: {} succeeded, {} failed",
+                user_id, team_id, success_count, failed_count
+            );
+        }
+    } else if let Err(e) = policy_results {
+        tracing::error!(
+            "Auto-membership policy application failed for user {} joining team {}: {}",
+            user_id, team_id, e
+        );
+    }
 
     Ok(())
 }

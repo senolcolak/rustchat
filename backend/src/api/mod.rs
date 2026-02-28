@@ -4,6 +4,7 @@
 
 mod admin;
 mod admin_email;
+mod admin_membership_policies;
 mod auth;
 mod calls;
 mod channels;
