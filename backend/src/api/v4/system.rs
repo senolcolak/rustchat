@@ -2,6 +2,9 @@ use crate::api::AppState;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::MM_VERSION;
 use crate::models::email::MailProviderSettings;
+use crate::services::team_membership::{
+    get_configured_default_channels, normalize_configured_default_channels,
+};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -299,6 +302,7 @@ async fn get_config(
     .await
     .ok()
     .flatten();
+    let configured_default_channels = get_configured_default_channels(&state).await?;
 
     // Convert to Mattermost-compatible format
     let response = serde_json::json!({
@@ -316,6 +320,7 @@ async fn get_config(
             "EnableUserCreation": config.authentication.0.enable_user_creation,
             "EnableOpenServer": config.authentication.0.enable_open_server,
             "RestrictTeamInvite": "all",
+            "ExperimentalDefaultChannels": configured_default_channels,
         },
         "SqlSettings": {
             "DriverName": "postgres",
@@ -460,6 +465,17 @@ async fn patch_config(
                 "UPDATE server_config SET site = jsonb_set(site, '{site_name}', $1, true), updated_at = NOW(), updated_by = $2 WHERE id = 'default'"
             )
             .bind(serde_json::json!(site_name))
+            .bind(auth.user_id)
+            .execute(&state.db)
+            .await?;
+        }
+
+        if let Some(default_channels) = team_settings.get("ExperimentalDefaultChannels") {
+            let normalized = normalize_configured_default_channels(default_channels);
+            sqlx::query(
+                "UPDATE server_config SET experimental = jsonb_set(experimental, '{team_default_channels}', $1, true), updated_at = NOW(), updated_by = $2 WHERE id = 'default'"
+            )
+            .bind(serde_json::json!(normalized))
             .bind(auth.user_id)
             .execute(&state.db)
             .await?;

@@ -18,6 +18,7 @@ import { useTeamStore } from '../../stores/teams';
 import { useAuthStore } from '../../stores/auth';
 import { channelRepository } from '../../features/channels/repositories/channelRepository';
 import type { SidebarCategory } from '../../api/channels';
+import { postsApi } from '../../api/posts';
 
 interface ChannelMenuItem {
     id: string
@@ -157,7 +158,13 @@ async function handleMarkReadUnread() {
     if (hasUnread.value) {
         await unreadStore.markAsRead(props.channelId)
     } else {
-        await unreadStore.markAsUnread(props.channelId)
+        const { data } = await postsApi.list(props.channelId, { limit: 1 })
+        const latestPost = data.messages?.[0]
+        if (latestPost?.id) {
+            await unreadStore.markAsUnreadFromPost(latestPost.id)
+        } else {
+            await unreadStore.markAsUnread(props.channelId)
+        }
     }
     emit('action', hasUnread.value ? 'mark-read' : 'mark-unread')
     emit('close')

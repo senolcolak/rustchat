@@ -312,6 +312,7 @@ fn test_secret_entropy_validation() {
         turnstile: Default::default(),
         calls: Default::default(),
         security: Default::default(),
+        unread: Default::default(),
     };
 
     // Test: Weak secret with low entropy

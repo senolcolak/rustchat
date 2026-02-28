@@ -113,11 +113,39 @@ pub struct ChannelMember {
     pub last_viewed_at: i64,
     pub msg_count: i64,
     pub mention_count: i64,
+    pub mention_count_root: i64,
+    pub urgent_mention_count: i64,
+    pub msg_count_root: i64,
     pub notify_props: Value,
     pub last_update_at: i64,
     pub scheme_guest: bool,
     pub scheme_user: bool,
     pub scheme_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelUnreadAt {
+    pub team_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub msg_count: i64,
+    pub mention_count: i64,
+    pub mention_count_root: i64,
+    pub urgent_mention_count: i64,
+    pub msg_count_root: i64,
+    pub last_viewed_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamUnread {
+    pub team_id: String,
+    pub msg_count: i64,
+    pub mention_count: i64,
+    pub mention_count_root: i64,
+    pub msg_count_root: i64,
+    pub thread_count: i64,
+    pub thread_mention_count: i64,
+    pub thread_urgent_mention_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

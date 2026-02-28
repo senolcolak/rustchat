@@ -190,3 +190,123 @@ async fn mm_channel_member_routes() {
     let notify_body: serde_json::Value = notify_res.json().await.unwrap();
     assert_eq!(notify_body["notify_props"]["desktop"], "mention");
 }
+
+#[tokio::test]
+async fn mm_channel_member_routes_return_computed_counts() {
+    let ctx = setup_mm_user().await;
+    let (_team_id, channel_id) = setup_team_channel(&ctx).await;
+
+    let first_seq: i64 = sqlx::query_scalar(
+        "INSERT INTO posts (channel_id, user_id, message, props) VALUES ($1, $2, $3, '{}'::jsonb) RETURNING seq",
+    )
+    .bind(channel_id)
+    .bind(ctx.user_uuid)
+    .bind("seed message")
+    .fetch_one(&ctx.app.db_pool)
+    .await
+    .expect("failed to insert first post");
+
+    let _second_seq: i64 = sqlx::query_scalar(
+        "INSERT INTO posts (channel_id, user_id, message, props) VALUES ($1, $2, $3, '{}'::jsonb) RETURNING seq",
+    )
+    .bind(channel_id)
+    .bind(ctx.user_uuid)
+    .bind("@mmchannelmember @here unread mention")
+    .fetch_one(&ctx.app.db_pool)
+    .await
+    .expect("failed to insert second post");
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_reads (user_id, channel_id, last_read_message_id, last_read_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (user_id, channel_id)
+        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = NOW()
+        "#,
+    )
+    .bind(ctx.user_uuid)
+    .bind(channel_id)
+    .bind(first_seq)
+    .execute(&ctx.app.db_pool)
+    .await
+    .expect("failed to set read cursor");
+
+    let member_res = ctx
+        .app
+        .api_client
+        .get(format!(
+            "{}/api/v4/channels/{}/members/{}",
+            &ctx.app.address, channel_id, ctx.user_id
+        ))
+        .header("Authorization", format!("Bearer {}", ctx.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(200, member_res.status().as_u16());
+    let member_body: serde_json::Value = member_res.json().await.unwrap();
+    assert_eq!(member_body["msg_count"], 1);
+    assert_eq!(member_body["msg_count_root"], 1);
+    assert_eq!(member_body["mention_count"], 1);
+    assert_eq!(member_body["mention_count_root"], 1);
+}
+
+#[tokio::test]
+async fn mm_channel_unread_returns_root_and_team_fields() {
+    let ctx = setup_mm_user().await;
+    let (team_id, channel_id) = setup_team_channel(&ctx).await;
+
+    let first_seq: i64 = sqlx::query_scalar(
+        "INSERT INTO posts (channel_id, user_id, message, props) VALUES ($1, $2, $3, '{}'::jsonb) RETURNING seq",
+    )
+    .bind(channel_id)
+    .bind(ctx.user_uuid)
+    .bind("seed message")
+    .fetch_one(&ctx.app.db_pool)
+    .await
+    .expect("failed to insert first post");
+
+    let _second_seq: i64 = sqlx::query_scalar(
+        "INSERT INTO posts (channel_id, user_id, message, props) VALUES ($1, $2, $3, '{}'::jsonb) RETURNING seq",
+    )
+    .bind(channel_id)
+    .bind(ctx.user_uuid)
+    .bind("@mmchannelmember @here unread mention")
+    .fetch_one(&ctx.app.db_pool)
+    .await
+    .expect("failed to insert second post");
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_reads (user_id, channel_id, last_read_message_id, last_read_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (user_id, channel_id)
+        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = NOW()
+        "#,
+    )
+    .bind(ctx.user_uuid)
+    .bind(channel_id)
+    .bind(first_seq)
+    .execute(&ctx.app.db_pool)
+    .await
+    .expect("failed to set read cursor");
+
+    let unread_res = ctx
+        .app
+        .api_client
+        .get(format!(
+            "{}/api/v4/channels/{}/unread",
+            &ctx.app.address, channel_id
+        ))
+        .header("Authorization", format!("Bearer {}", ctx.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(200, unread_res.status().as_u16());
+    let unread_body: serde_json::Value = unread_res.json().await.unwrap();
+    assert_eq!(unread_body["team_id"], encode_mm_id(team_id));
+    assert_eq!(unread_body["channel_id"], encode_mm_id(channel_id));
+    assert_eq!(unread_body["msg_count"], 1);
+    assert_eq!(unread_body["msg_count_root"], 1);
+    assert_eq!(unread_body["mention_count"], 1);
+    assert_eq!(unread_body["mention_count_root"], 1);
+}

@@ -40,7 +40,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/ldap/users/{user_id}/group_sync_memberships",
-            get(get_ldap_user_group_sync_memberships),
+            post(sync_ldap_user_group_sync_memberships),
         )
 }
 
@@ -134,8 +134,8 @@ async fn remove_ldap_private_certificate(
     enterprise_required()
 }
 
-/// GET /api/v4/ldap/users/{user_id}/group_sync_memberships
-async fn get_ldap_user_group_sync_memberships(
+/// POST /api/v4/ldap/users/{user_id}/group_sync_memberships
+async fn sync_ldap_user_group_sync_memberships(
     State(_state): State<AppState>,
     _auth: crate::api::v4::extractors::MmAuthUser,
     Path(_user_id): Path<String>,

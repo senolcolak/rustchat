@@ -1,6 +1,7 @@
 use once_cell::sync::Lazy;
 use rustchat::{api, config::Config, realtime::WsHub, storage::S3Client};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 // Ensure tracing is initialized only once
@@ -21,6 +22,10 @@ pub struct TestApp {
 }
 
 pub async fn spawn_app() -> TestApp {
+    spawn_app_with_config(test_config()).await
+}
+
+pub async fn spawn_app_with_config(config: Config) -> TestApp {
     Lazy::force(&TRACING);
 
     let db_url = std::env::var("RUSTCHAT_DATABASE_URL")
@@ -49,10 +54,12 @@ pub async fn spawn_app() -> TestApp {
         "us-east-1".to_string(),
     );
 
-    s3_client
-        .ensure_bucket()
-        .await
-        .expect("Failed to create test bucket");
+    if let Err(err) = s3_client.ensure_bucket().await {
+        tracing::warn!(
+            error = %err,
+            "Failed to create test bucket; continuing test bootstrap"
+        );
+    }
 
     let jwt_secret = Uuid::new_v4().to_string();
     let jwt_expiry_hours = 1;
@@ -70,10 +77,13 @@ pub async fn spawn_app() -> TestApp {
         jwt_expiry_hours,
         ws_hub,
         s3_client,
-        test_config(),
+        config,
     );
 
-    let server = axum::serve(listener, app);
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    );
     tokio::spawn(async move {
         server.await.expect("Failed to run server");
     });
@@ -90,7 +100,7 @@ pub async fn spawn_app() -> TestApp {
     }
 }
 
-fn test_config() -> Config {
+pub fn test_config() -> Config {
     Config {
         environment: "test".to_string(),
         server_host: "127.0.0.1".to_string(),
@@ -116,7 +126,11 @@ fn test_config() -> Config {
         cors_allowed_origins: None,
         turnstile: Default::default(),
         calls: Default::default(),
-        security: Default::default(),
+        security: rustchat::config::SecurityConfig {
+            rate_limit_enabled: false,
+            ..Default::default()
+        },
+        unread: Default::default(),
     }
 }
 

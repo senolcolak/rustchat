@@ -13,6 +13,9 @@ use crate::{
     auth::policy::permissions,
     error::AppError,
     models::team::{AddTeamMember, CreateTeam, Team, TeamMember, TeamMemberResponse},
+    services::team_membership::{
+        apply_default_channel_membership_for_team_join, ensure_default_channels_for_team,
+    },
 };
 
 pub fn router() -> Router<AppState> {
@@ -109,6 +112,18 @@ async fn create_team(
     .execute(&state.db)
     .await?;
 
+    ensure_default_channels_for_team(&state, team_id, auth.user_id).await?;
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, team_id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after team creation"
+        );
+    }
+
     Ok(Json(team))
 }
 
@@ -199,19 +214,16 @@ async fn add_member(
     .fetch_one(&state.db)
     .await?;
 
-    // Also add user to all public channels in the team
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.type = 'public'::channel_type
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(payload.user_id)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, id, payload.user_id).await
+    {
+        tracing::warn!(
+            team_id = %id,
+            user_id = %payload.user_id,
+            error = %err,
+            "Default channel auto-join failed after add_member"
+        );
+    }
 
     Ok(Json(member))
 }
@@ -346,19 +358,15 @@ async fn join_team(
     .fetch_one(&state.db)
     .await?;
 
-    // Also add user to all public channels in the team
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.type = 'public'::channel_type
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(auth.user_id)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    if let Err(err) = apply_default_channel_membership_for_team_join(&state, id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after join_team"
+        );
+    }
 
     Ok(Json(member))
 }

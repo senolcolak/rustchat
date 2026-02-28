@@ -6,7 +6,7 @@ export interface ServerConfig {
     authentication: AuthConfig;
     integrations: IntegrationsConfig;
     compliance: ComplianceConfig;
-    experimental: Record<string, boolean>;
+    experimental: Record<string, unknown>;
 }
 
 // Email Provider (new provider-based system)

@@ -165,5 +165,6 @@ fn test_config() -> Config {
         turnstile: Default::default(),
         calls: Default::default(),
         security: Default::default(),
+        unread: Default::default(),
     }
 }

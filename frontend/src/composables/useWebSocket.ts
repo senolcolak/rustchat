@@ -511,6 +511,19 @@ export function useWebSocket() {
                 break
             }
 
+            case 'post_unread': {
+                if (envelope.data) {
+                    const channelId = normalizeEntityId(envelope.data.channel_id) ?? envelope.data.channel_id
+                    if (typeof channelId === 'string' && channelId) {
+                        const unreadCount = Number(envelope.data.msg_count ?? 0)
+                        const mentionCount = Number(envelope.data.mention_count ?? 0)
+                        unreadStore.channelUnreads[channelId] = Number.isFinite(unreadCount) ? unreadCount : 0
+                        unreadStore.channelMentions[channelId] = Number.isFinite(mentionCount) ? mentionCount : 0
+                    }
+                }
+                break
+            }
+
             case 'error':
                 console.error('WS Error:', envelope.data)
                 break

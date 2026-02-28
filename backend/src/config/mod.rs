@@ -108,6 +108,10 @@ pub struct Config {
     /// Security policy configuration
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Unread/read parity behavior configuration
+    #[serde(default)]
+    pub unread: UnreadConfig,
 }
 
 /// Calls plugin configuration
@@ -181,6 +185,47 @@ impl Default for CallsConfig {
     }
 }
 
+/// Unread/read parity configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnreadConfig {
+    /// Enable unread cache v2 code paths.
+    #[serde(default = "default_unread_v2_enabled")]
+    pub unread_v2_enabled: bool,
+
+    /// Enable websocket `post_unread` fan-out.
+    #[serde(default = "default_post_unread_ws_enabled")]
+    pub post_unread_ws_enabled: bool,
+
+    /// Enable team unread v2 aggregation path.
+    #[serde(default = "default_team_unread_v2_enabled")]
+    pub team_unread_v2_enabled: bool,
+
+    /// Enable collapsed threads semantics for unread behavior.
+    #[serde(default = "default_collapsed_threads_enabled")]
+    pub collapsed_threads_enabled: bool,
+
+    /// Enable post priority/urgent mention counting.
+    #[serde(default = "default_post_priority_enabled")]
+    pub post_priority_enabled: bool,
+
+    /// Auto-follow thread when marking reply unread.
+    #[serde(default = "default_thread_auto_follow")]
+    pub thread_auto_follow: bool,
+}
+
+impl Default for UnreadConfig {
+    fn default() -> Self {
+        Self {
+            unread_v2_enabled: default_unread_v2_enabled(),
+            post_unread_ws_enabled: default_post_unread_ws_enabled(),
+            team_unread_v2_enabled: default_team_unread_v2_enabled(),
+            collapsed_threads_enabled: default_collapsed_threads_enabled(),
+            post_priority_enabled: default_post_priority_enabled(),
+            thread_auto_follow: default_thread_auto_follow(),
+        }
+    }
+}
+
 fn default_calls_enabled() -> bool {
     false // Disabled by default
 }
@@ -216,6 +261,30 @@ fn default_stun_servers() -> Vec<String> {
 
 fn default_calls_state_backend() -> String {
     "auto".to_string()
+}
+
+fn default_unread_v2_enabled() -> bool {
+    false
+}
+
+fn default_post_unread_ws_enabled() -> bool {
+    true
+}
+
+fn default_team_unread_v2_enabled() -> bool {
+    true
+}
+
+fn default_collapsed_threads_enabled() -> bool {
+    true
+}
+
+fn default_post_priority_enabled() -> bool {
+    false
+}
+
+fn default_thread_auto_follow() -> bool {
+    true
 }
 
 /// Database connection pool configuration
@@ -478,6 +547,32 @@ impl Config {
         Ok(())
     }
 
+    fn apply_unread_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_UNREAD_V2_ENABLED") {
+            self.unread.unread_v2_enabled = parse_bool_env("RUSTCHAT_UNREAD_V2_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_POST_UNREAD_WS_ENABLED") {
+            self.unread.post_unread_ws_enabled =
+                parse_bool_env("RUSTCHAT_POST_UNREAD_WS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_TEAM_UNREAD_V2_ENABLED") {
+            self.unread.team_unread_v2_enabled =
+                parse_bool_env("RUSTCHAT_TEAM_UNREAD_V2_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_COLLAPSED_THREADS_ENABLED") {
+            self.unread.collapsed_threads_enabled =
+                parse_bool_env("RUSTCHAT_COLLAPSED_THREADS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_POST_PRIORITY_ENABLED") {
+            self.unread.post_priority_enabled =
+                parse_bool_env("RUSTCHAT_POST_PRIORITY_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_THREAD_AUTO_FOLLOW") {
+            self.unread.thread_auto_follow = parse_bool_env("RUSTCHAT_THREAD_AUTO_FOLLOW", &raw)?;
+        }
+        Ok(())
+    }
+
     /// Load configuration from environment variables
     pub fn load() -> anyhow::Result<Self> {
         let mut builder = config::Config::builder();
@@ -500,6 +595,7 @@ impl Config {
         let config = builder.build()?;
         let mut settings: Config = config.try_deserialize()?;
         settings.apply_calls_env_overrides()?;
+        settings.apply_unread_env_overrides()?;
 
         // Validate security settings
         settings.validate_security()?;

@@ -17,6 +17,7 @@ use crate::mattermost_compat::{
 };
 use crate::models::channel::ChannelType;
 use crate::models::{Channel, Team, TeamMember};
+use crate::services::team_membership::apply_default_channel_membership_for_team_join;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -291,6 +292,15 @@ async fn add_team_member(
     .bind("member")
     .execute(&state.db)
     .await?;
+    if let Err(err) = apply_default_channel_membership_for_team_join(&state, team_id, user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %user_id,
+            error = %err,
+            "Default channel auto-join failed after v4 add_team_member"
+        );
+    }
 
     Ok(Json(map_team_member(TeamMember {
         team_id,
@@ -301,11 +311,144 @@ async fn add_team_member(
 }
 
 async fn add_team_member_by_invite(
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid invite body")?;
-    Ok(status_ok())
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Query(query): Query<AddTeamMemberByInviteQuery>,
+) -> ApiResult<(axum::http::StatusCode, Json<mm::TeamMember>)> {
+    let token = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let invite_id = query
+        .invite_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let team_id = if let Some(token_value) = token {
+        let mut tx = state.db.begin().await?;
+        let token_row: TeamInviteTokenRow = sqlx::query_as(
+            r#"
+            SELECT team_id, expires_at, used_at
+            FROM team_invite_tokens
+            WHERE token = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_value)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            crate::error::AppError::BadRequest("Invalid invitation token".to_string())
+        })?;
+
+        if token_row.used_at.is_some() || token_row.expires_at <= chrono::Utc::now() {
+            return Err(crate::error::AppError::BadRequest(
+                "Invalid or expired invitation token".to_string(),
+            ));
+        }
+
+        let team: Team = sqlx::query_as("SELECT * FROM teams WHERE id = $1")
+            .bind(token_row.team_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO team_members (team_id, user_id, role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (team_id, user_id)
+            DO UPDATE SET role = EXCLUDED.role
+            "#,
+        )
+        .bind(team.id)
+        .bind(auth.user_id)
+        .bind("member")
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("UPDATE team_invite_tokens SET used_at = NOW() WHERE token = $1")
+            .bind(token_value)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        team.id
+    } else if let Some(invite_value) = invite_id {
+        if auth.has_role("guest") {
+            return Err(crate::error::AppError::Forbidden(
+                "Guests cannot join teams through invite_id".to_string(),
+            ));
+        }
+
+        let team: Team = sqlx::query_as("SELECT * FROM teams WHERE invite_id = $1")
+            .bind(invite_value)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+        if !team.allow_open_invite {
+            return Err(crate::error::AppError::Forbidden(
+                "This team does not allow open joining".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO team_members (team_id, user_id, role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (team_id, user_id)
+            DO UPDATE SET role = EXCLUDED.role
+            "#,
+        )
+        .bind(team.id)
+        .bind(auth.user_id)
+        .bind("member")
+        .execute(&state.db)
+        .await?;
+
+        team.id
+    } else {
+        return Err(crate::error::AppError::BadRequest(
+            "Missing invitation token or invite_id".to_string(),
+        ));
+    };
+
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, team_id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after v4 add_team_member_by_invite"
+        );
+    }
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(map_team_member(TeamMember {
+            team_id,
+            user_id: auth.user_id,
+            role: "member".to_string(),
+            created_at: chrono::Utc::now(),
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AddTeamMemberByInviteQuery {
+    token: Option<String>,
+    invite_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamInviteTokenRow {
+    team_id: Uuid,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -342,6 +485,16 @@ async fn add_team_members_batch(
         .bind("member")
         .execute(&state.db)
         .await?;
+        if let Err(err) =
+            apply_default_channel_membership_for_team_join(&state, team_id, user_id).await
+        {
+            tracing::warn!(
+                team_id = %team_id,
+                user_id = %user_id,
+                error = %err,
+                "Default channel auto-join failed after v4 add_team_members_batch"
+            );
+        }
         members.push(map_team_member(TeamMember {
             team_id,
             user_id,
@@ -438,12 +591,27 @@ async fn get_team_stats(
 }
 
 async fn regenerate_team_invite_id(
+    State(state): State<AppState>,
     _auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
+    let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(serde_json::json!({"invite_id": ""})))
+
+    let invite_id: String = sqlx::query_scalar(
+        r#"
+        UPDATE teams
+        SET invite_id = replace(gen_random_uuid()::text, '-', '')
+        WHERE id = $1
+        RETURNING invite_id
+        "#,
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+    Ok(Json(serde_json::json!({"invite_id": invite_id})))
 }
 
 #[derive(Deserialize)]
@@ -740,9 +908,10 @@ async fn import_team(
 async fn get_team_by_invite(
     State(state): State<AppState>,
     _auth: MmAuthUser,
-    Path(_invite_id): Path<String>,
+    Path(invite_id): Path<String>,
 ) -> ApiResult<Json<mm::Team>> {
-    let team: Team = sqlx::query_as("SELECT * FROM teams ORDER BY created_at ASC LIMIT 1")
+    let team: Team = sqlx::query_as("SELECT * FROM teams WHERE invite_id = $1")
+        .bind(invite_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;

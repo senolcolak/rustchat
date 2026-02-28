@@ -52,6 +52,18 @@ export interface Reaction {
     emoji: string
 }
 
+export interface ChannelUnreadAt {
+    team_id: string
+    user_id: string
+    channel_id: string
+    msg_count: number
+    mention_count: number
+    mention_count_root: number
+    urgent_mention_count: number
+    msg_count_root: number
+    last_viewed_at: number
+}
+
 export const postsApi = {
     list: (channelId: string, params?: { before?: string; limit?: number; is_pinned?: boolean; q?: string }) =>
         api.get<PostListResponse>(`/channels/${channelId}/posts`, { params }),
@@ -67,4 +79,9 @@ export const postsApi = {
     save: (id: string) => api.post(`/posts/${id}/save`),
     unsave: (id: string) => api.delete(`/posts/${id}/save`),
     getSaved: () => api.get<Post[]>('/active_user/saved_posts'),
+    setUnreadFromPost: (
+        userId: string,
+        postId: string,
+        body: { collapsed_threads_supported?: boolean } = {}
+    ) => api.post<ChannelUnreadAt>(`/users/${userId}/posts/${postId}/set_unread`, body),
 }

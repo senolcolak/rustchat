@@ -43,6 +43,20 @@ pub struct ChannelMember {
     pub notify_props: serde_json::Value,
     pub last_viewed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub msg_count: i64,
+    #[sqlx(default)]
+    pub mention_count: i64,
+    #[sqlx(default)]
+    pub mention_count_root: i64,
+    #[sqlx(default)]
+    pub urgent_mention_count: i64,
+    #[sqlx(default)]
+    pub msg_count_root: i64,
+    #[sqlx(default)]
+    pub manually_unread: bool,
+    #[sqlx(default)]
+    pub last_update_at: Option<DateTime<Utc>>,
 
     // Joined fields (optional)
     #[sqlx(default)]

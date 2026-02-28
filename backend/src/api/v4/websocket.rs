@@ -702,7 +702,10 @@ async fn handle_client_value_message(
 struct ChannelUnreadSnapshot {
     channel_id: String,
     msg_count: i64,
+    msg_count_root: i64,
     mention_count: i64,
+    mention_count_root: i64,
+    urgent_mention_count: i64,
     last_viewed_at: i64,
 }
 
@@ -803,7 +806,22 @@ async fn build_reconnect_snapshot(
     let mm_channels: Vec<mm::Channel> = channels.iter().cloned().map(Into::into).collect();
     let channel_ids: Vec<Uuid> = channels.iter().map(|c| c.id).collect();
 
-    let membership_rows: Vec<(Uuid, String, serde_json::Value, Option<DateTime<Utc>>, i64)> =
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let membership_rows: Vec<(
+        Uuid,
+        String,
+        serde_json::Value,
+        Option<DateTime<Utc>>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    )> =
         sqlx::query_as(
             r#"
             SELECT
@@ -811,32 +829,72 @@ async fn build_reconnect_snapshot(
                 cm.role,
                 cm.notify_props,
                 cm.last_viewed_at,
-                COUNT(p.id)::BIGINT AS msg_count
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > COALESCE(cr.last_read_message_id, 0))::BIGINT AS msg_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                )::BIGINT AS mention_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                )::BIGINT AS msg_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                )::BIGINT AS mention_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                      AND p.message LIKE '%@here%'
+                )::BIGINT AS urgent_mention_count
             FROM channel_members cm
+            LEFT JOIN channel_reads cr
+                ON cr.channel_id = cm.channel_id
+               AND cr.user_id = cm.user_id
             LEFT JOIN posts p
                 ON p.channel_id = cm.channel_id
-               AND p.deleted_at IS NULL
-               AND p.user_id <> cm.user_id
-               AND p.created_at > COALESCE(cm.last_viewed_at, to_timestamp(0))
             WHERE cm.user_id = $1
             GROUP BY cm.channel_id, cm.role, cm.notify_props, cm.last_viewed_at
             ORDER BY cm.channel_id
             "#,
         )
         .bind(user_id)
+        .bind(&username)
         .fetch_all(&state.db)
         .await?;
 
     let channel_members: Vec<mm::ChannelMember> = membership_rows
         .iter()
         .map(
-            |(channel_id, role, notify_props, last_viewed_at, msg_count)| mm::ChannelMember {
+            |(
+                channel_id,
+                role,
+                notify_props,
+                last_viewed_at,
+                msg_count,
+                mention_count,
+                msg_count_root,
+                mention_count_root,
+                urgent_mention_count,
+            )| mm::ChannelMember {
                 channel_id: encode_mm_id(*channel_id),
                 user_id: encode_mm_id(user_id),
                 roles: map_channel_role(role),
                 last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
                 msg_count: *msg_count,
-                mention_count: 0,
+                mention_count: *mention_count,
+                mention_count_root: *mention_count_root,
+                urgent_mention_count: if state.config.unread.post_priority_enabled {
+                    *urgent_mention_count
+                } else {
+                    0
+                },
+                msg_count_root: *msg_count_root,
                 notify_props: normalize_notify_props_for_snapshot(notify_props.clone()),
                 last_update_at: 0,
                 scheme_guest: false,
@@ -849,10 +907,27 @@ async fn build_reconnect_snapshot(
     let channel_unreads: Vec<ChannelUnreadSnapshot> = membership_rows
         .iter()
         .map(
-            |(channel_id, _role, _notify_props, last_viewed_at, msg_count)| ChannelUnreadSnapshot {
+            |(
+                channel_id,
+                _role,
+                _notify_props,
+                last_viewed_at,
+                msg_count,
+                mention_count,
+                msg_count_root,
+                mention_count_root,
+                urgent_mention_count,
+            )| ChannelUnreadSnapshot {
                 channel_id: encode_mm_id(*channel_id),
                 msg_count: *msg_count,
-                mention_count: 0,
+                msg_count_root: *msg_count_root,
+                mention_count: *mention_count,
+                mention_count_root: *mention_count_root,
+                urgent_mention_count: if state.config.unread.post_priority_enabled {
+                    *urgent_mention_count
+                } else {
+                    0
+                },
                 last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             },
         )
@@ -1355,6 +1430,25 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 broadcast: map_broadcast(env.broadcast.as_ref()),
             })
         }
+        "post_unread" => {
+            let channel_id = extract_mm_id(env.data.get("channel_id"));
+            let post_id = extract_mm_id(env.data.get("post_id"));
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "post_unread".to_string(),
+                data: json!({
+                    "channel_id": channel_id,
+                    "post_id": post_id,
+                    "msg_count": extract_i64(env.data.get("msg_count")),
+                    "msg_count_root": extract_i64(env.data.get("msg_count_root")),
+                    "mention_count": extract_i64(env.data.get("mention_count")),
+                    "mention_count_root": extract_i64(env.data.get("mention_count_root")),
+                    "urgent_mention_count": extract_i64(env.data.get("urgent_mention_count")),
+                    "last_viewed_at": extract_i64(env.data.get("last_viewed_at")),
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
         "user_added" => {
             let user_id = extract_mm_id(env.data.get("user_id"));
             let channel_id = extract_mm_id(env.data.get("channel_id"));
@@ -1398,6 +1492,16 @@ fn extract_mm_id(value: Option<&serde_json::Value>) -> String {
         .and_then(|v| v.as_str())
         .and_then(parse_mm_or_uuid)
         .map(encode_mm_id)
+        .unwrap_or_default()
+}
+
+fn extract_i64(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
         .unwrap_or_default()
 }
 
@@ -1591,6 +1695,49 @@ mod tests {
             serde_json::json!(encode_mm_id(user_id))
         );
         assert_eq!(mapped.data["parent_id"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_post_unread_payload() {
+        let channel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let post_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "post_unread".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "channel_id": channel_id,
+                "post_id": post_id,
+                "msg_count": 12,
+                "msg_count_root": 7,
+                "mention_count": 3,
+                "mention_count_root": 2,
+                "urgent_mention_count": 1,
+                "last_viewed_at": 1739500000000i64
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: Some(user_id),
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("post_unread should map");
+        assert_eq!(mapped.event, "post_unread");
+        assert_eq!(mapped.data["msg_count"], serde_json::json!(12));
+        assert_eq!(mapped.data["mention_count_root"], serde_json::json!(2));
+        assert_eq!(mapped.data["urgent_mention_count"], serde_json::json!(1));
+        assert_eq!(
+            mapped.data["channel_id"],
+            serde_json::json!(encode_mm_id(channel_id))
+        );
+        assert_eq!(
+            mapped.data["post_id"],
+            serde_json::json!(encode_mm_id(post_id))
+        );
     }
 
     #[test]

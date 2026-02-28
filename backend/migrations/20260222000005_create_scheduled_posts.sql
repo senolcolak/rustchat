@@ -22,6 +22,14 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
     update_at BIGINT NOT NULL DEFAULT extract(epoch from now()) * 1000
 );
 
+-- Backfill columns when scheduled_posts already exists from older migrations.
+ALTER TABLE scheduled_posts
+    ADD COLUMN IF NOT EXISTS processed BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS processed_at BIGINT,
+    ADD COLUMN IF NOT EXISTS error_code VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS create_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000),
+    ADD COLUMN IF NOT EXISTS update_at BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000);
+
 -- Indexes for efficient queries
 CREATE INDEX IF NOT EXISTS idx_scheduled_posts_user_id ON scheduled_posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_posts_channel_id ON scheduled_posts(channel_id);

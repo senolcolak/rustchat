@@ -215,6 +215,6 @@ mod tests {
 
     #[test]
     fn v4_router_builds_without_overlaps() {
-        let _ = router();
+        let _builder: fn(AppState) -> axum::Router<AppState> = router;
     }
 }

@@ -94,8 +94,7 @@ async function handlePin() {
 
 async function handleMarkAsUnread() {
     try {
-        // Use the new markAsUnread API
-        await unreadStore.markAsUnread(props.message.channelId);
+        await unreadStore.markAsUnreadFromPost(props.message.id);
         showMenu.value = false;
     } catch (e) {
         console.error('Failed to mark as unread', e)

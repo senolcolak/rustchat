@@ -660,28 +660,38 @@ struct SetUnreadPath {
     post_id: String,
 }
 
-#[derive(serde::Serialize)]
-struct ChannelUnreadAt {
-    team_id: String,
-    channel_id: String,
-    msg_count: i64,
-    mention_count: i64,
-    last_viewed_at: i64,
+#[derive(Deserialize, Default)]
+struct SetPostUnreadRequest {
+    #[serde(default)]
+    collapsed_threads_supported: bool,
 }
 
 async fn set_post_unread(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(path): Path<SetUnreadPath>,
-) -> ApiResult<Json<ChannelUnreadAt>> {
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<mm::ChannelUnreadAt>> {
     let user_id = super::users::resolve_user_id(&path.user_id, &auth)
         .map_err(|_| AppError::Forbidden("Cannot access another user's posts".to_string()))?;
     let post_id = parse_mm_or_uuid(&path.post_id)
         .ok_or_else(|| AppError::BadRequest("Invalid post_id".to_string()))?;
+    let request: SetPostUnreadRequest = if body.is_empty() {
+        SetPostUnreadRequest::default()
+    } else {
+        parse_body(&headers, &body, "Invalid set unread body")?
+    };
 
-    let (channel_id, team_id, seq): (Uuid, Uuid, i64) = sqlx::query_as(
+    let (channel_id, team_id, seq, root_post_id, post_created_at): (
+        Uuid,
+        Uuid,
+        i64,
+        Option<Uuid>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
         r#"
-        SELECT p.channel_id, c.team_id, p.seq
+        SELECT p.channel_id, c.team_id, p.seq, p.root_post_id, p.created_at
         FROM posts p
         JOIN channels c ON p.channel_id = c.id
         WHERE p.id = $1 AND p.deleted_at IS NULL
@@ -700,6 +710,7 @@ async fn set_post_unread(
             .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
 
     let last_read_id = if seq > 0 { seq - 1 } else { 0 };
+    let mark_view_at = post_created_at - chrono::Duration::milliseconds(1);
 
     sqlx::query(
         r#"
@@ -715,21 +726,159 @@ async fn set_post_unread(
     .execute(&state.db)
     .await?;
 
-    let last_viewed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT last_viewed_at FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+    sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET last_viewed_at = $3,
+            manually_unread = true,
+            last_update_at = NOW()
+        WHERE channel_id = $1 AND user_id = $2
+        "#,
     )
     .bind(channel_id)
     .bind(user_id)
+    .bind(mark_view_at)
+    .execute(&state.db)
+    .await?;
+
+    // Track thread-follow state for reply mark-unread behavior when enabled.
+    if root_post_id.is_some() && state.config.unread.thread_auto_follow {
+        let thread_root_id = root_post_id.unwrap_or(post_id);
+        sqlx::query(
+            r#"
+            INSERT INTO thread_memberships
+                (user_id, post_id, following, last_read_at, mention_count, unread_replies_count, updated_at)
+            VALUES
+                ($1, $2, true, $3, 0, 0, NOW())
+            ON CONFLICT (user_id, post_id)
+            DO UPDATE SET following = true, last_read_at = $3, updated_at = NOW()
+            "#,
+        )
+        .bind(user_id)
+        .bind(thread_root_id)
+        .bind(mark_view_at)
+        .execute(&state.db)
+        .await?;
+    }
+
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let (
+        msg_count,
+        mention_count,
+        mut msg_count_root,
+        mut mention_count_root,
+        mut urgent_mention_count,
+    ): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > $2) AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+            ) AS mention_count,
+            COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > $2 AND p.root_post_id IS NULL) AS msg_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND p.root_post_id IS NULL
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+            ) AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                  AND p.message LIKE '%@here%'
+            ) AS urgent_mention_count
+        FROM posts p
+        WHERE p.channel_id = $1
+        "#,
+    )
+    .bind(channel_id)
+    .bind(last_read_id)
+    .bind(&username)
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(ChannelUnreadAt {
+    // Approximate CRT-aware behavior for reply mark-unread when client supports collapsed threads.
+    if root_post_id.is_some()
+        && request.collapsed_threads_supported
+        && state.config.unread.collapsed_threads_enabled
+    {
+        msg_count_root = 0;
+        mention_count_root = 0;
+        urgent_mention_count = 0;
+    }
+
+    if !state.config.unread.post_priority_enabled {
+        urgent_mention_count = 0;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET msg_count = $3,
+            mention_count = $4,
+            msg_count_root = $5,
+            mention_count_root = $6,
+            urgent_mention_count = $7,
+            last_update_at = NOW()
+        WHERE channel_id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .bind(msg_count)
+    .bind(mention_count)
+    .bind(msg_count_root)
+    .bind(mention_count_root)
+    .bind(urgent_mention_count)
+    .execute(&state.db)
+    .await?;
+
+    let payload = mm::ChannelUnreadAt {
         team_id: encode_mm_id(team_id),
+        user_id: encode_mm_id(user_id),
         channel_id: encode_mm_id(channel_id),
-        msg_count: last_read_id,
-        mention_count: 0,
-        last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-    }))
+        msg_count,
+        mention_count,
+        mention_count_root,
+        urgent_mention_count,
+        msg_count_root,
+        last_viewed_at: mark_view_at.timestamp_millis(),
+    };
+
+    if state.config.unread.post_unread_ws_enabled {
+        let broadcast = WsEnvelope::event(
+            EventType::PostUnread,
+            serde_json::json!({
+                "team_id": payload.team_id,
+                "user_id": payload.user_id,
+                "channel_id": payload.channel_id,
+                "msg_count": payload.msg_count,
+                "msg_count_root": payload.msg_count_root,
+                "mention_count": payload.mention_count,
+                "mention_count_root": payload.mention_count_root,
+                "urgent_mention_count": payload.urgent_mention_count,
+                "last_viewed_at": payload.last_viewed_at,
+                "post_id": encode_mm_id(post_id),
+            }),
+            Some(channel_id),
+        )
+        .with_broadcast(WsBroadcast {
+            channel_id: Some(channel_id),
+            team_id: Some(team_id),
+            user_id: Some(user_id),
+            exclude_user_id: None,
+        });
+        state.ws_hub.broadcast(broadcast).await;
+    }
+
+    Ok(Json(payload))
 }
 
 async fn get_flagged_posts(

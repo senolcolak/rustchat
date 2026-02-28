@@ -172,6 +172,236 @@ fn parse_body<T: DeserializeOwned>(
     }
 }
 
+#[derive(sqlx::FromRow, Clone)]
+struct ChannelMemberCompatRow {
+    channel_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    notify_props: serde_json::Value,
+    last_viewed_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_update_at: chrono::DateTime<chrono::Utc>,
+    msg_count: i64,
+    mention_count: i64,
+    mention_count_root: i64,
+    urgent_mention_count: i64,
+    msg_count_root: i64,
+}
+
+fn row_to_mm_channel_member(
+    row: ChannelMemberCompatRow,
+    post_priority_enabled: bool,
+) -> mm::ChannelMember {
+    let scheme_admin =
+        row.role == "admin" || row.role == "team_admin" || row.role == "channel_admin";
+    mm::ChannelMember {
+        channel_id: encode_mm_id(row.channel_id),
+        user_id: encode_mm_id(row.user_id),
+        roles: crate::mattermost_compat::mappers::map_channel_role(&row.role),
+        last_viewed_at: row
+            .last_viewed_at
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(0),
+        msg_count: row.msg_count,
+        mention_count: row.mention_count,
+        mention_count_root: row.mention_count_root,
+        urgent_mention_count: if post_priority_enabled {
+            row.urgent_mention_count
+        } else {
+            0
+        },
+        msg_count_root: row.msg_count_root,
+        notify_props: normalize_notify_props(row.notify_props),
+        last_update_at: row.last_update_at.timestamp_millis(),
+        scheme_guest: false,
+        scheme_user: true,
+        scheme_admin,
+    }
+}
+
+async fn fetch_channel_member_compat_rows(
+    state: &AppState,
+    channel_id: Uuid,
+    user_ids: Option<&[Uuid]>,
+) -> ApiResult<Vec<ChannelMemberCompatRow>> {
+    if let Some(ids) = user_ids {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as(
+            r#"
+            SELECT
+                cm.channel_id,
+                cm.user_id,
+                cm.role,
+                cm.notify_props,
+                cm.last_viewed_at,
+                COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+                GREATEST(
+                    COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                    - COUNT(*) FILTER (
+                        WHERE p.deleted_at IS NULL
+                          AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                    ),
+                    0
+                )::BIGINT AS msg_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (
+                          p.message LIKE '%@' || u.username || '%'
+                          OR p.message LIKE '%@all%'
+                          OR p.message LIKE '%@channel%'
+                      )
+                )::BIGINT AS mention_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                      AND (
+                          p.message LIKE '%@' || u.username || '%'
+                          OR p.message LIKE '%@all%'
+                          OR p.message LIKE '%@channel%'
+                      )
+                )::BIGINT AS mention_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (
+                          p.message LIKE '%@' || u.username || '%'
+                          OR p.message LIKE '%@all%'
+                          OR p.message LIKE '%@channel%'
+                      )
+                      AND p.message LIKE '%@here%'
+                )::BIGINT AS urgent_mention_count,
+                GREATEST(
+                    COUNT(*) FILTER (
+                        WHERE p.deleted_at IS NULL
+                          AND p.root_post_id IS NULL
+                    )
+                    - COUNT(*) FILTER (
+                        WHERE p.deleted_at IS NULL
+                          AND p.root_post_id IS NULL
+                          AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                    ),
+                    0
+                )::BIGINT AS msg_count_root
+            FROM channel_members cm
+            JOIN users u ON u.id = cm.user_id
+            LEFT JOIN channel_reads cr
+                   ON cr.channel_id = cm.channel_id
+                  AND cr.user_id = cm.user_id
+            LEFT JOIN posts p
+                   ON p.channel_id = cm.channel_id
+            WHERE cm.channel_id = $1
+              AND cm.user_id = ANY($2)
+            GROUP BY
+                cm.channel_id,
+                cm.user_id,
+                cm.role,
+                cm.notify_props,
+                cm.last_viewed_at,
+                cm.last_update_at,
+                cm.created_at,
+                u.username,
+                cr.last_read_message_id
+            ORDER BY cm.user_id
+            "#,
+        )
+        .bind(channel_id)
+        .bind(ids)
+        .fetch_all(&state.db)
+        .await?;
+
+        return Ok(rows);
+    }
+
+    let rows = sqlx::query_as(
+        r#"
+        SELECT
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+            GREATEST(
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND p.root_post_id IS NULL
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            GREATEST(
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                )
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count_root
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN channel_reads cr
+               ON cr.channel_id = cm.channel_id
+              AND cr.user_id = cm.user_id
+        LEFT JOIN posts p
+               ON p.channel_id = cm.channel_id
+        WHERE cm.channel_id = $1
+        GROUP BY
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            cm.last_update_at,
+            cm.created_at,
+            u.username,
+            cr.last_read_message_id
+        ORDER BY cm.user_id
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(rows)
+}
+
 async fn resolve_direct_channel_display_name(
     state: &AppState,
     channel_id: Uuid,
@@ -239,7 +469,6 @@ async fn get_channel_unread(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Get the member's last viewed time
     let member: Option<crate::models::ChannelMember> =
         sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
             .bind(channel_id)
@@ -247,56 +476,87 @@ async fn get_channel_unread(
             .fetch_optional(&state.db)
             .await?;
 
-    let member = member.ok_or_else(|| {
+    let _member = member.ok_or_else(|| {
         crate::error::AppError::Forbidden("Not a member of this channel".to_string())
     })?;
 
-    // Count messages since last viewed
-    let msg_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*) FROM posts
-        WHERE channel_id = $1 
-          AND deleted_at IS NULL
-          AND created_at > $2
-        "#,
-    )
-    .bind(channel_id)
-    .bind(member.last_viewed_at)
-    .fetch_one(&state.db)
-    .await?;
+    let team_id: Uuid = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_one(&state.db)
+        .await?;
 
-    // Get the user's username for mention detection
     let username: Option<String> = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await?;
     let username = username.unwrap_or_default();
 
-    // Count mentions (posts that mention the user)
-    let mention_count: i64 = sqlx::query_scalar(
+    let last_read_message_id: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(last_read_message_id, 0) FROM channel_reads WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(0);
+
+    let (msg_count, mention_count, mention_count_root, mut urgent_mention_count, msg_count_root): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
         r#"
-        SELECT COUNT(*) FROM posts
-        WHERE channel_id = $1 
-          AND deleted_at IS NULL
-          AND created_at > $2
-          AND (message LIKE '%@' || $3 || '%' OR message LIKE '%@all%' OR message LIKE '%@channel%')
+        SELECT
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND p.root_post_id IS NULL
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND (p.message LIKE '%@' || $3 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > $2
+                  AND p.root_post_id IS NULL
+            )::BIGINT AS msg_count_root
+        FROM posts p
+        WHERE p.channel_id = $1
         "#,
     )
     .bind(channel_id)
-    .bind(member.last_viewed_at)
+    .bind(last_read_message_id)
     .bind(&username)
     .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    .await?;
+
+    if !state.config.unread.post_priority_enabled {
+        urgent_mention_count = 0;
+    }
 
     Ok(Json(serde_json::json!({
-        "team_id": "",
+        "team_id": encode_mm_id(team_id),
         "channel_id": encode_mm_id(channel_id),
         "msg_count": msg_count,
         "mention_count": mention_count,
-        "mention_count_root": mention_count,
-        "msg_count_root": msg_count,
-        "last_viewed_at": member.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0)
+        "mention_count_root": mention_count_root,
+        "msg_count_root": msg_count_root,
+        "urgent_mention_count": urgent_mention_count
     })))
 }
 
@@ -318,27 +578,10 @@ async fn get_channel_members(
                 crate::error::AppError::Forbidden("Not a member of this channel".to_string())
             })?;
 
-    let members: Vec<crate::models::ChannelMember> =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1")
-            .bind(channel_id)
-            .fetch_all(&state.db)
-            .await?;
-
-    let mm_members = members
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, None).await?;
+    let mm_members = rows
         .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
-            scheme_guest: false,
-            scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "channel_admin",
-        })
+        .map(|row| row_to_mm_channel_member(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))
@@ -351,32 +594,15 @@ async fn get_channel_member_me(
 ) -> ApiResult<Json<mm::ChannelMember>> {
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
-    let member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&[auth.user_id])).await?;
+    let row = rows.into_iter().next().ok_or_else(|| {
+        crate::error::AppError::Forbidden("Not a member of this channel".to_string())
+    })?;
 
-    Ok(Json(mm::ChannelMember {
-        channel_id: encode_mm_id(member.channel_id),
-        user_id: encode_mm_id(member.user_id),
-        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
-        last_viewed_at: member
-            .last_viewed_at
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0),
-        msg_count: 0,
-        mention_count: 0,
-        notify_props: normalize_notify_props(member.notify_props),
-        last_update_at: 0,
-        scheme_guest: false,
-        scheme_user: true,
-        scheme_admin: member.role == "admin" || member.role == "channel_admin",
-    }))
+    Ok(Json(row_to_mm_channel_member(
+        row,
+        state.config.unread.post_priority_enabled,
+    )))
 }
 
 async fn get_channel_stats(
@@ -1002,14 +1228,6 @@ async fn add_channel_member(
     .execute(&state.db)
     .await?;
 
-    // Fetch and return the new member
-    let member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(user_id)
-            .fetch_one(&state.db)
-            .await?;
-
     let team_id: Option<Uuid> = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
         .bind(channel_id)
         .fetch_optional(&state.db)
@@ -1032,22 +1250,16 @@ async fn add_channel_member(
     });
     state.ws_hub.broadcast(broadcast).await;
 
-    Ok(Json(mm::ChannelMember {
-        channel_id: encode_mm_id(member.channel_id),
-        user_id: encode_mm_id(member.user_id),
-        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
-        last_viewed_at: member
-            .last_viewed_at
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0),
-        msg_count: 0,
-        mention_count: 0,
-        notify_props: normalize_notify_props(member.notify_props),
-        last_update_at: 0,
-        scheme_guest: false,
-        scheme_user: true,
-        scheme_admin: member.role == "admin" || member.role == "channel_admin",
-    }))
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&[user_id])).await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+
+    Ok(Json(row_to_mm_channel_member(
+        row,
+        state.config.unread.post_priority_enabled,
+    )))
 }
 
 /// DELETE /channels/{channel_id}/members/{user_id} - Remove a member from a channel
@@ -1139,30 +1351,16 @@ async fn get_channel_member_by_id(
                 crate::error::AppError::Forbidden("Not a member of this channel".to_string())
             })?;
 
-    let member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&[user_id])).await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
 
-    Ok(Json(mm::ChannelMember {
-        channel_id: encode_mm_id(member.channel_id),
-        user_id: encode_mm_id(member.user_id),
-        roles: crate::mattermost_compat::mappers::map_channel_role(&member.role),
-        last_viewed_at: member
-            .last_viewed_at
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0),
-        msg_count: 0,
-        mention_count: 0,
-        notify_props: normalize_notify_props(member.notify_props),
-        last_update_at: 0,
-        scheme_guest: false,
-        scheme_user: true,
-        scheme_admin: member.role == "admin" || member.role == "channel_admin",
-    }))
+    Ok(Json(row_to_mm_channel_member(
+        row,
+        state.config.unread.post_priority_enabled,
+    )))
 }
 
 async fn get_channel_members_by_ids(
@@ -1197,28 +1395,10 @@ async fn get_channel_members_by_ids(
         user_ids.push(parsed);
     }
 
-    let members: Vec<crate::models::ChannelMember> =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = ANY($2)")
-            .bind(channel_id)
-            .bind(&user_ids)
-            .fetch_all(&state.db)
-            .await?;
-
-    let mm_members = members
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&user_ids)).await?;
+    let mm_members = rows
         .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
-            scheme_guest: false,
-            scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "channel_admin",
-        })
+        .map(|row| row_to_mm_channel_member(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))
@@ -1263,35 +1443,16 @@ async fn update_channel_member_roles(
         .execute(&state.db)
         .await?;
 
-    let member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&[user_id])).await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
 
-    Ok(Json(mm::ChannelMember {
-        channel_id: encode_mm_id(member.channel_id),
-        user_id: encode_mm_id(member.user_id),
-        roles: if role == "channel_admin" {
-            "channel_admin channel_user"
-        } else {
-            "channel_user"
-        }
-        .to_string(),
-        last_viewed_at: member
-            .last_viewed_at
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0),
-        msg_count: 0,
-        mention_count: 0,
-        notify_props: normalize_notify_props(member.notify_props),
-        last_update_at: 0,
-        scheme_guest: false,
-        scheme_user: true,
-        scheme_admin: role == "channel_admin",
-    }))
+    Ok(Json(row_to_mm_channel_member(
+        row,
+        state.config.unread.post_priority_enabled,
+    )))
 }
 
 async fn update_channel_member_notify_props(
@@ -1320,35 +1481,16 @@ async fn update_channel_member_notify_props(
     .execute(&state.db)
     .await?;
 
-    let member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
+    let rows = fetch_channel_member_compat_rows(&state, channel_id, Some(&[user_id])).await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::AppError::NotFound("Member not found".to_string()))?;
 
-    Ok(Json(mm::ChannelMember {
-        channel_id: encode_mm_id(member.channel_id),
-        user_id: encode_mm_id(member.user_id),
-        roles: if member.role == "channel_admin" {
-            "channel_admin channel_user"
-        } else {
-            "channel_user"
-        }
-        .to_string(),
-        last_viewed_at: member
-            .last_viewed_at
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0),
-        msg_count: 0,
-        mention_count: 0,
-        notify_props: normalize_notify_props(member.notify_props),
-        last_update_at: 0,
-        scheme_guest: false,
-        scheme_user: true,
-        scheme_admin: member.role == "channel_admin",
-    }))
+    Ok(Json(row_to_mm_channel_member(
+        row,
+        state.config.unread.post_priority_enabled,
+    )))
 }
 
 async fn get_posts(
@@ -1849,26 +1991,26 @@ async fn mark_channel_as_read(
 
     // Update last_viewed_at to mark all messages as read
     sqlx::query(
-        "UPDATE channel_members SET last_viewed_at = NOW() WHERE channel_id = $1 AND user_id = $2",
+        "UPDATE channel_members SET last_viewed_at = NOW(), manually_unread = false, last_update_at = NOW() WHERE channel_id = $1 AND user_id = $2",
     )
     .bind(channel_id)
     .bind(auth.user_id)
     .execute(&state.db)
     .await?;
 
-    // Also update channel_reads table if it exists
-    let _ = sqlx::query(
+    // Also update channel_reads table
+    sqlx::query(
         r#"
-        INSERT INTO channel_reads (user_id, channel_id, last_read_message_id, last_viewed_at)
+        INSERT INTO channel_reads (user_id, channel_id, last_read_message_id, last_read_at)
         VALUES ($1, $2, (SELECT MAX(seq) FROM posts WHERE channel_id = $2), NOW())
         ON CONFLICT (user_id, channel_id)
-        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_viewed_at = NOW()
+        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = NOW()
         "#,
     )
     .bind(auth.user_id)
     .bind(channel_id)
     .execute(&state.db)
-    .await;
+    .await?;
 
     // Broadcast channel viewed event
     let broadcast = crate::realtime::WsEnvelope::event(
@@ -1937,7 +2079,7 @@ async fn mark_channel_as_unread(
     let mark_time = oldest_post_time.unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
 
     sqlx::query(
-        "UPDATE channel_members SET last_viewed_at = $3 WHERE channel_id = $1 AND user_id = $2",
+        "UPDATE channel_members SET last_viewed_at = $3, manually_unread = true, last_update_at = NOW() WHERE channel_id = $1 AND user_id = $2",
     )
     .bind(channel_id)
     .bind(auth.user_id)
@@ -1946,14 +2088,14 @@ async fn mark_channel_as_unread(
     .await?;
 
     // Also update channel_reads table
-    let _ = sqlx::query(
-        "UPDATE channel_reads SET last_read_message_id = 0, last_viewed_at = $3 WHERE channel_id = $1 AND user_id = $2"
+    sqlx::query(
+        "UPDATE channel_reads SET last_read_message_id = 0, last_read_at = $3 WHERE channel_id = $1 AND user_id = $2",
     )
     .bind(channel_id)
     .bind(auth.user_id)
     .bind(mark_time)
     .execute(&state.db)
-    .await;
+    .await?;
 
     // Broadcast unread update
     let broadcast = crate::realtime::WsEnvelope::event(

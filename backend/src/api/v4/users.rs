@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
@@ -21,7 +22,7 @@ use crate::mattermost_compat::{
     models as mm,
 };
 use crate::middleware::rate_limit::{self, RateLimitConfig};
-use crate::models::{channel::Channel, channel::ChannelMember, Team, TeamMember, User};
+use crate::models::{channel::Channel, Team, TeamMember, User};
 
 mod preferences;
 mod sidebar_categories;
@@ -829,13 +830,132 @@ async fn my_team_channel_members(
     auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
+    #[derive(sqlx::FromRow)]
+    struct UserChannelMemberCompatRow {
+        channel_id: Uuid,
+        user_id: Uuid,
+        role: String,
+        notify_props: serde_json::Value,
+        last_viewed_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_update_at: chrono::DateTime<chrono::Utc>,
+        msg_count: i64,
+        mention_count: i64,
+        mention_count_root: i64,
+        urgent_mention_count: i64,
+        msg_count_root: i64,
+    }
+
+    fn map_user_channel_member_row(
+        row: UserChannelMemberCompatRow,
+        post_priority_enabled: bool,
+    ) -> mm::ChannelMember {
+        let scheme_admin =
+            row.role == "admin" || row.role == "team_admin" || row.role == "channel_admin";
+
+        mm::ChannelMember {
+            channel_id: encode_mm_id(row.channel_id),
+            user_id: encode_mm_id(row.user_id),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&row.role),
+            last_viewed_at: row
+                .last_viewed_at
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0),
+            msg_count: row.msg_count,
+            mention_count: row.mention_count,
+            mention_count_root: row.mention_count_root,
+            urgent_mention_count: if post_priority_enabled {
+                row.urgent_mention_count
+            } else {
+                0
+            },
+            msg_count_root: row.msg_count_root,
+            notify_props: normalize_notify_props(row.notify_props),
+            last_update_at: row.last_update_at.timestamp_millis(),
+            scheme_guest: false,
+            scheme_user: true,
+            scheme_admin,
+        }
+    }
+
     let team_id = resolve_team_id(&state, &team_id).await?;
-    let members: Vec<ChannelMember> = sqlx::query_as(
+    let rows: Vec<UserChannelMemberCompatRow> = sqlx::query_as(
         r#"
-        SELECT cm.*, c.name as username, c.display_name, NULL as avatar_url, NULL as presence
+        SELECT
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+            GREATEST(
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND p.root_post_id IS NULL
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            GREATEST(
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                )
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count_root
         FROM channel_members cm
         JOIN channels c ON cm.channel_id = c.id
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN channel_reads cr
+               ON cr.channel_id = cm.channel_id
+              AND cr.user_id = cm.user_id
+        LEFT JOIN posts p
+               ON p.channel_id = cm.channel_id
         WHERE c.team_id = $1 AND cm.user_id = $2
+        GROUP BY
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            cm.last_update_at,
+            cm.created_at,
+            u.username,
+            cr.last_read_message_id
+        ORDER BY cm.channel_id
         "#,
     )
     .bind(team_id)
@@ -843,21 +963,9 @@ async fn my_team_channel_members(
     .fetch_all(&state.db)
     .await?;
 
-    let mm_members = members
+    let mm_members = rows
         .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
-            scheme_guest: false,
-            scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
-        })
+        .map(|row| map_user_channel_member_row(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))
@@ -908,33 +1016,293 @@ async fn my_team_channels_not_members(
 }
 
 async fn my_teams_unread(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Query(query): Query<TeamsUnreadQuery>,
+) -> ApiResult<Json<Vec<mm::TeamUnread>>> {
+    let exclude_team = parse_optional_team_query(&query.exclude_team)?;
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+    let unread = compute_team_unreads(
+        &state,
+        auth.user_id,
+        exclude_team,
+        None,
+        include_collapsed_threads,
+    )
+    .await?;
+    Ok(Json(unread))
 }
 
 async fn get_user_teams_unread(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(user_id): Path<String>,
+    Query(query): Query<TeamsUnreadQuery>,
+) -> ApiResult<Json<Vec<mm::TeamUnread>>> {
+    let user_id = resolve_user_id(&user_id, &auth)?;
+    let exclude_team = parse_optional_team_query(&query.exclude_team)?;
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+    let unread = compute_team_unreads(
+        &state,
+        user_id,
+        exclude_team,
+        None,
+        include_collapsed_threads,
+    )
+    .await?;
+    Ok(Json(unread))
 }
 
 async fn get_user_team_unread(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path((user_id, team_id)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _user_id = parse_mm_or_uuid(&user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
+    Query(query): Query<TeamUnreadQuery>,
+) -> ApiResult<Json<mm::TeamUnread>> {
+    let user_id = resolve_user_id(&user_id, &auth)?;
     let team_id = resolve_team_id(&state, &team_id).await?;
-    Ok(Json(serde_json::json!({
-        "team_id": encode_mm_id(team_id),
-        "msg_count": 0,
-        "mention_count": 0,
-    })))
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+
+    let mut unread = compute_team_unreads(
+        &state,
+        user_id,
+        None,
+        Some(team_id),
+        include_collapsed_threads,
+    )
+    .await?;
+
+    let fallback = mm::TeamUnread {
+        team_id: encode_mm_id(team_id),
+        msg_count: 0,
+        mention_count: 0,
+        mention_count_root: 0,
+        msg_count_root: 0,
+        thread_count: 0,
+        thread_mention_count: 0,
+        thread_urgent_mention_count: 0,
+    };
+
+    Ok(Json(unread.pop().unwrap_or(fallback)))
+}
+
+#[derive(Deserialize, Default)]
+struct TeamsUnreadQuery {
+    #[serde(default)]
+    exclude_team: Option<String>,
+    #[serde(default)]
+    include_collapsed_threads: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct TeamUnreadQuery {
+    #[serde(default)]
+    include_collapsed_threads: Option<bool>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamUnreadChannelRow {
+    team_id: Uuid,
+    notify_props: serde_json::Value,
+    msg_count: i64,
+    mention_count: i64,
+    msg_count_root: i64,
+    mention_count_root: i64,
+    urgent_mention_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamUnreadThreadRow {
+    team_id: Uuid,
+    thread_count: i64,
+    thread_mention_count: i64,
+    thread_urgent_mention_count: i64,
+}
+
+fn parse_optional_team_query(exclude_team: &Option<String>) -> ApiResult<Option<Uuid>> {
+    let Some(raw_team) = exclude_team else {
+        return Ok(None);
+    };
+
+    if raw_team.is_empty() {
+        return Ok(None);
+    }
+
+    parse_mm_or_uuid(raw_team)
+        .ok_or_else(|| AppError::BadRequest("Invalid exclude_team".to_string()))
+        .map(Some)
+}
+
+async fn compute_team_unreads(
+    state: &AppState,
+    user_id: Uuid,
+    exclude_team: Option<Uuid>,
+    only_team: Option<Uuid>,
+    include_collapsed_threads: bool,
+) -> ApiResult<Vec<mm::TeamUnread>> {
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let mut rows: Vec<TeamUnreadChannelRow> = sqlx::query_as(
+        r#"
+        SELECT
+            c.team_id,
+            cm.notify_props,
+            COALESCE(un.msg_count, 0) AS msg_count,
+            COALESCE(un.mention_count, 0) AS mention_count,
+            COALESCE(un.msg_count_root, 0) AS msg_count_root,
+            COALESCE(un.mention_count_root, 0) AS mention_count_root,
+            COALESCE(un.urgent_mention_count, 0) AS urgent_mention_count
+        FROM channel_members cm
+        JOIN channels c ON c.id = cm.channel_id
+        LEFT JOIN channel_reads cr
+            ON cr.channel_id = cm.channel_id
+           AND cr.user_id = cm.user_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > COALESCE(cr.last_read_message_id, 0)) AS msg_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                ) AS mention_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                ) AS msg_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                ) AS mention_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                      AND p.message LIKE '%@here%'
+                ) AS urgent_mention_count
+            FROM posts p
+            WHERE p.channel_id = cm.channel_id
+        ) un ON TRUE
+        WHERE cm.user_id = $1
+          AND ($3::UUID IS NULL OR c.team_id <> $3)
+          AND ($4::UUID IS NULL OR c.team_id = $4)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&username)
+    .bind(exclude_team)
+    .bind(only_team)
+    .fetch_all(&state.db)
+    .await?;
+
+    if !state.config.unread.post_priority_enabled {
+        for row in &mut rows {
+            row.urgent_mention_count = 0;
+        }
+    }
+
+    let mut aggregated: HashMap<Uuid, mm::TeamUnread> = HashMap::new();
+    for row in rows {
+        let team_entry = aggregated
+            .entry(row.team_id)
+            .or_insert_with(|| mm::TeamUnread {
+                team_id: encode_mm_id(row.team_id),
+                msg_count: 0,
+                mention_count: 0,
+                mention_count_root: 0,
+                msg_count_root: 0,
+                thread_count: 0,
+                thread_mention_count: 0,
+                thread_urgent_mention_count: 0,
+            });
+
+        let mark_unread = row
+            .notify_props
+            .get("mark_unread")
+            .and_then(|value| value.as_str())
+            .unwrap_or("all");
+        if mark_unread != "mention" {
+            team_entry.msg_count += row.msg_count;
+            team_entry.msg_count_root += row.msg_count_root;
+        }
+
+        team_entry.mention_count += row.mention_count;
+        team_entry.mention_count_root += row.mention_count_root;
+    }
+
+    if include_collapsed_threads && state.config.unread.collapsed_threads_enabled {
+        let thread_rows: Vec<TeamUnreadThreadRow> = sqlx::query_as(
+            r#"
+            SELECT
+                c.team_id,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(tm.unread_replies_count, 0) > 0
+                       OR COALESCE(tm.mention_count, 0) > 0
+                )::BIGINT AS thread_count,
+                COALESCE(SUM(tm.mention_count), 0)::BIGINT AS thread_mention_count,
+                COALESCE(SUM((
+                    SELECT COUNT(*)::BIGINT
+                    FROM posts rp
+                    WHERE rp.root_post_id = tm.post_id
+                      AND rp.deleted_at IS NULL
+                      AND (tm.last_read_at IS NULL OR rp.created_at > tm.last_read_at)
+                      AND (
+                          rp.message LIKE '%@' || $4 || '%'
+                          OR rp.message LIKE '%@all%'
+                          OR rp.message LIKE '%@channel%'
+                      )
+                      AND rp.message LIKE '%@here%'
+                )), 0)::BIGINT AS thread_urgent_mention_count
+            FROM thread_memberships tm
+            JOIN posts p ON p.id = tm.post_id
+            JOIN channels c ON c.id = p.channel_id
+            WHERE tm.user_id = $1
+              AND tm.following = true
+              AND p.root_post_id IS NULL
+              AND p.deleted_at IS NULL
+              AND ($2::UUID IS NULL OR c.team_id <> $2)
+              AND ($3::UUID IS NULL OR c.team_id = $3)
+            GROUP BY c.team_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(exclude_team)
+        .bind(only_team)
+        .bind(&username)
+        .fetch_all(&state.db)
+        .await?;
+
+        for thread_row in thread_rows {
+            let entry = aggregated
+                .entry(thread_row.team_id)
+                .or_insert_with(|| mm::TeamUnread {
+                    team_id: encode_mm_id(thread_row.team_id),
+                    msg_count: 0,
+                    mention_count: 0,
+                    mention_count_root: 0,
+                    msg_count_root: 0,
+                    thread_count: 0,
+                    thread_mention_count: 0,
+                    thread_urgent_mention_count: 0,
+                });
+            entry.thread_count = thread_row.thread_count;
+            entry.thread_mention_count = thread_row.thread_mention_count;
+            entry.thread_urgent_mention_count = if state.config.unread.post_priority_enabled {
+                thread_row.thread_urgent_mention_count
+            } else {
+                0
+            };
+        }
+    }
+
+    let mut values: Vec<mm::TeamUnread> = aggregated.into_values().collect();
+    values.sort_by(|a, b| a.team_id.cmp(&b.team_id));
+    Ok(values)
 }
 
 fn normalize_notify_props(value: serde_json::Value) -> serde_json::Value {
@@ -2413,28 +2781,140 @@ async fn get_user_channel_members(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
-    let user_id = resolve_user_id(&user_id, &auth)?;
-    let members: Vec<ChannelMember> =
-        sqlx::query_as("SELECT * FROM channel_members WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(&state.db)
-            .await?;
+    #[derive(sqlx::FromRow)]
+    struct UserChannelMemberCompatRow {
+        channel_id: Uuid,
+        user_id: Uuid,
+        role: String,
+        notify_props: serde_json::Value,
+        last_viewed_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_update_at: chrono::DateTime<chrono::Utc>,
+        msg_count: i64,
+        mention_count: i64,
+        mention_count_root: i64,
+        urgent_mention_count: i64,
+        msg_count_root: i64,
+    }
 
-    let mm_members = members
-        .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
+    fn map_user_channel_member_row(
+        row: UserChannelMemberCompatRow,
+        post_priority_enabled: bool,
+    ) -> mm::ChannelMember {
+        let scheme_admin =
+            row.role == "admin" || row.role == "team_admin" || row.role == "channel_admin";
+
+        mm::ChannelMember {
+            channel_id: encode_mm_id(row.channel_id),
+            user_id: encode_mm_id(row.user_id),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&row.role),
+            last_viewed_at: row
+                .last_viewed_at
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0),
+            msg_count: row.msg_count,
+            mention_count: row.mention_count,
+            mention_count_root: row.mention_count_root,
+            urgent_mention_count: if post_priority_enabled {
+                row.urgent_mention_count
+            } else {
+                0
+            },
+            msg_count_root: row.msg_count_root,
+            notify_props: normalize_notify_props(row.notify_props),
+            last_update_at: row.last_update_at.timestamp_millis(),
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
-        })
+            scheme_admin,
+        }
+    }
+
+    let user_id = resolve_user_id(&user_id, &auth)?;
+    let rows: Vec<UserChannelMemberCompatRow> = sqlx::query_as(
+        r#"
+        SELECT
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+            GREATEST(
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND p.root_post_id IS NULL
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            GREATEST(
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                )
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count_root
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN channel_reads cr
+               ON cr.channel_id = cm.channel_id
+              AND cr.user_id = cm.user_id
+        LEFT JOIN posts p
+               ON p.channel_id = cm.channel_id
+        WHERE cm.user_id = $1
+        GROUP BY
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            cm.last_update_at,
+            cm.created_at,
+            u.username,
+            cr.last_read_message_id
+        ORDER BY cm.channel_id
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mm_members = rows
+        .into_iter()
+        .map(|row| map_user_channel_member_row(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))

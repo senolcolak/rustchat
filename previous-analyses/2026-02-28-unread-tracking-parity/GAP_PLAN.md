@@ -337,3 +337,59 @@
   - Compare dual-write counters between old/new paths for a canary set of users.
   - Monitor mismatch metrics before full cutover.
 - Status: planned
+
+## Implementation update (2026-02-28)
+
+Completed checks:
+- PR-1 implemented:
+  - `/channels/members/me/view` and `/channels/members/{user_id}/view` now require valid body parsing and return `{status,last_viewed_at_times}`.
+  - `channel_reads` write paths fixed to `last_read_at` and no longer swallow SQL errors in read/unread handlers.
+- PR-2 implemented:
+  - Added realtime `post_unread` event variant and websocket v4 mapping.
+  - Added websocket mapper unit test for exact `post_unread` payload keys.
+- PR-3 implemented (core):
+  - `POST /users/{user_id}/posts/{post_id}/set_unread` now parses `collapsed_threads_supported`.
+  - Returns full unread payload with `team_id`, `user_id`, root and urgent fields.
+  - Emits `post_unread` websocket event (config-gated).
+- PR-4 implemented (core wiring):
+  - Web UI message menu and channel menu now use post-based mark-unread anchor where possible.
+  - Websocket client handles `post_unread` to apply server unread state.
+- PR-5 implemented:
+  - `/users/{user_id}/teams/unread` and `/users/{user_id}/teams/{team_id}/unread` now aggregate real values.
+  - Supports `exclude_team` and `include_collapsed_threads`.
+  - Applies `notify_props.mark_unread=mention` semantics for team message aggregation.
+- PR-6 implemented:
+  - reconnect `channel_members/channel_unreads` snapshot now derives unread counts from `channel_reads` position and includes root fields.
+  - reconnect snapshot now computes `urgent_mention_count` (config-gated by `post_priority_enabled`).
+  - `/channels/*/members*` and `/users/*/channel_members` responses now return computed MM-compatible channel member counters instead of hardcoded zeros.
+  - compatibility mapper `From<ChannelMember> for mm::ChannelMember` now maps unread/read fields from model values (no hardcoded zeros).
+- PR-7 implemented (rollout foundation):
+  - Added Redis unread v2 keyspace support in `backend/src/services/unreads.rs`:
+    - `rc:unread:v2:uc:{user}:{channel}`
+    - `rc:unread:v2:ut:{user}:{team}`
+    - `rc:unread:v2:dirty:{user}`
+  - Added dual-write behavior to unread update paths (DB authoritative; Redis best-effort with dirty fallback).
+  - Added v2 mismatch detection (`v1` vs `v2` unread count) and dirty marking.
+  - Hardened v2 reads: on cache version/count mismatch, unread overview now recomputes from DB immediately and refreshes cache (dirty fallback retained).
+  - Added periodic reconciliation worker (`run_unread_v2_reconciler`) and startup wiring behind `unread_v2_enabled`.
+  - Removed blocking `KEYS` usage from `mark_all_as_read` (explicit key deletion by known team/channel ids).
+- Data model:
+  - Added migration for unread parity columns in `channel_members` (msg/mention/root/urgent, manual unread, last_update_at).
+- Config gates:
+  - Added unread domain flags: `unread_v2_enabled`, `post_unread_ws_enabled`, `team_unread_v2_enabled`, `collapsed_threads_enabled`, `post_priority_enabled`, `thread_auto_follow`.
+
+Test evidence:
+- Backend compile: `cd backend && cargo check` (pass).
+- Backend targeted tests:
+  - `cargo test map_envelope_to_mm_maps_post_unread_payload -- --nocapture` (pass).
+  - `cargo test parses_view_request_json -- --nocapture` (pass).
+  - `cargo test team_unread_includes_thread_urgent_mentions_when_enabled -- --nocapture` (pass).
+  - `cargo test mm_channel_member_routes_return_computed_counts -- --nocapture` (pass).
+- Frontend compile: `cd frontend && npm run build` (pass).
+- Frontend unread path:
+  - removed local unread-count increment in `messages` store; websocket unread events remain authoritative for unread totals (mention hinting remains local).
+
+Remaining risks / not yet completed:
+- `thread_urgent_mention_count` now computed via unread-thread reply scan (`@here` + mention predicate) when `post_priority_enabled=true`; no separate persisted urgent-thread counter exists yet.
+- CRT/reply-unread behavior is approximated by config gates but not yet parity-complete with Mattermost thread-update semantics across all matrices.
+- V2 read cutover SLO is not yet enforced by explicit metric thresholds; mismatch safety is now immediate DB recompute + cache refresh (plus dirty-reconcile).

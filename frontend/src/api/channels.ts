@@ -23,6 +23,9 @@ export interface ChannelMember {
     last_viewed_at: number
     msg_count: number
     mention_count: number
+    mention_count_root: number
+    urgent_mention_count: number
+    msg_count_root: number
     notify_props: ChannelNotifyProps
     last_update_at: number
 }

@@ -192,3 +192,22 @@
   - E2E for policy create -> user join -> expected memberships.
 - Compatibility:
   - smoke checks for `/api/v4/ldap/users/{user_id}/group_sync_memberships` and group syncable routes.
+
+## Implementation status update (2026-02-28)
+
+- Completed checks:
+  - `P2` default channel bootstrap is implemented in team creation path via `ensure_default_channels_for_team`.
+  - `A1` LDAP sync-membership route method is corrected to `POST`.
+  - `A3` team-join/member-add paths use shared default-channel application service with soft-fail parity behavior.
+  - v4 invite flow now supports DB-backed `invite_id`, one-time `token`, and invite-id regeneration.
+- Test evidence:
+  - `backend/tests/api_team_autosubscription.rs`:
+    - `add_team_member_succeeds_when_default_channel_autojoin_fails`
+    - `v4_add_team_member_succeeds_when_default_channel_autojoin_fails`
+    - `v4_add_team_member_by_invite_succeeds_when_default_channel_autojoin_fails`
+    - `v4_add_team_member_by_token_uses_one_time_token`
+    - `create_team_bootstraps_fallback_default_channels_and_joins_creator`
+    - `create_team_bootstraps_configured_default_channels_and_joins_creator`
+- Remaining risks:
+  - `A2`, `U2`, `R1`, and `R2` are still open (`groups` syncables behavior, user-level re-sync UI/action, reconciliation worker, and failure/audit surfacing).
+  - `U1` is partially implemented: baseline admin configuration for default channels is now exposed, but full policy CRUD/preview is still pending.

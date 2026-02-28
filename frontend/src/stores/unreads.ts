@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api/client'
 import { channelsApi } from '../api/channels'
+import { postsApi, type ChannelUnreadAt } from '../api/posts'
 
 export interface ChannelUnread {
     channel_id: string
@@ -94,6 +95,18 @@ export const useUnreadStore = defineStore('unreads', () => {
         }
     }
 
+    async function markAsUnreadFromPost(postId: string, userId: string = 'me') {
+        try {
+            const { data } = await postsApi.setUnreadFromPost(userId, postId, {
+                collapsed_threads_supported: true,
+            })
+            applyPostUnread(data)
+        } catch (error) {
+            console.error('Failed to mark post as unread:', error)
+            throw error
+        }
+    }
+
     async function markAllAsRead() {
         try {
             await api.post('/unreads/mark_all_read')
@@ -114,6 +127,11 @@ export const useUnreadStore = defineStore('unreads', () => {
         // Team unread count update: if we want to be accurate we should probably re-fetch or track team mappings
     }
 
+    function applyPostUnread(data: ChannelUnreadAt) {
+        channelUnreads.value[data.channel_id] = Number.isFinite(data.msg_count) ? data.msg_count : 0
+        channelMentions.value[data.channel_id] = Number.isFinite(data.mention_count) ? data.mention_count : 0
+    }
+
     const totalUnreadCount = computed(() => Object.values(channelUnreads.value).reduce((a, b) => a + b, 0))
     const getChannelUnreadCount = computed(() => (channelId: string) => channelUnreads.value[channelId] || 0)
     const getTeamUnreadCount = computed(() => (teamId: string) => teamUnreads.value[teamId] || 0)
@@ -128,9 +146,11 @@ export const useUnreadStore = defineStore('unreads', () => {
         fetchOverview,
         markAsRead,
         markAsUnread,
+        markAsUnreadFromPost,
         markAllAsRead,
         setReadState,
         handleUnreadUpdate,
+        applyPostUnread,
         totalUnreadCount,
         getChannelUnreadCount,
         getTeamUnreadCount,

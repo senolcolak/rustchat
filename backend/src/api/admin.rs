@@ -20,6 +20,7 @@ use crate::models::{
 };
 use crate::services::email_provider::{EmailAddress, EmailContent, MailProvider, SmtpProvider};
 use crate::services::oidc_discovery::OidcDiscoveryService;
+use crate::services::team_membership::apply_default_channel_membership_for_team_join;
 use sqlx::FromRow;
 use std::time::Duration;
 
@@ -1589,19 +1590,16 @@ async fn add_team_member(
     .fetch_one(&state.db)
     .await?;
 
-    // Also add user to all public channels in the team
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.type = 'public'::channel_type
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(payload.user_id)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, id, payload.user_id).await
+    {
+        tracing::warn!(
+            team_id = %id,
+            user_id = %payload.user_id,
+            error = %err,
+            "Default channel auto-join failed after admin add_team_member"
+        );
+    }
 
     Ok(Json(member))
 }

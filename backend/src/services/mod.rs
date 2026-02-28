@@ -10,6 +10,7 @@ pub mod oidc_discovery;
 pub mod password_reset;
 pub mod posts;
 pub mod push_notifications;
+pub mod team_membership;
 pub mod template_renderer;
 pub mod turnstile;
 pub mod unreads;

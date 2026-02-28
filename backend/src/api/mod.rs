@@ -182,6 +182,12 @@ pub fn router(
     // Start Calls voice event listener
     tokio::spawn(start_voice_event_listener(state.clone(), voice_event_rx));
 
+    if state.config.unread.unread_v2_enabled {
+        tokio::spawn(crate::services::unreads::run_unread_v2_reconciler(
+            state.clone(),
+        ));
+    }
+
     // CORS configuration
     let cors = build_cors_layer(&state.config);
 
