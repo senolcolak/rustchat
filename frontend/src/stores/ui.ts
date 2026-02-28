@@ -6,6 +6,7 @@ export type Density = 'comfortable' | 'compact'
 export type SettingsTab = 'profile' | 'notifications' | 'display' | 'sidebar' | 'advanced' | 'security'
 
 export const useUIStore = defineStore('ui', () => {
+    const isLhsOpen = ref(false)
     const isRhsOpen = ref(false)
     const isSettingsOpen = ref(false)
     const settingsTab = ref<SettingsTab>('profile')
@@ -29,6 +30,18 @@ export const useUIStore = defineStore('ui', () => {
         rhsView.value = view
         rhsContextId.value = contextId || null
         isRhsOpen.value = true
+    }
+
+    function openLhs() {
+        isLhsOpen.value = true
+    }
+
+    function closeLhs() {
+        isLhsOpen.value = false
+    }
+
+    function toggleLhs() {
+        isLhsOpen.value = !isLhsOpen.value
     }
 
     function closeRhs() {
@@ -61,6 +74,7 @@ export const useUIStore = defineStore('ui', () => {
     }
 
     return {
+        isLhsOpen,
         isRhsOpen,
         isSettingsOpen,
         rhsView,
@@ -68,6 +82,9 @@ export const useUIStore = defineStore('ui', () => {
         videoCallUrl,
         isVideoCallOpen,
         density,
+        openLhs,
+        closeLhs,
+        toggleLhs,
         openRhs,
         closeRhs,
         toggleRhs,

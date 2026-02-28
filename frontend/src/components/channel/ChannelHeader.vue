@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { Users, Search, Hash, Lock, Phone, Bookmark, MoreVertical, LogOut, Info, Pin, PhoneCall } from 'lucide-vue-next'
+import { Users, Search, Hash, Lock, Phone, Bookmark, MoreVertical, LogOut, Info, Pin, PhoneCall, PanelLeft } from 'lucide-vue-next'
 import { ref, computed } from 'vue';
 import { useCallsStore } from '../../stores/calls';
 import { useChannelStore } from '../../stores/channels';
 import { useAuthStore } from '../../stores/auth';
 import { useUIStore } from '../../stores/ui';
+import { useBreakpoints } from '../../composables/useBreakpoints';
 
 const props = defineProps<{
   name: string
@@ -22,6 +23,7 @@ const callsStore = useCallsStore()
 const channelStore = useChannelStore()
 const authStore = useAuthStore()
 const uiStore = useUIStore()
+const { isMobile } = useBreakpoints()
 const showMenu = ref(false)
 
 const hasActiveCall = computed(() => {
@@ -62,6 +64,10 @@ const toggleView = (view: 'saved' | 'pinned' | 'search' | 'members') => {
 
     uiStore.toggleRhs(view)
 
+}
+
+const toggleSidebar = () => {
+    uiStore.toggleLhs()
 }
 
 
@@ -119,6 +125,15 @@ const handleLeave = async () => {
   >
     <div class="flex flex-col justify-center min-w-0">
         <div class="flex items-center">
+            <button
+              v-if="isMobile"
+              @click="toggleSidebar"
+              class="w-8 h-8 mr-2 flex items-center justify-center rounded-full hover:bg-surface-2 text-text-2 transition-all duration-200"
+              title="Open channels"
+              aria-label="Open channels"
+            >
+              <PanelLeft class="w-4 h-4" />
+            </button>
             <component 
               :is="channelType === 'private' ? Lock : Hash" 
               class="w-4 h-4 mr-1.5"

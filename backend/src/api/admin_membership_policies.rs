@@ -69,8 +69,28 @@ async fn get_policy(
 async fn create_policy(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<CreatePolicyRequest>,
+    req: axum::extract::Request,
 ) -> ApiResult<Json<PolicyWithTargets>> {
+    // Read and log the raw body for debugging
+    let (_parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.map_err(|e| {
+        tracing::error!("Failed to read request body: {}", e);
+        crate::error::AppError::BadRequest(format!("Failed to read request body: {}", e))
+    })?;
+    
+    tracing::debug!("Create policy request body: {}", String::from_utf8_lossy(&bytes));
+    
+    // Deserialize the request
+    let req: CreatePolicyRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to deserialize CreatePolicyRequest: {}", e);
+            return Err(crate::error::AppError::Validation(format!(
+                "Invalid request body: {}. Expected fields: name (string), scope_type ('global'|'team'), source_type ('all_users'|'auth_service'|'group'|'role'|'org'), enabled (boolean), targets (array)",
+                e
+            )));
+        }
+    };
     // Check permission for managing membership policies
     if !auth.has_permission(&permissions::TEAM_MANAGE) {
         return Err(crate::error::AppError::Forbidden(

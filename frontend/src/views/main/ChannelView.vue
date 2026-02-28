@@ -11,11 +11,6 @@ import AppShell from '../../components/layout/AppShell.vue';
 import ChannelHeader from '../../components/channel/ChannelHeader.vue';
 import MessageList from '../../components/channel/MessageList.vue';
 import MessageComposer from '../../components/composer/MessageComposer.vue';
-import SavedMessagesPanel from '../../components/channel/SavedMessagesPanel.vue';
-import PinnedMessagesPanel from '../../components/channel/PinnedMessagesPanel.vue';
-import SearchPanel from '../../components/channel/SearchPanel.vue';
-import ChannelMembersPanel from '../../components/channel/ChannelMembersPanel.vue';
-import ChannelInfoPanel from '../../components/channel/ChannelInfoPanel.vue';
 import ChannelSettingsModal from '../../components/modals/ChannelSettingsModal.vue';
 import VideoCallModal from '../../components/modals/VideoCallModal.vue';
 import UserProfileModal from '../../components/modals/UserProfileModal.vue';
@@ -197,7 +192,10 @@ function handleKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <AppShell>
+  <AppShell
+    @rhsJump="handleMessageJump"
+    @openChannelSettings="showChannelSettings = true"
+  >
       <div class="flex h-full relative overflow-hidden">
           <!-- Background - uses theme surface color -->
           <div 
@@ -249,60 +247,6 @@ function handleKeydown(e: KeyboardEvent) {
                   />
               </template>
           </div>
-
-          <!-- RHS Panels Container -->
-          <Transition
-            enter-active-class="transition-transform duration-300 ease-out"
-            enter-from-class="translate-x-full"
-            enter-to-class="translate-x-0"
-            leave-active-class="transition-transform duration-200 ease-in"
-            leave-from-class="translate-x-0"
-            leave-to-class="translate-x-full"
-          >
-            <div 
-              v-if="uiStore.isRhsOpen"
-              class="w-[400px] shrink-0 z-20 shadow-2xl border-l border-border-dim dark:border-white/5 overflow-hidden"
-            >
-              <ThreadPanel 
-                v-if="uiStore.rhsView === 'thread'"
-                @close="uiStore.closeRhs"
-              />
-
-              <SavedMessagesPanel 
-                v-else-if="uiStore.rhsView === 'saved'"
-                :show="true"
-                @close="uiStore.closeRhs"
-                @jump="handleMessageJump"
-              />
-
-              <PinnedMessagesPanel 
-                v-else-if="uiStore.rhsView === 'pinned'"
-                :show="true"
-                @close="uiStore.closeRhs"
-                @jump="handleMessageJump"
-              />
-
-              <SearchPanel 
-                v-else-if="uiStore.rhsView === 'search' && currentChannel"
-                :channelId="currentChannel.id"
-                @close="uiStore.closeRhs"
-                @jump="handleMessageJump"
-              />
-
-              <ChannelMembersPanel 
-                v-else-if="uiStore.rhsView === 'members' && currentChannel"
-                :channelId="currentChannel.id"
-                @close="uiStore.closeRhs"
-              />
-
-              <ChannelInfoPanel 
-                v-else-if="uiStore.rhsView === 'info' && currentChannel"
-                :channelId="currentChannel.id"
-                @close="uiStore.closeRhs"
-                @openSettings="showChannelSettings = true"
-              />
-            </div>
-          </Transition>
       </div>
 
       <!-- Channel Settings Modal -->
