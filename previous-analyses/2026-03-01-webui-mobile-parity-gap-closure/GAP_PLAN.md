@@ -4,7 +4,7 @@
 
 - Contract closure: Complete
 - Mobile compatibility blockers: Closed
-- Remaining parity scope: screenshot-based visual verification/automation only
+- Remaining parity scope: optional cross-platform (Linux) screenshot baseline expansion
 
 ## Completed checks
 
@@ -74,7 +74,7 @@
 
 ## Remaining risks
 
-- Screenshot capture exists, but automated screenshot-diff gating is not yet wired into CI.
+- Screenshot-diff gating is wired in CI on `macos-latest`; linux screenshot baselines are not yet tracked.
 - Compatibility smoke scripts are currently environment-sensitive (expected server version and auth token extraction path) and should stay aligned when server defaults change.
 
 ## Test evidence
@@ -84,13 +84,16 @@
 - Frontend validation executed:
   - `npm run build` in `frontend/` (pass)
 - UI parity screenshots executed:
-  - `npx playwright test e2e/settings_parity.spec.ts --project=chromium` (pass)
-  - Artifacts generated:
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-notifications.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-display.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-sidebar.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-advanced.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-calls.png`
+  - `npm run test:e2e:settings-parity:update` (generated baseline snapshots)
+  - `npm run test:e2e:settings-parity` (pass, diff gate)
+  - Baselines committed:
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-notifications-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-display-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-sidebar-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-advanced-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-calls-chromium-darwin.png`
+- CI coverage:
+  - `.github/workflows/frontend-ci.yml` includes `settings-visual-parity` job that installs Chromium and runs `npm run test:e2e:settings-parity`.
 - Compatibility smoke executed:
   - `BASE=http://localhost:3000 ./scripts/mm_mobile_smoke.sh` (pass)
   - `BASE=http://localhost:3000 LOGIN_ID=compat_smoke_1772369282 PASSWORD=Password123! ./scripts/mm_compat_smoke.sh` (pass, including authenticated checks)

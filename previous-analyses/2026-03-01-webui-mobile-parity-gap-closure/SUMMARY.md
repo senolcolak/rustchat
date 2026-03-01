@@ -20,17 +20,19 @@
 - Frontend build:
   - `npm run build` in `frontend/` (pass)
 - Settings parity screenshots:
-  - `npx playwright test e2e/settings_parity.spec.ts --project=chromium` (pass)
+  - `npm run test:e2e:settings-parity` (pass, screenshot diff against committed baselines)
   - Artifacts:
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-notifications.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-display.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-sidebar.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-advanced.png`
-    - `frontend/test-results/settings_parity-capture-settings-parity-surfaces-chromium/settings-calls.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-notifications-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-display-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-sidebar-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-advanced-chromium-darwin.png`
+    - `frontend/e2e/settings_parity.spec.ts-snapshots/settings-calls-chromium-darwin.png`
 - Compatibility smoke:
   - `BASE=http://localhost:3000 ./scripts/mm_mobile_smoke.sh` (pass)
   - `BASE=http://localhost:3000 LOGIN_ID=compat_smoke_1772369282 PASSWORD=Password123! ./scripts/mm_compat_smoke.sh` (pass)
+- CI gate:
+  - `.github/workflows/frontend-ci.yml` includes `settings-visual-parity` job (`macos-latest`) running `npm run test:e2e:settings-parity`.
 
 ## Remaining gap (non-contract)
 
-- Screenshot capture is implemented and reproducible via Playwright; CI snapshot-diff enforcement is not yet wired.
+- Snapshot baseline is currently darwin/chromium scoped; if a Linux visual gate is needed, a linux baseline set must be generated and added.
