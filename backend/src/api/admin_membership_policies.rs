@@ -290,6 +290,133 @@ async fn trigger_user_resync(
     })))
 }
 
+/// Get metadata for membership policy configuration
+/// Returns available source types and their configuration options
+async fn get_policy_metadata(
+    _state: State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Check permission for viewing membership policies
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
+        return Err(crate::error::AppError::Forbidden(
+            "Missing permission to view membership policy metadata".to_string(),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "source_types": [
+            {
+                "value": "all_users",
+                "label": "All Users",
+                "description": "Apply to all users in the system",
+                "config_fields": []
+            },
+            {
+                "value": "auth_service",
+                "label": "Authentication Service",
+                "description": "Apply to users from a specific authentication provider",
+                "config_fields": [
+                    {
+                        "key": "auth_provider",
+                        "label": "Auth Provider",
+                        "type": "string",
+                        "description": "Authentication provider key (e.g., 'oidc', 'github', 'google')",
+                        "required": false,
+                        "placeholder": "e.g., oidc, github, google"
+                    }
+                ]
+            },
+            {
+                "value": "group",
+                "label": "Group Membership",
+                "description": "Apply to members of specific groups (internal groups or OIDC-synced groups)",
+                "config_fields": [
+                    {
+                        "key": "group_ids",
+                        "label": "Group IDs",
+                        "type": "array",
+                        "description": "UUIDs of groups",
+                        "required": false
+                    },
+                    {
+                        "key": "group_names",
+                        "label": "Group Names",
+                        "type": "array",
+                        "description": "Names of groups (for OIDC groups, use the group name from your IdP)",
+                        "required": false,
+                        "placeholder": "e.g., engineering, admin, support"
+                    }
+                ]
+            },
+            {
+                "value": "role",
+                "label": "User Role",
+                "description": "Apply to users with specific roles",
+                "config_fields": [
+                    {
+                        "key": "roles",
+                        "label": "Roles",
+                        "type": "array",
+                        "description": "Role names",
+                        "required": true,
+                        "placeholder": "e.g., member, admin, system_admin"
+                    }
+                ]
+            },
+            {
+                "value": "org",
+                "label": "Organization",
+                "description": "Apply to users in specific organizations",
+                "config_fields": [
+                    {
+                        "key": "org_ids",
+                        "label": "Organization IDs",
+                        "type": "array",
+                        "description": "UUIDs of organizations",
+                        "required": true
+                    }
+                ]
+            }
+        ],
+        "scope_types": [
+            {
+                "value": "global",
+                "label": "Global",
+                "description": "Applies to all users regardless of team membership"
+            },
+            {
+                "value": "team",
+                "label": "Team",
+                "description": "Only applies within a specific team context"
+            }
+        ],
+        "target_types": [
+            {
+                "value": "team",
+                "label": "Team",
+                "description": "Add users to a team"
+            },
+            {
+                "value": "channel",
+                "label": "Channel",
+                "description": "Add users to a channel"
+            }
+        ],
+        "role_modes": [
+            {
+                "value": "member",
+                "label": "Member",
+                "description": "Regular member"
+            },
+            {
+                "value": "admin",
+                "label": "Admin",
+                "description": "Team or channel administrator"
+            }
+        ]
+    })))
+}
+
 /// Create router for membership policy admin routes
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -312,5 +439,9 @@ pub fn router() -> Router<AppState> {
         .route(
             "/admin/membership-policies/users/{user_id}/resync",
             post(trigger_user_resync),
+        )
+        .route(
+            "/admin/membership-policies/metadata",
+            get(get_policy_metadata),
         )
 }

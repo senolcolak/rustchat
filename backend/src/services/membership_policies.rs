@@ -579,21 +579,56 @@ impl<'a> PolicyRepository<'a> {
                     config_auth.is_none() || config_auth == auth_provider.as_deref()
                 }
                 PolicySourceType::Group => {
+                    // Support both group UUIDs (for synced/internal groups) and group names
+                    // Group names are matched against the groups.display_name column
                     let group_ids = extract_uuid_values(
                         &policy.policy.source_config,
                         &["group_ids", "group_id"],
                     );
-                    if group_ids.is_empty() {
+                    let group_names = extract_string_values(
+                        &policy.policy.source_config,
+                        &["group_names", "names"],
+                    );
+                    
+                    if group_ids.is_empty() && group_names.is_empty() {
                         false
                     } else {
-                        let group_ids_vec: Vec<Uuid> = group_ids.into_iter().collect();
-                        sqlx::query_scalar(
-                            "SELECT EXISTS(SELECT 1 FROM group_members WHERE user_id = $1 AND group_id = ANY($2))",
-                        )
-                        .bind(user_id)
-                        .bind(group_ids_vec)
-                        .fetch_one(self.db)
-                        .await?
+                        // Check by UUID if provided
+                        let has_id_match = if !group_ids.is_empty() {
+                            let group_ids_vec: Vec<Uuid> = group_ids.into_iter().collect();
+                            sqlx::query_scalar(
+                                "SELECT EXISTS(SELECT 1 FROM group_members WHERE user_id = $1 AND group_id = ANY($2))",
+                            )
+                            .bind(user_id)
+                            .bind(&group_ids_vec)
+                            .fetch_one(self.db)
+                            .await?
+                        } else {
+                            false
+                        };
+                        
+                        // Check by name if provided (for OIDC groups not synced to UUIDs)
+                        let has_name_match = if !group_names.is_empty() {
+                            let names_vec: Vec<String> = group_names.into_iter().collect();
+                            sqlx::query_scalar(
+                                r#"
+                                SELECT EXISTS(
+                                    SELECT 1 FROM group_members gm
+                                    JOIN groups g ON g.id = gm.group_id
+                                    WHERE gm.user_id = $1 
+                                    AND LOWER(g.display_name) = ANY($2)
+                                )
+                                "#,
+                            )
+                            .bind(user_id)
+                            .bind(&names_vec.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>())
+                            .fetch_one(self.db)
+                            .await?
+                        } else {
+                            false
+                        };
+                        
+                        has_id_match || has_name_match
                     }
                 }
                 PolicySourceType::Role => {
@@ -907,6 +942,135 @@ pub async fn get_policy_last_run_status(
     .await?;
 
     Ok(result)
+}
+
+/// Apply auto-membership policies for a newly registered user
+/// This handles global policies that add users to teams and channels
+pub async fn apply_auto_membership_for_new_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> ApiResult<Vec<AutoMembershipPolicyAudit>> {
+    let repo = PolicyRepository::new(&state.db);
+    
+    // Get all enabled global policies that apply to this user
+    let policies = repo.get_applicable_policies(user_id, None).await?;
+    
+    // Filter to only global policies (team-scoped policies don't apply to new users without teams)
+    let global_policies: Vec<_> = policies
+        .into_iter()
+        .filter(|p| p.policy.scope_type == PolicyScopeType::Global)
+        .collect();
+
+    if global_policies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let run_id = Uuid::new_v4();
+    let mut audit_entries = Vec::new();
+
+    for policy in global_policies {
+        for target in &policy.targets {
+            let (action, status, error_msg) = match target.target_type {
+                PolicyTargetType::Team => {
+                    // Add user to team
+                    let result = sqlx::query(
+                        r#"
+                        INSERT INTO team_members (team_id, user_id, role)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (team_id, user_id) DO NOTHING
+                        RETURNING id
+                        "#,
+                    )
+                    .bind(target.target_id)
+                    .bind(user_id)
+                    .bind(match target.role_mode {
+                        RoleMode::Member => "member",
+                        RoleMode::Admin => "admin",
+                    })
+                    .fetch_optional(&state.db)
+                    .await;
+
+                    match result {
+                        Ok(Some(row)) => {
+                            let membership_id: Uuid = row.get("id");
+                            let _ = record_membership_origin(
+                                &state.db,
+                                MembershipType::Team,
+                                membership_id,
+                                MembershipOrigin::Policy,
+                                Some(policy.policy.id),
+                            )
+                            .await;
+                            ("add", "success", None)
+                        }
+                        Ok(None) => ("skip", "success", Some("Already member".to_string())),
+                        Err(e) => ("add", "failed", Some(e.to_string())),
+                    }
+                }
+                PolicyTargetType::Channel => {
+                    // For channel targets in global policies, we need to add the user to the channel
+                    // This assumes the user is already a member of the team containing the channel
+                    // or the channel is public/open
+                    let result = sqlx::query(
+                        r#"
+                        INSERT INTO channel_members (channel_id, user_id, role)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (channel_id, user_id) DO NOTHING
+                        RETURNING channel_id
+                        "#,
+                    )
+                    .bind(target.target_id)
+                    .bind(user_id)
+                    .bind(match target.role_mode {
+                        RoleMode::Member => "member",
+                        RoleMode::Admin => "admin",
+                    })
+                    .fetch_optional(&state.db)
+                    .await;
+
+                    match result {
+                        Ok(Some(_)) => {
+                            let _ = record_membership_origin(
+                                &state.db,
+                                MembershipType::Channel,
+                                target.target_id,
+                                MembershipOrigin::Policy,
+                                Some(policy.policy.id),
+                            )
+                            .await;
+                            ("add", "success", None)
+                        }
+                        Ok(None) => ("skip", "success", Some("Already member".to_string())),
+                        Err(e) => ("add", "failed", Some(e.to_string())),
+                    }
+                }
+            };
+
+            // Record audit entry
+            let audit: AutoMembershipPolicyAudit = sqlx::query_as(
+                r#"
+                INSERT INTO auto_membership_policy_audit 
+                    (policy_id, run_id, user_id, target_type, target_id, action, status, error_message)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING *
+                "#,
+            )
+            .bind(Some(policy.policy.id))
+            .bind(run_id)
+            .bind(user_id)
+            .bind(target.target_type)
+            .bind(target.target_id)
+            .bind(action)
+            .bind(status)
+            .bind(error_msg)
+            .fetch_one(&state.db)
+            .await?;
+
+            audit_entries.push(audit);
+        }
+    }
+
+    Ok(audit_entries)
 }
 
 #[cfg(test)]

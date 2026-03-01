@@ -8,10 +8,10 @@ import membershipPoliciesApi, {
     type CreatePolicyRequest,
     type CreatePolicyTarget,
     type PolicyScopeType,
-    type PolicySourceType
+    type PolicySourceType,
+    type PolicyMetadata
 } from '../../api/membershipPolicies';
-import { teamsApi } from '../../api/teams';
-import { channelsApi } from '../../api/channels';
+import { adminApi, type AdminGroup } from '../../api/admin';
 import { useToast } from '../../composables/useToast';
 
 const props = defineProps<{
@@ -38,23 +38,54 @@ const targets = ref<CreatePolicyTarget[]>([]);
 
 // Available options
 const teams = ref<{ id: string; name: string; display_name: string }[]>([]);
-const channels = ref<{ id: string; name: string; display_name: string; team_id: string }[]>([]);
+const channels = ref<{ id: string; name: string; display_name: string | null; team_id: string; channel_type: string }[]>([]);
+const groups = ref<AdminGroup[]>([]);
 const loadingOptions = ref(false);
 const saving = ref(false);
 const showPreview = ref(false);
+const metadata = ref<PolicyMetadata | null>(null);
 
-// Source type options
-const sourceTypeOptions = [
-    { value: 'all_users' as PolicySourceType, label: 'All Users', description: 'Apply to all users' },
-    { value: 'auth_service' as PolicySourceType, label: 'Auth Service', description: 'Users from specific auth provider' },
-    { value: 'group' as PolicySourceType, label: 'Group', description: 'Members of specific groups' },
-    { value: 'role' as PolicySourceType, label: 'Role', description: 'Users with specific roles' },
-    { value: 'org' as PolicySourceType, label: 'Organization', description: 'Users from specific organization' },
-];
+// Source type options (loaded from metadata or fallback)
+const sourceTypeOptions = computed(() => {
+    if (metadata.value?.source_types) {
+        return metadata.value.source_types.map(st => ({
+            value: st.value,
+            label: st.label,
+            description: st.description
+        }));
+    }
+    // Fallback
+    return [
+        { value: 'all_users' as PolicySourceType, label: 'All Users', description: 'Apply to all users' },
+        { value: 'auth_service' as PolicySourceType, label: 'Auth Service', description: 'Users from specific auth provider' },
+        { value: 'group' as PolicySourceType, label: 'Group', description: 'Members of specific groups' },
+        { value: 'role' as PolicySourceType, label: 'Role', description: 'Users with specific roles' },
+        { value: 'org' as PolicySourceType, label: 'Organization', description: 'Users from specific organization' },
+    ];
+});
 
 // Computed
 const isEditing = computed(() => !!props.policy);
 const modalTitle = computed(() => isEditing.value ? 'Edit Policy' : 'New Policy');
+
+// Available roles for selection
+const availableRoles = ['system_admin', 'org_admin', 'team_admin', 'member', 'guest'];
+
+// Helper for group names input (comma-separated to array)
+const groupNamesInput = computed({
+    get: () => (sourceConfig.value.group_names || []).join(', '),
+    set: (val: string) => {
+        sourceConfig.value.group_names = val.split(',').map(s => s.trim()).filter(Boolean);
+    }
+});
+
+// Helper for org IDs input (comma-separated to array)
+const orgIdsInput = computed({
+    get: () => (sourceConfig.value.org_ids || []).join(', '),
+    set: (val: string) => {
+        sourceConfig.value.org_ids = val.split(',').map(s => s.trim()).filter(Boolean);
+    }
+});
 
 // Available targets based on scope
 const availableTargets = computed(() => {
@@ -76,23 +107,27 @@ const availableTargets = computed(() => {
 async function loadOptions() {
     loadingOptions.value = true;
     try {
-        // Load teams first
-        const teamsRes = await teamsApi.list();
+        // Load metadata first
+        try {
+            const metaRes = await membershipPoliciesApi.getMetadata();
+            metadata.value = metaRes.data;
+        } catch (e) {
+            // Metadata endpoint might not exist in older backends
+        }
+        
+        // Load all teams (for admin) - uses /teams/all endpoint
+        const teamsRes = await adminApi.listAllTeams();
         teams.value = teamsRes.data;
         
-        // Load channels for each team
-        const allChannels: any[] = [];
-        for (const team of teams.value) {
-            try {
-                const channelsRes = await channelsApi.list(team.id);
-                allChannels.push(...channelsRes.data);
-            } catch (e) {
-                // Skip teams we can't access
-            }
-        }
-        channels.value = allChannels;
+        // Load channels from admin API (all channels)
+        const channelsRes = await adminApi.listChannels({ per_page: 1000 });
+        channels.value = channelsRes.data.channels || [];
+        
+        // Load groups for group selection
+        const groupsRes = await adminApi.listGroups();
+        groups.value = groupsRes.data;
     } catch (error: any) {
-        toast.error('Failed to load teams and channels', error.message);
+        toast.error('Failed to load options', error.message);
     } finally {
         loadingOptions.value = false;
     }
@@ -190,6 +225,39 @@ function validateForm(): boolean {
     return true;
 }
 
+// Clean source config based on source type
+function cleanSourceConfig(): Record<string, any> {
+    const config: Record<string, any> = {};
+    
+    switch (sourceType.value) {
+        case 'auth_service':
+            if (sourceConfig.value.auth_provider) {
+                config.auth_provider = sourceConfig.value.auth_provider;
+            }
+            break;
+        case 'group':
+            if (sourceConfig.value.group_ids?.length > 0) {
+                config.group_ids = sourceConfig.value.group_ids;
+            }
+            if (sourceConfig.value.group_names?.length > 0) {
+                config.group_names = sourceConfig.value.group_names;
+            }
+            break;
+        case 'role':
+            if (sourceConfig.value.roles?.length > 0) {
+                config.roles = sourceConfig.value.roles;
+            }
+            break;
+        case 'org':
+            if (sourceConfig.value.org_ids?.length > 0) {
+                config.org_ids = sourceConfig.value.org_ids;
+            }
+            break;
+    }
+    
+    return config;
+}
+
 // Save
 async function savePolicy() {
     if (!validateForm()) return;
@@ -202,7 +270,7 @@ async function savePolicy() {
             scope_type: scopeType.value,
             team_id: scopeType.value === 'team' ? teamId.value : undefined,
             source_type: sourceType.value,
-            source_config: sourceConfig.value,
+            source_config: cleanSourceConfig(),
             enabled: enabled.value,
             priority: priority.value,
             targets: targets.value
@@ -326,21 +394,109 @@ onMounted(() => {
                         </label>
                     </div>
 
-                    <!-- Source Config (conditional) -->
-                    <div v-if="sourceType === 'auth_service'" class="pl-4 border-l-2 border-indigo-200">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Auth Provider</label>
-                        <select
-                            v-model="sourceConfig.auth_service"
-                            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                        >
-                            <option value="">Any</option>
-                            <option value="ldap">LDAP</option>
-                            <option value="saml">SAML</option>
-                            <option value="oauth">OAuth</option>
-                            <option value="gitlab">GitLab</option>
-                            <option value="github">GitHub</option>
-                            <option value="google">Google</option>
-                        </select>
+                    <!-- Source Config: Auth Service -->
+                    <div v-if="sourceType === 'auth_service'" class="pl-4 border-l-2 border-indigo-200 space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Auth Provider</label>
+                            <select
+                                v-model="sourceConfig.auth_provider"
+                                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                            >
+                                <option value="">Any Provider</option>
+                                <option value="oidc">OIDC (Generic)</option>
+                                <option value="github">GitHub</option>
+                                <option value="google">Google</option>
+                                <option value="gitlab">GitLab</option>
+                                <option value="keycloak">Keycloak</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">Leave empty to match users from any auth provider</p>
+                        </div>
+                    </div>
+
+                    <!-- Source Config: Group -->
+                    <div v-if="sourceType === 'group'" class="pl-4 border-l-2 border-indigo-200 space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Select Groups
+                            </label>
+                            <div v-if="groups.length === 0" class="text-sm text-gray-500">
+                                No groups available. Groups are created automatically when users log in via OIDC.
+                            </div>
+                            <div v-else class="space-y-2 max-h-48 overflow-y-auto border border-gray-300 dark:border-gray-600 rounded-lg p-2">
+                                <label
+                                    v-for="group in groups"
+                                    :key="group.id"
+                                    class="flex items-center p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded cursor-pointer"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        :value="group.id"
+                                        v-model="sourceConfig.group_ids"
+                                        class="w-4 h-4 text-indigo-600 rounded"
+                                    />
+                                    <span class="ml-2 flex-1">{{ group.display_name }}</span>
+                                    <span class="text-xs text-gray-500">{{ group.member_count }} members</span>
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                Or Enter Group Names (for OIDC groups)
+                            </label>
+                            <input
+                                v-model="groupNamesInput"
+                                type="text"
+                                placeholder="e.g., engineering, admin, support (comma-separated)"
+                                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                            />
+                            <p class="text-xs text-gray-500 mt-1">
+                                For OIDC groups not yet synced, enter the group names as they appear in your IdP
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Source Config: Role -->
+                    <div v-if="sourceType === 'role'" class="pl-4 border-l-2 border-indigo-200 space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Select Roles
+                            </label>
+                            <div class="flex flex-wrap gap-2">
+                                <label
+                                    v-for="role in availableRoles"
+                                    :key="role"
+                                    class="flex items-center px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
+                                    :class="{ 'bg-indigo-50 border-indigo-500': (sourceConfig.roles || []).includes(role) }"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        :value="role"
+                                        v-model="sourceConfig.roles"
+                                        class="w-4 h-4 text-indigo-600 rounded"
+                                    />
+                                    <span class="ml-2 capitalize">{{ role.replace('_', ' ') }}</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Source Config: Org -->
+                    <div v-if="sourceType === 'org'" class="pl-4 border-l-2 border-indigo-200 space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                Organization IDs
+                            </label>
+                            <input
+                                v-model="orgIdsInput"
+                                type="text"
+                                placeholder="Enter organization UUIDs (comma-separated)"
+                                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                            />
+                            <p class="text-xs text-gray-500 mt-1">
+                                Enter the UUIDs of organizations (comma-separated)
+                            </p>
+                        </div>
                     </div>
                 </div>
 

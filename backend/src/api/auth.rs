@@ -13,6 +13,7 @@ use crate::auth::{create_token_with_policy, hash_password, verify_password, Auth
 use crate::error::{ApiResult, AppError};
 use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{AuthResponse, CreateUser, LoginRequest, User, UserResponse};
+use crate::services::membership_policies::apply_auto_membership_for_new_user;
 use crate::services::password_reset::{
     request_password_reset, reset_password, validate_token, PasswordResetError,
 };
@@ -190,6 +191,20 @@ async fn register(
 
     // Seed default preferences for the new user
     seed_default_preferences(&state.db, user.id).await?;
+
+    // Apply auto-membership policies for the new user (global policies that add to teams/channels)
+    match apply_auto_membership_for_new_user(&state, user.id).await {
+        Ok(audit_entries) => {
+            let success_count = audit_entries.iter().filter(|e| e.status == "success" && e.action == "add").count();
+            if success_count > 0 {
+                tracing::info!("Applied auto-membership policies for new user {}: {} memberships added", user.id, success_count);
+            }
+        }
+        Err(e) => {
+            // Don't fail registration if policy application fails, just log the error
+            tracing::error!("Failed to apply auto-membership policies for new user {}: {}", user.id, e);
+        }
+    }
 
     // Fetch site_url from server_config
     let site_url: Option<String> =

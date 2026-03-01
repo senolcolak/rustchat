@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_teams).post(create_team))
         .route("/public", get(list_public_teams))
+        .route("/all", get(list_all_teams))
         .route("/{id}", get(get_team).delete(delete_team).put(update_team))
         .route("/{id}/join", post(join_team))
         .route("/{id}/leave", post(leave_team))
@@ -44,6 +45,31 @@ async fn list_teams(
         "#,
     )
     .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(teams))
+}
+
+/// List all teams (for users with TEAM_MANAGE permission)
+/// Used for membership policy management and other admin functions
+async fn list_all_teams(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Vec<Team>>, AppError> {
+    // Check if user has permission to manage teams
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to view all teams".to_string(),
+        ));
+    }
+
+    let teams = sqlx::query_as::<_, Team>(
+        r#"
+        SELECT t.* FROM teams t
+        ORDER BY t.name
+        "#,
+    )
     .fetch_all(&state.db)
     .await?;
 

@@ -127,12 +127,17 @@ impl ReconciliationWorker {
                 }
             }
             super::membership_policies::PolicySourceType::Group => {
+                // Support both group UUIDs and group names
                 let group_ids =
                     extract_uuid_values(&policy.policy.source_config, &["group_ids", "group_id"]);
-                if group_ids.is_empty() {
-                    Vec::new()
-                } else {
-                    sqlx::query_as(
+                let group_names =
+                    extract_string_values(&policy.policy.source_config, &["group_names", "names"]);
+                
+                let mut user_ids_by_id: Vec<(Uuid,)> = Vec::new();
+                let mut user_ids_by_name: Vec<(Uuid,)> = Vec::new();
+                
+                if !group_ids.is_empty() {
+                    user_ids_by_id = sqlx::query_as(
                         r#"
                         SELECT DISTINCT u.id
                         FROM users u
@@ -141,10 +146,33 @@ impl ReconciliationWorker {
                           AND gm.group_id = ANY($1)
                         "#,
                     )
-                    .bind(group_ids)
+                    .bind(&group_ids.into_iter().collect::<Vec<_>>())
                     .fetch_all(&self.state.db)
-                    .await?
+                    .await?;
                 }
+                
+                if !group_names.is_empty() {
+                    let names_vec: Vec<String> = group_names.into_iter().collect();
+                    user_ids_by_name = sqlx::query_as(
+                        r#"
+                        SELECT DISTINCT u.id
+                        FROM users u
+                        JOIN group_members gm ON gm.user_id = u.id
+                        JOIN groups g ON g.id = gm.group_id
+                        WHERE u.deleted_at IS NULL
+                          AND LOWER(g.display_name) = ANY($1)
+                        "#,
+                    )
+                    .bind(&names_vec.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>())
+                    .fetch_all(&self.state.db)
+                    .await?;
+                }
+                
+                // Combine and deduplicate
+                let mut all_users: HashSet<(Uuid,)> = HashSet::new();
+                all_users.extend(user_ids_by_id);
+                all_users.extend(user_ids_by_name);
+                all_users.into_iter().collect()
             }
             super::membership_policies::PolicySourceType::Role => {
                 let roles = extract_string_values(&policy.policy.source_config, &["roles", "role"]);

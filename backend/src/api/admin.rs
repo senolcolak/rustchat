@@ -19,6 +19,7 @@ use crate::models::{
     SsoProviderType, SsoTestResult, TeamMember, TeamMemberResponse, UpdateChannel, UpdateSsoConfig,
 };
 use crate::services::email_provider::{EmailAddress, EmailContent, MailProvider, SmtpProvider};
+use crate::services::membership_policies::apply_auto_membership_for_new_user;
 use crate::services::oidc_discovery::OidcDiscoveryService;
 use crate::services::team_membership::apply_default_channel_membership_for_team_join;
 use sqlx::FromRow;
@@ -98,6 +99,8 @@ pub fn router() -> Router<AppState> {
             "/admin/channels/{id}",
             patch(update_admin_channel).delete(delete_admin_channel),
         )
+        // Groups management (for membership policies)
+        .route("/admin/groups", get(list_admin_groups))
         // Stats & Health
         .route("/admin/stats", get(get_stats))
         .route("/admin/health", get(get_health))
@@ -1046,6 +1049,19 @@ async fn create_admin_user(
     .bind(&input.display_name)
     .fetch_one(&state.db)
     .await?;
+
+    // Apply auto-membership policies for the new user
+    match apply_auto_membership_for_new_user(&state, user.id).await {
+        Ok(audit_entries) => {
+            let success_count = audit_entries.iter().filter(|e| e.status == "success" && e.action == "add").count();
+            if success_count > 0 {
+                tracing::info!("Applied auto-membership policies for admin-created user {}: {} memberships added", user.id, success_count);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to apply auto-membership policies for admin-created user {}: {}", user.id, e);
+        }
+    }
 
     Ok(Json(user))
 }
@@ -2335,4 +2351,60 @@ async fn test_email_config(
             )))
         }
     }
+}
+
+// ============================================================================
+// Groups Management (for Membership Policies)
+// ============================================================================
+
+#[derive(Debug, serde::Serialize, FromRow)]
+pub struct AdminGroupResponse {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub display_name: String,
+    pub description: String,
+    pub source: String,
+    pub remote_id: Option<String>,
+    pub member_count: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ListGroupsQuery {
+    pub source: Option<String>,
+    pub search: Option<String>,
+}
+
+/// List all groups for membership policy configuration
+async fn list_admin_groups(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListGroupsQuery>,
+) -> ApiResult<Json<Vec<AdminGroupResponse>>> {
+    require_admin(&auth)?;
+
+    let groups: Vec<AdminGroupResponse> = sqlx::query_as(
+        r#"
+        SELECT 
+            g.id,
+            g.name,
+            g.display_name,
+            g.description,
+            g.source,
+            g.remote_id,
+            (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) as member_count
+        FROM groups g
+        WHERE g.deleted_at IS NULL
+          AND ($1::VARCHAR IS NULL OR g.source = $1)
+          AND ($2::VARCHAR IS NULL OR 
+               g.display_name ILIKE '%' || $2 || '%' OR 
+               g.name ILIKE '%' || $2 || '%')
+        ORDER BY g.display_name
+        "#,
+    )
+    .bind(&query.source)
+    .bind(&query.search)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(groups))
 }

@@ -247,6 +247,17 @@ export interface SsoProviderInfo {
     login_url: string;
 }
 
+// Groups for membership policies
+export interface AdminGroup {
+    id: string;
+    name: string | null;
+    display_name: string;
+    description: string;
+    source: string;
+    remote_id: string | null;
+    member_count: number;
+}
+
 export interface SsoTestResult {
     success: boolean;
     message: string;
@@ -376,6 +387,13 @@ export const adminApi = {
         api.post(`/admin/teams/${teamId}/members`, { user_id: userId, role }),
     removeTeamMember: (teamId: string, userId: string) => 
         api.delete(`/admin/teams/${teamId}/members/${userId}`),
+    
+    // Groups (for membership policies)
+    listGroups: (params?: { source?: string; search?: string }) => 
+        api.get<AdminGroup[]>('/admin/groups', { params }),
+    
+    // All teams (for membership policy targets - requires TEAM_MANAGE permission)
+    listAllTeams: () => api.get<{ id: string; name: string; display_name: string }[]>('/teams/all'),
 
     // Email Providers
     listMailProviders: () => api.get<MailProvider[]>('/admin/email/providers'),

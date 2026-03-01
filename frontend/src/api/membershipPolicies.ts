@@ -96,6 +96,48 @@ export interface ListPoliciesQuery {
     enabled?: boolean;
 }
 
+// Metadata types for UI configuration
+export interface SourceTypeConfigField {
+    key: string;
+    label: string;
+    type: string;
+    description: string;
+    required: boolean;
+    placeholder?: string;
+}
+
+export interface SourceTypeMetadata {
+    value: PolicySourceType;
+    label: string;
+    description: string;
+    config_fields: SourceTypeConfigField[];
+}
+
+export interface ScopeTypeMetadata {
+    value: PolicyScopeType;
+    label: string;
+    description: string;
+}
+
+export interface TargetTypeMetadata {
+    value: PolicyTargetType;
+    label: string;
+    description: string;
+}
+
+export interface RoleModeMetadata {
+    value: RoleMode;
+    label: string;
+    description: string;
+}
+
+export interface PolicyMetadata {
+    source_types: SourceTypeMetadata[];
+    scope_types: ScopeTypeMetadata[];
+    target_types: TargetTypeMetadata[];
+    role_modes: RoleModeMetadata[];
+}
+
 export const membershipPoliciesApi = {
     // Policies CRUD
     listPolicies: (query?: ListPoliciesQuery) => 
@@ -123,6 +165,10 @@ export const membershipPoliciesApi = {
     // User re-sync
     resyncUser: (userId: string) => 
         api.post<UserResyncResult>(`/admin/membership-policies/users/${userId}/resync`),
+    
+    // Metadata for UI configuration
+    getMetadata: () => 
+        api.get<PolicyMetadata>('/admin/membership-policies/metadata'),
 };
 
 export default membershipPoliciesApi;
