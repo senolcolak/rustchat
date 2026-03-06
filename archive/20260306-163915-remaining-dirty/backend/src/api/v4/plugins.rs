@@ -2,11 +2,12 @@ use crate::api::AppState;
 use crate::auth::policy::permissions;
 use crate::error::ApiResult;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 const CALLS_PLUGIN_ID: &str = "com.mattermost.calls";
@@ -16,6 +17,12 @@ const CALLS_PLUGIN_NAME: &str = "Calls";
 const CALLS_PLUGIN_DESCRIPTION: &str = "Mattermost Calls plugin for voice and video conferencing";
 const FIRST_ADMIN_VISIT_MARKETPLACE_KEY: &str = "FirstAdminVisitMarketplace";
 const FIRST_ADMIN_VISIT_MARKETPLACE_EVENT: &str = "first_admin_visit_marketplace_status_received";
+
+#[derive(Debug, Deserialize)]
+struct MarketplaceQuery {
+    local_only: Option<bool>,
+    remote_only: Option<bool>,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -52,8 +59,10 @@ fn ensure_manage_system(auth: &crate::api::v4::extractors::MmAuthUser) -> ApiRes
 /// GET /api/v4/plugins
 async fn get_plugins(
     State(state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+
     let calls_enabled = calls_enabled(&state).await?;
     let calls_summary = calls_plugin_summary();
 
@@ -72,8 +81,10 @@ async fn get_plugins(
 /// POST /api/v4/plugins
 async fn upload_plugin(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
     Ok(crate::api::v4::mm_not_implemented(
         "api.plugins.upload.not_implemented.app_error",
         "Plugin upload is not implemented.",
@@ -84,8 +95,10 @@ async fn upload_plugin(
 /// POST /api/v4/plugins/install_from_url
 async fn install_plugin_from_url(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
     Ok(crate::api::v4::mm_not_implemented(
         "api.plugins.install_from_url.not_implemented.app_error",
         "Plugin installation from URL is not implemented.",
@@ -96,9 +109,11 @@ async fn install_plugin_from_url(
 /// GET /api/v4/plugins/{plugin_id}
 async fn get_plugin_status(
     State(state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(plugin_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+
     if plugin_id != CALLS_PLUGIN_ID {
         return Err(crate::error::AppError::NotFound(format!(
             "Plugin {plugin_id} not found"
@@ -118,9 +133,11 @@ async fn get_plugin_status(
 /// DELETE /api/v4/plugins/{plugin_id}
 async fn remove_plugin(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_plugin_id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
     Ok(crate::api::v4::mm_not_implemented(
         "api.plugins.remove.not_implemented.app_error",
         "Plugin removal is not implemented.",
@@ -131,9 +148,11 @@ async fn remove_plugin(
 /// POST /api/v4/plugins/{plugin_id}/enable
 async fn enable_plugin(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_plugin_id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
     Ok(crate::api::v4::mm_not_implemented(
         "api.plugins.enable.not_implemented.app_error",
         "Plugin enable is not implemented.",
@@ -144,9 +163,11 @@ async fn enable_plugin(
 /// POST /api/v4/plugins/{plugin_id}/disable
 async fn disable_plugin(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_plugin_id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
     Ok(crate::api::v4::mm_not_implemented(
         "api.plugins.disable.not_implemented.app_error",
         "Plugin disable is not implemented.",
@@ -157,8 +178,10 @@ async fn disable_plugin(
 /// GET /api/v4/plugins/statuses
 async fn get_plugin_statuses(
     State(state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
+
     let is_active = calls_enabled(&state).await?;
     Ok(Json(vec![json!({
         "plugin_id": CALLS_PLUGIN_ID,
@@ -187,8 +210,23 @@ async fn get_webapp_plugins(
 async fn get_marketplace_plugins(
     State(_state): State<AppState>,
     auth: crate::api::v4::extractors::MmAuthUser,
+    Query(query): Query<MarketplaceQuery>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    ensure_manage_system(&auth)?;
+    let local_only = query.local_only.unwrap_or(false);
+    let remote_only = query.remote_only.unwrap_or(false);
+
+    if local_only && remote_only {
+        // Keep parity with Mattermost behavior, which surfaces this conflict as server error.
+        return Err(crate::error::AppError::Internal(
+            "local_only and remote_only cannot be both true".to_string(),
+        ));
+    }
+
+    // Mattermost allows authenticated users to query remote-only marketplace
+    // without plugin-management permission.
+    if !remote_only {
+        ensure_manage_system(&auth)?;
+    }
 
     Ok(Json(vec![]))
 }

@@ -26,16 +26,6 @@ enum SyncableKind {
 }
 
 impl SyncableKind {
-    fn parse(path_value: &str) -> ApiResult<Self> {
-        match path_value {
-            "teams" => Ok(Self::Team),
-            "channels" => Ok(Self::Channel),
-            _ => Err(AppError::BadRequest(format!(
-                "Invalid syncable type: {path_value}"
-            ))),
-        }
-    }
-
     fn as_db_str(self) -> &'static str {
         match self {
             Self::Team => "team",
@@ -160,27 +150,37 @@ struct DesiredMembership {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/groups", get(get_groups).post(create_group))
-        .route(
-            "/groups/{group_id}",
-            get(get_group).put(patch_group).delete(delete_group),
-        )
+        .route("/groups/{group_id}", get(get_group).delete(delete_group))
         .route("/groups/{group_id}/patch", put(patch_group))
         .route("/groups/{group_id}/restore", post(restore_group))
         .route(
-            "/groups/{group_id}/{syncable_type}/{syncable_id}/link",
-            post(link_group_syncable).delete(unlink_group_syncable),
+            "/groups/{group_id}/teams/{team_id}/link",
+            post(link_group_team_syncable).delete(unlink_group_team_syncable),
         )
         .route(
-            "/groups/{group_id}/{syncable_type}/{syncable_id}",
-            get(get_group_syncable),
+            "/groups/{group_id}/channels/{channel_id}/link",
+            post(link_group_channel_syncable).delete(unlink_group_channel_syncable),
         )
         .route(
-            "/groups/{group_id}/{syncable_type}",
-            get(get_group_syncables),
+            "/groups/{group_id}/teams/{team_id}",
+            get(get_group_team_syncable),
         )
         .route(
-            "/groups/{group_id}/{syncable_type}/{syncable_id}/patch",
-            put(patch_group_syncable),
+            "/groups/{group_id}/channels/{channel_id}",
+            get(get_group_channel_syncable),
+        )
+        .route("/groups/{group_id}/teams", get(get_group_team_syncables))
+        .route(
+            "/groups/{group_id}/channels",
+            get(get_group_channel_syncables),
+        )
+        .route(
+            "/groups/{group_id}/teams/{team_id}/patch",
+            put(patch_group_team_syncable),
+        )
+        .route(
+            "/groups/{group_id}/channels/{channel_id}/patch",
+            put(patch_group_channel_syncable),
         )
         .route("/groups/{group_id}/stats", get(get_group_stats))
         .route(
@@ -1305,18 +1305,18 @@ async fn restore_group(
     Ok(Json(group_json(&group)))
 }
 
-/// POST /api/v4/groups/{group_id}/{syncable_type}/{syncable_id}/link
-async fn link_group_syncable(
-    State(state): State<AppState>,
+async fn link_group_syncable_by_kind(
+    state: AppState,
     auth: crate::api::v4::extractors::MmAuthUser,
-    Path((group_id, syncable_type, syncable_id)): Path<(String, String, String)>,
-    Json(patch): Json<GroupSyncablePatch>,
+    group_id: String,
+    syncable_id: String,
+    kind: SyncableKind,
+    patch: GroupSyncablePatch,
 ) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
     let group_id = parse_mm_or_uuid(&group_id)
         .ok_or_else(|| AppError::BadRequest("Invalid group_id".to_string()))?;
     let syncable_id = parse_mm_or_uuid(&syncable_id)
         .ok_or_else(|| AppError::BadRequest("Invalid syncable_id".to_string()))?;
-    let kind = SyncableKind::parse(&syncable_type)?;
 
     let group = fetch_group_for_syncable(&state, group_id).await?;
     ensure_group_is_syncable(&group)?;
@@ -1353,17 +1353,17 @@ async fn link_group_syncable(
     ))
 }
 
-/// DELETE /api/v4/groups/{group_id}/{syncable_type}/{syncable_id}/link
-async fn unlink_group_syncable(
-    State(state): State<AppState>,
+async fn unlink_group_syncable_by_kind(
+    state: AppState,
     auth: crate::api::v4::extractors::MmAuthUser,
-    Path((group_id, syncable_type, syncable_id)): Path<(String, String, String)>,
+    group_id: String,
+    syncable_id: String,
+    kind: SyncableKind,
 ) -> ApiResult<Json<Value>> {
     let group_id = parse_mm_or_uuid(&group_id)
         .ok_or_else(|| AppError::BadRequest("Invalid group_id".to_string()))?;
     let syncable_id = parse_mm_or_uuid(&syncable_id)
         .ok_or_else(|| AppError::BadRequest("Invalid syncable_id".to_string()))?;
-    let kind = SyncableKind::parse(&syncable_type)?;
     let group = fetch_group_for_syncable(&state, group_id).await?;
     ensure_group_is_syncable(&group)?;
     ensure_syncable_exists(&state, kind, syncable_id).await?;
@@ -1407,11 +1407,12 @@ async fn unlink_group_syncable(
     Ok(Json(json!({"status": "OK"})))
 }
 
-/// GET /api/v4/groups/{group_id}/{syncable_type}/{syncable_id}
-async fn get_group_syncable(
-    State(state): State<AppState>,
+async fn get_group_syncable_by_kind(
+    state: AppState,
     auth: crate::api::v4::extractors::MmAuthUser,
-    Path((group_id, syncable_type, syncable_id)): Path<(String, String, String)>,
+    group_id: String,
+    syncable_id: String,
+    kind: SyncableKind,
 ) -> ApiResult<Json<Value>> {
     require_system_groups_read(&auth)?;
 
@@ -1419,7 +1420,6 @@ async fn get_group_syncable(
         .ok_or_else(|| AppError::BadRequest("Invalid group_id".to_string()))?;
     let syncable_id = parse_mm_or_uuid(&syncable_id)
         .ok_or_else(|| AppError::BadRequest("Invalid syncable_id".to_string()))?;
-    let kind = SyncableKind::parse(&syncable_type)?;
 
     let row: GroupSyncableRow = sqlx::query_as(
         r#"
@@ -1441,17 +1441,16 @@ async fn get_group_syncable(
     Ok(Json(syncable_payload(&state, &row, kind).await?))
 }
 
-/// GET /api/v4/groups/{group_id}/{syncable_type}
-async fn get_group_syncables(
-    State(state): State<AppState>,
+async fn get_group_syncables_by_kind(
+    state: AppState,
     auth: crate::api::v4::extractors::MmAuthUser,
-    Path((group_id, syncable_type)): Path<(String, String)>,
+    group_id: String,
+    kind: SyncableKind,
 ) -> ApiResult<Json<Vec<Value>>> {
     require_system_groups_read(&auth)?;
 
     let group_id = parse_mm_or_uuid(&group_id)
         .ok_or_else(|| AppError::BadRequest("Invalid group_id".to_string()))?;
-    let kind = SyncableKind::parse(&syncable_type)?;
 
     let rows: Vec<GroupSyncableRow> = sqlx::query_as(
         r#"
@@ -1476,18 +1475,18 @@ async fn get_group_syncables(
     Ok(Json(response))
 }
 
-/// PUT /api/v4/groups/{group_id}/{syncable_type}/{syncable_id}/patch
-async fn patch_group_syncable(
-    State(state): State<AppState>,
+async fn patch_group_syncable_by_kind(
+    state: AppState,
     auth: crate::api::v4::extractors::MmAuthUser,
-    Path((group_id, syncable_type, syncable_id)): Path<(String, String, String)>,
-    Json(patch): Json<GroupSyncablePatch>,
+    group_id: String,
+    syncable_id: String,
+    kind: SyncableKind,
+    patch: GroupSyncablePatch,
 ) -> ApiResult<Json<Value>> {
     let group_id = parse_mm_or_uuid(&group_id)
         .ok_or_else(|| AppError::BadRequest("Invalid group_id".to_string()))?;
     let syncable_id = parse_mm_or_uuid(&syncable_id)
         .ok_or_else(|| AppError::BadRequest("Invalid syncable_id".to_string()))?;
-    let kind = SyncableKind::parse(&syncable_type)?;
     let group = fetch_group_for_syncable(&state, group_id).await?;
     ensure_group_is_syncable(&group)?;
     ensure_syncable_exists(&state, kind, syncable_id).await?;
@@ -1519,6 +1518,116 @@ async fn patch_group_syncable(
     spawn_reconcile_syncable(state.clone(), group_id, kind, syncable_id);
 
     Ok(Json(syncable_payload(&state, &row, kind).await?))
+}
+
+/// POST /api/v4/groups/{group_id}/teams/{team_id}/link
+async fn link_group_team_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, team_id)): Path<(String, String)>,
+    Json(patch): Json<GroupSyncablePatch>,
+) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+    link_group_syncable_by_kind(state, auth, group_id, team_id, SyncableKind::Team, patch).await
+}
+
+/// POST /api/v4/groups/{group_id}/channels/{channel_id}/link
+async fn link_group_channel_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, channel_id)): Path<(String, String)>,
+    Json(patch): Json<GroupSyncablePatch>,
+) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+    link_group_syncable_by_kind(
+        state,
+        auth,
+        group_id,
+        channel_id,
+        SyncableKind::Channel,
+        patch,
+    )
+    .await
+}
+
+/// DELETE /api/v4/groups/{group_id}/teams/{team_id}/link
+async fn unlink_group_team_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, team_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    unlink_group_syncable_by_kind(state, auth, group_id, team_id, SyncableKind::Team).await
+}
+
+/// DELETE /api/v4/groups/{group_id}/channels/{channel_id}/link
+async fn unlink_group_channel_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, channel_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    unlink_group_syncable_by_kind(state, auth, group_id, channel_id, SyncableKind::Channel).await
+}
+
+/// GET /api/v4/groups/{group_id}/teams/{team_id}
+async fn get_group_team_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, team_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    get_group_syncable_by_kind(state, auth, group_id, team_id, SyncableKind::Team).await
+}
+
+/// GET /api/v4/groups/{group_id}/channels/{channel_id}
+async fn get_group_channel_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, channel_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    get_group_syncable_by_kind(state, auth, group_id, channel_id, SyncableKind::Channel).await
+}
+
+/// GET /api/v4/groups/{group_id}/teams
+async fn get_group_team_syncables(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path(group_id): Path<String>,
+) -> ApiResult<Json<Vec<Value>>> {
+    get_group_syncables_by_kind(state, auth, group_id, SyncableKind::Team).await
+}
+
+/// GET /api/v4/groups/{group_id}/channels
+async fn get_group_channel_syncables(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path(group_id): Path<String>,
+) -> ApiResult<Json<Vec<Value>>> {
+    get_group_syncables_by_kind(state, auth, group_id, SyncableKind::Channel).await
+}
+
+/// PUT /api/v4/groups/{group_id}/teams/{team_id}/patch
+async fn patch_group_team_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, team_id)): Path<(String, String)>,
+    Json(patch): Json<GroupSyncablePatch>,
+) -> ApiResult<Json<Value>> {
+    patch_group_syncable_by_kind(state, auth, group_id, team_id, SyncableKind::Team, patch).await
+}
+
+/// PUT /api/v4/groups/{group_id}/channels/{channel_id}/patch
+async fn patch_group_channel_syncable(
+    State(state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path((group_id, channel_id)): Path<(String, String)>,
+    Json(patch): Json<GroupSyncablePatch>,
+) -> ApiResult<Json<Value>> {
+    patch_group_syncable_by_kind(
+        state,
+        auth,
+        group_id,
+        channel_id,
+        SyncableKind::Channel,
+        patch,
+    )
+    .await
 }
 
 /// GET /api/v4/groups/{group_id}/stats

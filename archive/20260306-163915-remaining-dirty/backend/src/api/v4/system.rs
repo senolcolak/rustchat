@@ -41,8 +41,16 @@ pub fn router() -> Router<AppState> {
         .route("/config/reload", post(reload_config))
         .route("/config/environment", get(get_environment_config))
         .route("/config/patch", post(patch_config))
-        .route("/license", get(get_license))
-        .route("/license/renewal", post(license_renewal))
+        .route(
+            "/license",
+            post(upload_license)
+                .delete(remove_license)
+                .get(get_license_legacy),
+        )
+        .route(
+            "/license/renewal",
+            get(get_license_renewal_link).post(get_license_renewal_link_legacy),
+        )
         .route("/trial-license", post(trial_license))
         .route("/trial-license/prev", get(get_prev_trial_license))
         .route("/license/load_metric", get(get_client_license_load_metric))
@@ -568,27 +576,83 @@ async fn patch_config(
     get_config(State(state), auth).await
 }
 
-/// GET /license
-async fn get_license(
+fn ensure_manage_system(auth: &crate::api::v4::extractors::MmAuthUser) -> ApiResult<()> {
+    if !auth.has_permission(&crate::auth::policy::permissions::SYSTEM_MANAGE) {
+        return Err(crate::error::AppError::Forbidden(
+            "Insufficient permissions to manage system license".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Legacy compatibility shim for historical RustChat behavior.
+/// Canonical Mattermost contract is POST/DELETE on `/license`.
+async fn get_license_legacy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(serde_json::json!({})))
 }
 
-/// POST /license/renewal
-async fn license_renewal(
+/// POST /license
+async fn upload_license(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.license.upload.not_implemented.app_error",
+        "License upload is not implemented.",
+        "POST /api/v4/license is not supported in this server.",
+    ))
+}
+
+/// DELETE /license
+async fn remove_license(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    ensure_manage_system(&auth)?;
+
+    Ok(crate::api::v4::mm_not_implemented(
+        "api.license.remove.not_implemented.app_error",
+        "License removal is not implemented.",
+        "DELETE /api/v4/license is not supported in this server.",
+    ))
+}
+
+/// GET /license/renewal
+async fn get_license_renewal_link(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({"status": "OK"})))
+    ensure_manage_system(&auth)?;
+
+    Ok(Json(serde_json::json!({
+        "renewal_link": ""
+    })))
+}
+
+/// Legacy compatibility shim for historical RustChat behavior.
+async fn get_license_renewal_link_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(serde_json::json!({
+        "renewal_link": ""
+    })))
 }
 
 /// POST /trial-license
 async fn trial_license(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
@@ -929,8 +993,9 @@ async fn get_timezones() -> ApiResult<Json<Vec<String>>> {
 
 async fn get_prev_trial_license(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(serde_json::json!({})))
 }
 

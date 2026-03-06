@@ -1,15 +1,19 @@
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::ApiResult;
 use axum::{
     extract::{Path, State},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde_json::json;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/access_control_policies", get(get_access_control_policies))
+        .route(
+            "/access_control_policies",
+            put(create_access_control_policy).get(get_access_control_policies_legacy),
+        )
         .route(
             "/access_control_policies/cel/check",
             post(check_access_control_cel),
@@ -32,11 +36,12 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/access_control_policies/{policy_id}",
-            get(get_access_control_policy),
+            get(get_access_control_policy).delete(delete_access_control_policy),
         )
         .route(
             "/access_control_policies/{policy_id}/activate",
-            post(activate_access_control_policy),
+            get(update_access_control_policy_active_status)
+                .post(activate_access_control_policy_legacy),
         )
         .route(
             "/access_control_policies/{policy_id}/assign",
@@ -44,7 +49,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/access_control_policies/{policy_id}/unassign",
-            post(unassign_access_control_policy),
+            delete(unassign_access_control_policy).post(unassign_access_control_policy_legacy),
         )
         .route(
             "/access_control_policies/{policy_id}/resources/channels",
@@ -56,136 +61,221 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/access_control_policies/cel/visual_ast",
-            get(get_access_control_cel_visual_ast),
+            post(get_access_control_cel_visual_ast).get(get_access_control_cel_visual_ast_legacy),
         )
         .route(
             "/access_control_policies/activate",
-            post(activate_access_control_policies),
+            put(activate_access_control_policies).post(activate_access_control_policies_legacy),
         )
 }
 
-/// GET /api/v4/access_control_policies
-async fn get_access_control_policies(
+fn ensure_manage_system(auth: &crate::api::v4::extractors::MmAuthUser) -> ApiResult<()> {
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(crate::error::AppError::Forbidden(
+            "Insufficient permissions to access access-control policies".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// PUT /api/v4/access_control_policies
+async fn create_access_control_policy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({})))
+}
+
+/// Temporary compatibility shim for legacy RustChat GET behavior.
+async fn get_access_control_policies_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(vec![]))
 }
 
 /// POST /api/v4/access_control_policies/cel/check
 async fn check_access_control_cel(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"allowed": true})))
 }
 
 /// POST /api/v4/access_control_policies/cel/validate_requester
 async fn validate_access_control_requester(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"valid": true})))
 }
 
 /// POST /api/v4/access_control_policies/cel/test
 async fn test_access_control_cel(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"status": "OK"})))
 }
 
 /// POST /api/v4/access_control_policies/search
 async fn search_access_control_policies(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(vec![]))
 }
 
 /// GET /api/v4/access_control_policies/cel/autocomplete/fields
 async fn get_access_control_cel_autocomplete_fields(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(vec![]))
 }
 
 /// GET /api/v4/access_control_policies/{policy_id}
 async fn get_access_control_policy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({})))
 }
 
-/// POST /api/v4/access_control_policies/{policy_id}/activate
-async fn activate_access_control_policy(
+/// DELETE /api/v4/access_control_policies/{policy_id}
+async fn delete_access_control_policy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({"status": "OK"})))
+}
+
+/// GET /api/v4/access_control_policies/{policy_id}/activate
+async fn update_access_control_policy_active_status(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path(_policy_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({"status": "OK"})))
+}
+
+/// Temporary compatibility shim for legacy RustChat POST behavior.
+async fn activate_access_control_policy_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path(_policy_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"status": "OK"})))
 }
 
 /// POST /api/v4/access_control_policies/{policy_id}/assign
 async fn assign_access_control_policy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"status": "OK"})))
 }
 
-/// POST /api/v4/access_control_policies/{policy_id}/unassign
+/// DELETE /api/v4/access_control_policies/{policy_id}/unassign
 async fn unassign_access_control_policy(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({"status": "OK"})))
+}
+
+/// Temporary compatibility shim for legacy RustChat POST behavior.
+async fn unassign_access_control_policy_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Path(_policy_id): Path<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"status": "OK"})))
 }
 
 /// GET /api/v4/access_control_policies/{policy_id}/resources/channels
 async fn get_access_control_policy_channels(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(vec![]))
 }
 
 /// POST /api/v4/access_control_policies/{policy_id}/resources/channels/search
 async fn search_access_control_policy_channels(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Path(_policy_id): Path<String>,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(vec![]))
 }
 
-/// GET /api/v4/access_control_policies/cel/visual_ast
+/// POST /api/v4/access_control_policies/cel/visual_ast
 async fn get_access_control_cel_visual_ast(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({})))
 }
 
-/// POST /api/v4/access_control_policies/activate
+/// Temporary compatibility shim for legacy RustChat GET behavior.
+async fn get_access_control_cel_visual_ast_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({})))
+}
+
+/// PUT /api/v4/access_control_policies/activate
 async fn activate_access_control_policies(
     State(_state): State<AppState>,
-    _auth: crate::api::v4::extractors::MmAuthUser,
+    auth: crate::api::v4::extractors::MmAuthUser,
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
+    Ok(Json(json!({"status": "OK"})))
+}
+
+/// Temporary compatibility shim for legacy RustChat POST behavior.
+async fn activate_access_control_policies_legacy(
+    State(_state): State<AppState>,
+    auth: crate::api::v4::extractors::MmAuthUser,
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ensure_manage_system(&auth)?;
     Ok(Json(json!({"status": "OK"})))
 }
