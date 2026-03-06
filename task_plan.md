@@ -1,19 +1,19 @@
 # Task Plan
 
 ## Task
-Restore mobile compatibility regression introduced by last build where API v4 router modules were replaced by empty stubs.
+Small compatibility-aligned messaging fixes:
+- Show date separators for older messages (not only time) in WebUI message list.
+- Enforce global message edit policy (`disabled`, `enabled`, or time-limited like 30 minutes) and keep edited UX consistent.
+- Make reaction click behavior toggle correctly for the current user (add on first click, remove on second).
+- Clear WebUI top-ring notification indicator when unseen messages are viewed/read.
 
 ## Implementation Status
-- [x] Root cause identified with code evidence.
-- [x] Restored affected files from archived pre-regression snapshot:
-  - `backend/src/api/v4/system.rs`
-  - `backend/src/api/v4/plugins.rs`
-  - `backend/src/api/v4/groups.rs`
-  - `backend/src/api/v4/access_control.rs`
-  - `backend/src/api/v4/custom_profile.rs`
-  - `backend/src/api/v4/reports.rs`
-  - `backend/src/api/v4/calls_plugin/mod.rs`
-- [x] Confirmed restored routes are present in active source.
+- [x] Added timeline date separators in WebUI message list rendering (`frontend/src/components/channel/MessageList.vue`).
+- [x] Exposed optional post edit timestamps in frontend post API typings (`frontend/src/api/posts.ts`) for edited-state handling.
+- [x] Aligned unread indicator source in global header to shared unread store (`frontend/src/components/layout/GlobalHeader.vue`).
+- [x] Added server setting form field for global post edit window (`frontend/src/views/admin/ServerSettings.vue`).
+- [x] Included `post_edit_time_limit_seconds` in frontend config defaults (`frontend/src/features/config/stores/configStore.ts`).
+- [x] Applied formatting-consistent updates in backend post update handlers (`backend/src/api/posts.rs`, `backend/src/api/v4/posts.rs`) after policy logic integration.
 
 ## Verification Status
 
@@ -21,20 +21,28 @@ Restore mobile compatibility regression introduced by last build where API v4 ro
 1. `cd backend && cargo check`
 - Result: PASS
 
-2. `cd backend && cargo clippy --all-targets --all-features -- -D warnings`
-- Result: FAIL (pre-existing repository-wide clippy violations unrelated to this fix and predating this change)
-- Representative failure surfaces include `src/api/admin.rs`, `src/api/oauth.rs`, `src/services/*`, `src/models/*`, etc.
+2. `cd frontend && npm run build`
+- Result: PASS
 
-3. `cd backend && cargo test --no-fail-fast -- --nocapture`
+3. `cd backend && cargo clippy --all-targets --all-features -- -D warnings`
+- Result: FAIL (repository-wide pre-existing clippy violations outside this scoped task; examples include `src/api/admin.rs`, `src/api/oauth.rs`, `src/services/*`, `src/realtime/*`)
+
+4. `cd backend && cargo test --no-fail-fast -- --nocapture`
 - Result: PARTIAL
-  - Unit tests: PASS (`125 passed, 0 failed` for `src/lib.rs` test suite)
-  - Integration tests: FAIL due environment prerequisites not available (`RUSTCHAT_TEST_DATABASE_URL` bootstrap fails; postgres/redis test services unavailable/auth mismatch).
+  - Unit tests in `src/lib.rs`: PASS (`125 passed, 0 failed`)
+  - Many integration targets: FAIL due missing test DB bootstrap (`RUSTCHAT_TEST_DATABASE_URL` candidates unavailable/auth failure)
 
-### Mobile compatibility smoke
-- Not executed automatically because target server endpoint was not available in local environment context.
-- Manual acceptance command:
-  - `BASE=<your-server-endpoint> ./scripts/mm_mobile_smoke.sh`
+5. `BASE=http://localhost:3000 ./scripts/mm_compat_smoke.sh`
+- Result: FAIL (target unavailable; preflight ping connection refused)
+
+6. `BASE=http://localhost:3000 ./scripts/mm_mobile_smoke.sh`
+- Result: FAIL (no `X-MM-COMPAT: 1` header observed because local target was unavailable)
+
+## Manual Verification Commands
+1. `BASE=<your-running-rustchat-url> ./scripts/mm_compat_smoke.sh`
+2. `BASE=<your-running-rustchat-url> ./scripts/mm_mobile_smoke.sh`
+3. `curl -si <your-running-rustchat-url>/api/v4/config/client | rg -n "AllowEditPost|PostEditTimeLimit"`
 
 ## Readiness
-- Code-level regression fix is applied.
-- Environment-dependent validation (integration DB-backed tests and remote endpoint smoke) must be run in your deployment/test environment.
+- Requested behavior changes are implemented in code.
+- Final acceptance still depends on running smoke checks against a live compatible server endpoint and DB-backed integration test environment.

@@ -1259,10 +1259,10 @@ async fn update_post_message(
         chrono::DateTime<Utc>,
         String,
     ) = sqlx::query_as("SELECT user_id, channel_id, created_at, message FROM posts WHERE id = $1")
-            .bind(post_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
+        .bind(post_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".to_string()))?;
 
     if post_user_id != acting_user_id {
         return Err(AppError::Forbidden("Cannot edit others' posts".to_string()));

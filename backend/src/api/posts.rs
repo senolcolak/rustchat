@@ -273,7 +273,9 @@ async fn update_post(
             ));
         }
         if post_edit_time_limit_seconds > 0 {
-            let post_age_seconds = Utc::now().signed_duration_since(post.created_at).num_seconds();
+            let post_age_seconds = Utc::now()
+                .signed_duration_since(post.created_at)
+                .num_seconds();
             if post_age_seconds >= post_edit_time_limit_seconds {
                 return Err(AppError::BadRequest(format!(
                     "Message edit window expired after {} seconds",
