@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { useStorage } from '@vueuse/core';
 import { useChannelStore } from '../../stores/channels';
+
 import { useMessageStore } from '../../stores/messages';
 import { useUnreadStore } from '../../stores/unreads';
 import { useCallsStore } from '../../stores/calls';
@@ -9,36 +11,35 @@ import AppShell from '../../components/layout/AppShell.vue';
 import ChannelHeader from '../../components/channel/ChannelHeader.vue';
 import MessageList from '../../components/channel/MessageList.vue';
 import MessageComposer from '../../components/composer/MessageComposer.vue';
-import SavedMessagesPanel from '../../components/channel/SavedMessagesPanel.vue';
-import PinnedMessagesPanel from '../../components/channel/PinnedMessagesPanel.vue';
-import SearchPanel from '../../components/channel/SearchPanel.vue';
-import ChannelMembersPanel from '../../components/channel/ChannelMembersPanel.vue';
 import ChannelSettingsModal from '../../components/modals/ChannelSettingsModal.vue';
 import VideoCallModal from '../../components/modals/VideoCallModal.vue';
 import UserProfileModal from '../../components/modals/UserProfileModal.vue';
 import TypingIndicator from '../../components/channel/TypingIndicator.vue';
 import ActiveCall from '../../components/calls/ActiveCall.vue';
 import IncomingCallModal from '../../components/calls/IncomingCallModal.vue';
-import { useUIStore } from '../../stores/ui';
-import callsApi from '../../api/calls';
-import { useConfigStore } from '../../stores/config';
+import { useUIStore, type RhsView } from '../../stores/ui';
 
 const channelStore = useChannelStore();
 const messageStore = useMessageStore();
 const unreadStore = useUnreadStore();
 const callsStore = useCallsStore();
 const uiStore = useUIStore();
-const configStore = useConfigStore();
 const { sendTyping, sendMessage, subscribe, unsubscribe } = useWebSocket();
+
+// Persist RHS state per channel
+const rhsStateByChannel = useStorage<Record<string, { view: RhsView; contextId?: string }>>('rhs_state_by_channel', {});
 
 // Load active calls on mount
 onMounted(async () => {
-    // Check if calls plugin is enabled
-    const enabled = await callsApi.getEnabled()
-    if (enabled) {
-        await callsStore.loadConfig()
-        await callsStore.loadCalls()
-    }
+    await callsStore.loadConfig()
+    await callsStore.loadCalls()
+    
+    // Add keyboard shortcuts
+    document.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+    document.removeEventListener('keydown', handleKeydown)
 })
 
 const currentChannel = computed(() => channelStore.currentChannel);
@@ -58,24 +59,53 @@ function handleOpenProfile(userId: string) {
   showUserProfile.value = true;
 }
 
-// Mark as read when channel changes
-watch(channelId, (newId) => {
-    if (newId) {
-        unreadStore.markAsRead(newId);
+// Save RHS state when channel changes or panel closes
+watch(() => uiStore.rhsView, (view) => {
+    if (channelId.value && view) {
+        rhsStateByChannel.value[channelId.value] = {
+            view,
+            contextId: uiStore.rhsContextId || undefined
+        }
     }
-});
+})
 
-// Fetch messages when channel changes
+// Restore RHS state when channel changes
 watch(channelId, (newId, oldId) => {
     if (oldId) {
         unsubscribe(oldId);
+        // Save state for old channel
+        if (uiStore.rhsView) {
+            rhsStateByChannel.value[oldId] = {
+                view: uiStore.rhsView,
+                contextId: uiStore.rhsContextId || undefined
+            }
+        }
     }
     if (newId) {
         messageStore.fetchMessages(newId);
         subscribe(newId);
+        
+        // Restore RHS state for this channel
+        const savedState = rhsStateByChannel.value[newId]
+        if (savedState?.view) {
+            // Small delay to ensure UI is ready
+            setTimeout(() => {
+                uiStore.openRhs(savedState.view, savedState.contextId)
+            }, 50)
+        }
     }
     showChannelSettings.value = false;
 }, { immediate: true });
+
+// Mark as read when channel changes
+watch(channelId, (newId) => {
+    if (newId) {
+        // Clear counts in channel store immediately for responsive UI
+        channelStore.clearCounts(newId);
+        // Also call the API to mark as read
+        unreadStore.markAsRead(newId);
+    }
+});
 
 async function onSendMessage(data: { content: string, file_ids: string[] }) {
     if (channelId.value) {
@@ -117,21 +147,6 @@ function handleChannelDeleted() {
     channelStore.removeChannel(currentChannel.value?.id || '');
 }
 
-async function onStartCall() {
-    if (!channelId.value || !configStore.siteConfig.mirotalk_enabled) return;
-    try {
-        const { data } = await callsApi.createMeeting('channel', channelId.value);
-        if (data.mode === 'embed_iframe') {
-            uiStore.openVideoCall(data.meeting_url);
-        } else {
-            window.open(data.meeting_url, '_blank', 'noopener,noreferrer');
-        }
-    } catch (e) {
-        console.error('Failed to start call', e);
-        alert('Failed to start call');
-    }
-}
-
 async function onStartAudioCall() {
     if (!channelId.value) return;
     
@@ -149,18 +164,50 @@ async function onStartAudioCall() {
         alert('Failed to start audio call');
     }
 }
+
+// Keyboard shortcuts
+function handleKeydown(e: KeyboardEvent) {
+    // ESC to close RHS
+    if (e.key === 'Escape' && uiStore.isRhsOpen) {
+        uiStore.closeRhs()
+        return
+    }
+    
+    // Cmd/Ctrl + F to open search
+    if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault()
+        if (currentChannel.value) {
+            uiStore.toggleRhs('search')
+        }
+        return
+    }
+    
+    // Cmd/Ctrl + . to toggle thread panel (if there's a selected message)
+    if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+        e.preventDefault()
+        uiStore.toggleRhs('thread')
+        return
+    }
+}
 </script>
 
 <template>
-  <AppShell>
+  <AppShell
+    @rhsJump="handleMessageJump"
+    @openChannelSettings="showChannelSettings = true"
+  >
       <div class="flex h-full relative overflow-hidden">
-          <!-- Background Gradient -->
-          <div class="absolute inset-0 bg-slate-900 pointer-events-none z-0">
-             <div class="absolute inset-0 bg-gradient-to-br from-indigo-900/20 via-slate-900 to-slate-900"></div>
-          </div>
+          <!-- Background - uses theme surface color -->
+          <div 
+            class="absolute inset-0 pointer-events-none z-0"
+            style="background-color: var(--bg-app);"
+          ></div>
 
           <!-- Main Channel Area -->
-          <div class="relative flex flex-col flex-1 min-w-0 z-10 bg-transparent">
+          <div 
+            class="relative flex flex-col flex-1 min-w-0 z-10 bg-transparent transition-all duration-300"
+            :class="{ 'mr-0': !uiStore.isRhsOpen }"
+          >
               <!-- No Channel Selected -->
               <div v-if="!currentChannel" class="flex-1 flex items-center justify-center text-slate-500">
                   <div class="text-center">
@@ -196,44 +243,10 @@ async function onStartAudioCall() {
                   <MessageComposer 
                     @send="onSendMessage" 
                     @typing="onTyping" 
-                    @startCall="onStartCall"
                     @startAudioCall="onStartAudioCall"
                   />
               </template>
           </div>
-
-          <!-- RHS Panels -->
-          <ThreadPanel 
-            v-if="uiStore.isRhsOpen && uiStore.rhsView === 'thread'"
-            @close="uiStore.closeRhs"
-          />
-
-          <SavedMessagesPanel 
-            v-if="uiStore.isRhsOpen && uiStore.rhsView === 'saved'"
-            :show="true"
-            @close="uiStore.closeRhs"
-            @jump="handleMessageJump"
-          />
-
-          <PinnedMessagesPanel 
-            v-if="uiStore.isRhsOpen && uiStore.rhsView === 'pinned'"
-            :show="true"
-            @close="uiStore.closeRhs"
-            @jump="handleMessageJump"
-          />
-
-          <SearchPanel 
-            v-if="uiStore.isRhsOpen && uiStore.rhsView === 'search' && currentChannel"
-            :channelId="currentChannel.id"
-            @close="uiStore.closeRhs"
-            @jump="handleMessageJump"
-          />
-
-          <ChannelMembersPanel 
-            v-if="uiStore.isRhsOpen && uiStore.rhsView === 'members' && currentChannel"
-            :channelId="currentChannel.id"
-            @close="uiStore.closeRhs"
-          />
       </div>
 
       <!-- Channel Settings Modal -->

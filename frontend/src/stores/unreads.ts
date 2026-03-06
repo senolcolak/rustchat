@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api/client'
+import { channelsApi } from '../api/channels'
+import { postsApi, type ChannelUnreadAt } from '../api/posts'
 
 export interface ChannelUnread {
     channel_id: string
@@ -57,32 +59,51 @@ export const useUnreadStore = defineStore('unreads', () => {
         }
     }
 
-    async function markAsRead(channelId: string, targetSeq?: string | number | null) {
+    // Use MM-compatible endpoint: POST /api/v4/channels/{id}/members/{user_id}/read
+    async function markAsRead(channelId: string, userId: string = 'me') {
         try {
-            await api.post(`/channels/${channelId}/read`, { target_seq: targetSeq })
+            await channelsApi.markAsRead(channelId, userId)
 
-            // Optimistic update for standard "mark channel as read" (no targetSeq)
-            if (!targetSeq) {
-                channelUnreads.value[channelId] = 0
-                channelMentions.value[channelId] = 0
+            // Optimistic update
+            channelUnreads.value[channelId] = 0
+            channelMentions.value[channelId] = 0
 
-                // Clear the "new messages" line state locally too
-                if (channelReadStates.value[channelId]) {
-                    channelReadStates.value[channelId] = {
-                        last_read_message_id: null,
-                        first_unread_message_id: null
-                    }
+            // Clear the "new messages" line state locally too
+            if (channelReadStates.value[channelId]) {
+                channelReadStates.value[channelId] = {
+                    last_read_message_id: null,
+                    first_unread_message_id: null
                 }
-            } else {
-                // If targetSeq is provided, it's usually "Mark as unread from here"
-                // We could re-calculate locally but simpler to let the WS event or next fetch handle it.
-                // For now, let's just update the local state if we can.
             }
-
-            // We might want to re-fetch overview to update team counts correctly
-            // or we could try to calculate it if we have team_id mapping.
         } catch (error) {
             console.error('Failed to mark channel as read:', error)
+        }
+    }
+
+    // Use MM-compatible endpoint: POST /api/v4/channels/{id}/members/{user_id}/set_unread
+    async function markAsUnread(channelId: string, userId: string = 'me') {
+        try {
+            await channelsApi.markAsUnread(channelId, userId)
+
+            // Optimistic update - set as having unread
+            channelUnreads.value[channelId] = 1
+            
+            // Refresh overview to get accurate counts
+            await fetchOverview()
+        } catch (error) {
+            console.error('Failed to mark channel as unread:', error)
+        }
+    }
+
+    async function markAsUnreadFromPost(postId: string, userId: string = 'me') {
+        try {
+            const { data } = await postsApi.setUnreadFromPost(userId, postId, {
+                collapsed_threads_supported: true,
+            })
+            applyPostUnread(data)
+        } catch (error) {
+            console.error('Failed to mark post as unread:', error)
+            throw error
         }
     }
 
@@ -106,6 +127,13 @@ export const useUnreadStore = defineStore('unreads', () => {
         // Team unread count update: if we want to be accurate we should probably re-fetch or track team mappings
     }
 
+    function applyPostUnread(data: ChannelUnreadAt) {
+        channelMentions.value[data.channel_id] = Number.isFinite(data.mention_count) ? data.mention_count : 0
+        // Mattermost post_unread/set_unread returns msg_count as read-position counter.
+        // Keep unread counters authoritative from overview/unread events.
+        void fetchOverview()
+    }
+
     const totalUnreadCount = computed(() => Object.values(channelUnreads.value).reduce((a, b) => a + b, 0))
     const getChannelUnreadCount = computed(() => (channelId: string) => channelUnreads.value[channelId] || 0)
     const getTeamUnreadCount = computed(() => (teamId: string) => teamUnreads.value[teamId] || 0)
@@ -119,9 +147,12 @@ export const useUnreadStore = defineStore('unreads', () => {
         loading,
         fetchOverview,
         markAsRead,
+        markAsUnread,
+        markAsUnreadFromPost,
         markAllAsRead,
         setReadState,
         handleUnreadUpdate,
+        applyPostUnread,
         totalUnreadCount,
         getChannelUnreadCount,
         getTeamUnreadCount,

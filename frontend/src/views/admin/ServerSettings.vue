@@ -4,6 +4,7 @@ import { useAdminStore } from '../../stores/admin';
 import { Save, Globe, Upload, Clock, Activity, Sliders } from 'lucide-vue-next';
 
 const adminStore = useAdminStore();
+const TEAM_DEFAULT_CHANNELS_KEY = 'team_default_channels';
 
 const form = ref({
     site_name: '',
@@ -38,12 +39,40 @@ const form = ref({
 
 const saving = ref(false);
 const showAdvanced = ref(false);
+const defaultChannelsInput = ref('');
+
+function parseDefaultChannelsInput(raw: string): string[] {
+    const seen = new Set<string>();
+    const channels: string[] = [];
+    for (const item of raw.split(',')) {
+        const normalized = item.trim().toLowerCase();
+        if (!normalized || seen.has(normalized)) {
+            continue;
+        }
+        seen.add(normalized);
+        channels.push(normalized);
+    }
+    return channels;
+}
+
+function syncDefaultChannelsFromConfig(experimental: Record<string, unknown> | null | undefined) {
+    const value = experimental?.[TEAM_DEFAULT_CHANNELS_KEY];
+    if (!Array.isArray(value)) {
+        defaultChannelsInput.value = '';
+        return;
+    }
+
+    defaultChannelsInput.value = value
+        .filter((item): item is string => typeof item === 'string')
+        .join(', ');
+}
 
 onMounted(async () => {
     await adminStore.fetchConfig();
     if (adminStore.config?.site) {
         form.value = { ...form.value, ...adminStore.config.site };
     }
+    syncDefaultChannelsFromConfig(adminStore.config?.experimental as Record<string, unknown> | undefined);
 });
 
 watch(() => adminStore.config?.site, (site) => {
@@ -52,10 +81,28 @@ watch(() => adminStore.config?.site, (site) => {
     }
 });
 
+watch(
+    () => adminStore.config?.experimental,
+    (experimental) => {
+        syncDefaultChannelsFromConfig(experimental as Record<string, unknown> | undefined);
+    },
+);
+
 const saveSettings = async () => {
     saving.value = true;
     try {
         await adminStore.updateConfig('site', form.value);
+        const existingExperimental =
+            adminStore.config?.experimental &&
+            typeof adminStore.config.experimental === 'object' &&
+            !Array.isArray(adminStore.config.experimental)
+                ? (adminStore.config.experimental as Record<string, unknown>)
+                : {};
+
+        await adminStore.updateConfig('experimental', {
+            ...existingExperimental,
+            [TEAM_DEFAULT_CHANNELS_KEY]: parseDefaultChannelsInput(defaultChannelsInput.value),
+        });
     } finally {
         saving.value = false;
     }
@@ -341,6 +388,29 @@ const saveSettings = async () => {
                 <p v-else class="text-sm text-gray-500 dark:text-gray-400">
                     These settings control advanced client behavior and legacy config responses.
                 </p>
+            </div>
+
+            <!-- Team Membership Defaults -->
+            <div class="p-6">
+                <div class="flex items-center mb-4">
+                    <Globe class="w-5 h-5 text-gray-400 mr-2" />
+                    <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Team Membership Defaults</h2>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Default Channels For New Team Members
+                    </label>
+                    <input
+                        v-model="defaultChannelsInput"
+                        type="text"
+                        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                        placeholder="off-topic, announcements"
+                    />
+                    <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                        Comma-separated channel names. Leave empty to use the fallback (<code>town-square</code> + <code>off-topic</code>).
+                        <code>town-square</code> is always included.
+                    </p>
+                </div>
             </div>
 
             <!-- Localization -->

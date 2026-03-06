@@ -31,6 +31,11 @@ export const useCallsStore = defineStore('calls', () => {
     const isHandRaised = ref(false)
     const isScreenSharing = ref(false)
     const speakingParticipants = ref<Set<string>>(new Set())
+    
+    // Device preferences (stored in localStorage)
+    const preferredAudioInput = ref<string>(localStorage.getItem('calls_preferred_audio_input') || '')
+    const preferredAudioOutput = ref<string>(localStorage.getItem('calls_preferred_audio_output') || '')
+    const preferredVideoDevice = ref<string>(localStorage.getItem('calls_preferred_video_device') || '')
 
     // Getters
     const isInCall = computed(() => !!currentCall.value)
@@ -919,6 +924,22 @@ export const useCallsStore = defineStore('calls', () => {
         isExpanded.value = !isExpanded.value
     }
 
+    // Device preference actions
+    async function setPreferredAudioInput(deviceId: string) {
+        preferredAudioInput.value = deviceId
+        localStorage.setItem('calls_preferred_audio_input', deviceId)
+    }
+
+    async function setPreferredAudioOutput(deviceId: string) {
+        preferredAudioOutput.value = deviceId
+        localStorage.setItem('calls_preferred_audio_output', deviceId)
+    }
+
+    async function setPreferredVideoDevice(deviceId: string) {
+        preferredVideoDevice.value = deviceId
+        localStorage.setItem('calls_preferred_video_device', deviceId)
+    }
+
     return {
         // State
         callsConfig,
@@ -930,6 +951,9 @@ export const useCallsStore = defineStore('calls', () => {
         isHandRaised,
         isScreenSharing,
         speakingParticipants,
+        preferredAudioInput,
+        preferredAudioOutput,
+        preferredVideoDevice,
 
         // Getters
         isInCall,
@@ -955,6 +979,9 @@ export const useCallsStore = defineStore('calls', () => {
         setIncomingCall,
         toggleExpanded,
         initializeWebRTC,
-        cleanupWebRTC
+        cleanupWebRTC,
+        setPreferredAudioInput,
+        setPreferredAudioOutput,
+        setPreferredVideoDevice
     }
 })

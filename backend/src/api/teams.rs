@@ -10,14 +10,19 @@ use uuid::Uuid;
 use super::AppState;
 use crate::{
     auth::middleware::AuthUser,
+    auth::policy::permissions,
     error::AppError,
     models::team::{AddTeamMember, CreateTeam, Team, TeamMember, TeamMemberResponse},
+    services::team_membership::{
+        apply_default_channel_membership_for_team_join, ensure_default_channels_for_team,
+    },
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_teams).post(create_team))
         .route("/public", get(list_public_teams))
+        .route("/all", get(list_all_teams))
         .route("/{id}", get(get_team).delete(delete_team).put(update_team))
         .route("/{id}/join", post(join_team))
         .route("/{id}/leave", post(leave_team))
@@ -40,6 +45,31 @@ async fn list_teams(
         "#,
     )
     .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(teams))
+}
+
+/// List all teams (for users with TEAM_MANAGE permission)
+/// Used for membership policy management and other admin functions
+async fn list_all_teams(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Vec<Team>>, AppError> {
+    // Check if user has permission to manage teams
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to view all teams".to_string(),
+        ));
+    }
+
+    let teams = sqlx::query_as::<_, Team>(
+        r#"
+        SELECT t.* FROM teams t
+        ORDER BY t.name
+        "#,
+    )
     .fetch_all(&state.db)
     .await?;
 
@@ -108,6 +138,18 @@ async fn create_team(
     .execute(&state.db)
     .await?;
 
+    ensure_default_channels_for_team(&state, team_id, auth.user_id).await?;
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, team_id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after team creation"
+        );
+    }
+
     Ok(Json(team))
 }
 
@@ -171,7 +213,7 @@ async fn add_member(
     Json(payload): Json<AddTeamMember>,
 ) -> Result<Json<TeamMember>, AppError> {
     // Permission check
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)
@@ -198,19 +240,16 @@ async fn add_member(
     .fetch_one(&state.db)
     .await?;
 
-    // Also add user to all public channels in the team
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.channel_type = 'public'::channel_type
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(payload.user_id)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, id, payload.user_id).await
+    {
+        tracing::warn!(
+            team_id = %id,
+            user_id = %payload.user_id,
+            error = %err,
+            "Default channel auto-join failed after add_member"
+        );
+    }
 
     Ok(Json(member))
 }
@@ -222,7 +261,7 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<(), AppError> {
     // Permission check
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::TEAM_MANAGE) {
         let requester_role: Option<String> =
             sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2")
                 .bind(id)
@@ -345,19 +384,15 @@ async fn join_team(
     .fetch_one(&state.db)
     .await?;
 
-    // Also add user to all public channels in the team
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (channel_id, user_id)
-        SELECT c.id, $1 FROM channels c
-        WHERE c.team_id = $2 AND c.channel_type = 'public'::channel_type
-        ON CONFLICT (channel_id, user_id) DO NOTHING
-        "#,
-    )
-    .bind(auth.user_id)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    if let Err(err) = apply_default_channel_membership_for_team_join(&state, id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after join_team"
+        );
+    }
 
     Ok(Json(member))
 }
@@ -409,20 +444,24 @@ async fn update_team(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateTeam>,
 ) -> Result<Json<Team>, AppError> {
-    // Check if user is admin of the team
-    let member: Option<TeamMember> =
-        sqlx::query_as("SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2")
-            .bind(id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let can_manage_team = auth.has_permission(&permissions::TEAM_MANAGE);
 
-    match member {
-        Some(m) if m.role == "admin" || m.role == "owner" => {}
-        _ => {
-            return Err(AppError::Forbidden(
-                "Only team admins can update team settings".into(),
-            ))
+    // Check if user is admin of the team
+    if !can_manage_team {
+        let member: Option<TeamMember> =
+            sqlx::query_as("SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2")
+                .bind(id)
+                .bind(auth.user_id)
+                .fetch_optional(&state.db)
+                .await?;
+
+        match member {
+            Some(m) if m.role == "admin" || m.role == "owner" => {}
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Only team admins can update team settings".into(),
+                ))
+            }
         }
     }
 

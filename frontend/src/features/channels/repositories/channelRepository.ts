@@ -1,7 +1,7 @@
 // Channel Repository - Data access for channels
 // Maps API responses to domain entities
 
-import { channelsApi } from '../../../api/channels'
+import { channelsApi, categoriesApi } from '../../../api/channels'
 import type { 
   Channel, 
   ChannelId, 
@@ -11,6 +11,7 @@ import type {
 import type { TeamId } from '../../../core/entities/Team'
 import type { UserId } from '../../../core/entities/User'
 import { withRetry } from '../../../core/services/retry'
+import type { SidebarCategory } from '../../../api/channels'
 
 export interface CreateChannelRequest {
   teamId: TeamId
@@ -26,6 +27,13 @@ export interface ChannelUnreadCounts {
   channelId: ChannelId
   unreadCount: number
   mentionCount: number
+}
+
+export interface ChannelNotifyProps {
+  desktop?: string
+  mobile?: string
+  mark_unread?: string
+  ignore_channel_mentions?: string
 }
 
 export const channelRepository = {
@@ -135,12 +143,68 @@ export const channelRepository = {
     })
   },
 
-  // Mark channel as read
-  async markAsRead(
+  // Mark channel as read (MM-compatible)
+  async markAsRead(channelId: ChannelId, userId: UserId = 'me'): Promise<void> {
+    await withRetry(() => channelsApi.markAsRead(channelId, userId))
+  },
+
+  // Mark channel as unread (MM-compatible)
+  async markAsUnread(channelId: ChannelId, userId: UserId = 'me'): Promise<void> {
+    await withRetry(() => channelsApi.markAsUnread(channelId, userId))
+  },
+
+  // Get channel member info including notify_props
+  async getMember(channelId: ChannelId, userId: UserId): Promise<ChannelMember | null> {
+    return withRetry(async () => {
+      try {
+        const response = await channelsApi.getMember(channelId, userId)
+        return normalizeChannelMember(response.data)
+      } catch (error: any) {
+        if (error?.response?.status === 404) {
+          return null
+        }
+        throw error
+      }
+    })
+  },
+
+  // Update notify props (for mute/unmute)
+  async updateNotifyProps(
     channelId: ChannelId, 
-    targetSeq?: string | number | null
+    userId: UserId, 
+    props: ChannelNotifyProps
   ): Promise<void> {
-    await withRetry(() => channelsApi.markAsRead(channelId, targetSeq))
+    return withRetry(async () => {
+      await channelsApi.updateNotifyProps(channelId, userId, props)
+    })
+  },
+
+  // Add member to channel
+  async addMember(channelId: ChannelId, userId: UserId): Promise<ChannelMember> {
+    return withRetry(async () => {
+      const response = await channelsApi.addMember(channelId, userId)
+      return normalizeChannelMember(response.data)
+    })
+  },
+
+  // Get sidebar categories for a user/team
+  async getCategories(userId: UserId, teamId: TeamId): Promise<SidebarCategory[]> {
+    return withRetry(async () => {
+      const response = await categoriesApi.getCategories(userId, teamId)
+      return response.data.categories
+    })
+  },
+
+  // Update sidebar categories (for moving channels)
+  async updateCategories(
+    userId: UserId, 
+    teamId: TeamId, 
+    categories: SidebarCategory[]
+  ): Promise<SidebarCategory[]> {
+    return withRetry(async () => {
+      const response = await categoriesApi.updateCategories(userId, teamId, categories)
+      return response.data
+    })
   }
 }
 

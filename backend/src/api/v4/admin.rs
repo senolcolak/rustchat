@@ -1,19 +1,31 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
+use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/audits", get(get_audits))
         .route("/admin/email/test", post(test_email_config))
+        .route("/admin/keycloak/sync", post(trigger_keycloak_sync))
+        .route(
+            "/admin/keycloak/sync/users/{user_id}",
+            post(trigger_keycloak_user_sync),
+        )
 }
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::ApiResult;
+use crate::error::AppError;
+use crate::mattermost_compat::id::parse_mm_or_uuid;
 use crate::mattermost_compat::models as mm;
+use crate::models::email::MailProviderSettings;
+use crate::services::email_provider::{EmailAddress, EmailContent, MailProvider, SmtpProvider};
+use crate::services::keycloak_sync;
 
 pub async fn get_audits(
     State(state): State<AppState>,
@@ -51,38 +63,42 @@ pub async fn test_email_config(
     auth: MmAuthUser,
     Json(payload): Json<TestEmailRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Get email config
-    let config =
-        sqlx::query_as::<_, (sqlx::types::Json<crate::models::server_config::EmailConfig>,)>(
-            "SELECT email FROM server_config WHERE id = 'default'",
-        )
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| row.0 .0)
-        .unwrap_or_default();
+    // Get default provider from the new provider system
+    let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
+        r#"
+        SELECT * FROM mail_provider_settings
+        WHERE enabled = true AND is_default = true
+        ORDER BY tenant_id NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
-    // Check if email notifications are enabled
-    if !config.send_email_notifications {
-        return Ok(Json(serde_json::json!({
-            "status": "error",
-            "error": "Email notifications are disabled. Enable them in System Console > Notifications > Email."
-        })));
-    }
+    let provider_settings = match provider_settings {
+        Some(p) => p,
+        None => {
+            return Ok(Json(serde_json::json!({
+                "status": "error",
+                "error": "No default email provider configured. Configure one in the admin console."
+            })));
+        }
+    };
 
     // Check if SMTP is configured
-    if config.smtp_host.is_empty() {
+    if provider_settings.host.is_empty() {
         return Ok(Json(serde_json::json!({
             "status": "error",
-            "error": "SMTP server not configured. Configure it in System Console > Notifications > Email."
+            "error": "SMTP server not configured for the default provider."
         })));
     }
 
-    if config.from_address.is_empty() {
+    if provider_settings.from_address.is_empty() {
         return Ok(Json(serde_json::json!({
             "status": "error",
-            "error": "From address not configured. Set it in System Console > Notifications > Email."
+            "error": "From address not configured for the default provider."
         })));
     }
 
@@ -92,28 +108,61 @@ pub async fn test_email_config(
         .or(payload.email)
         .unwrap_or_else(|| auth.email.clone());
 
-    // Send test email using the email service
-    match crate::services::email::send_email(
-        &config,
-        &test_email,
-        "RustChat Test Email",
-        &format!(
-            "This is a test email from RustChat.\n\nIf you received this, your email configuration is working correctly!\n\nConfiguration used:\n- SMTP Server: {}:{}\n- Security: {}\n- From: {}\n",
-            config.smtp_host,
-            config.smtp_port,
-            config.smtp_security,
-            config.from_address
+    // Create provider and test
+    let provider =
+        match SmtpProvider::new(provider_settings.clone(), &state.config.encryption_key).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("Failed to initialize SMTP provider: {}", e)
+                })));
+            }
+        };
+
+    // Test connection first
+    if let Err(e) = provider.test_connection().await {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "error": format!("SMTP connection test failed: {}", e)
+        })));
+    }
+
+    // Send test email
+    let from = EmailAddress::with_name(
+        &provider_settings.from_address,
+        &provider_settings.from_name,
+    );
+    let to = EmailAddress::new(&test_email);
+    let content = EmailContent {
+        subject: "RustChat Test Email".to_string(),
+        body_text: format!(
+            "This is a test email from RustChat.\n\nIf you received this, your email configuration is working correctly!\n\nConfiguration used:\n- SMTP Server: {}:{}\n- TLS: {}\n- From: {}\n",
+            provider_settings.host,
+            provider_settings.port,
+            provider_settings.tls_mode.as_str(),
+            provider_settings.from_address
         ),
-    ).await {
-        Ok(_) => Ok(Json(serde_json::json!({
+        body_html: None,
+        headers: vec![],
+    };
+
+    match provider.send_email(&from, &to, &content).await {
+        Ok(result) => Ok(Json(serde_json::json!({
             "status": "success",
             "message": format!("Test email sent successfully to {}", test_email),
+            "delivery": {
+                "accepted": true,
+                "message_id": result.message_id,
+                "server_response": result.server_response,
+            },
             "config": {
-                "smtp_host": config.smtp_host,
-                "smtp_port": config.smtp_port,
-                "smtp_security": config.smtp_security,
-                "from_address": config.from_address,
-                "from_name": config.from_name,
+                "smtp_host": provider_settings.host,
+                "smtp_port": provider_settings.port,
+                "smtp_security": provider_settings.tls_mode.as_str(),
+                "from_address": provider_settings.from_address,
+                "from_name": provider_settings.from_name,
+                "reply_to": provider_settings.reply_to.as_deref().unwrap_or(""),
             }
         }))),
         Err(e) => Ok(Json(serde_json::json!({
@@ -122,4 +171,41 @@ pub async fn test_email_config(
             "details": "Check your SMTP configuration and ensure the server allows sending."
         }))),
     }
+}
+
+async fn trigger_keycloak_sync(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to run Keycloak sync".to_string(),
+        ));
+    }
+
+    let report = keycloak_sync::run_full_sync(&state).await?;
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "report": report
+    })))
+}
+
+async fn trigger_keycloak_user_sync(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to run Keycloak user sync".to_string(),
+        ));
+    }
+
+    let user_uuid: Uuid = parse_mm_or_uuid(&user_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
+    let report = keycloak_sync::resync_user(&state, user_uuid).await?;
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "report": report
+    })))
 }

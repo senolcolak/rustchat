@@ -8,6 +8,7 @@ use axum::{
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::models::{
@@ -171,7 +172,7 @@ async fn update_playbook(
         .await?
         .ok_or_else(|| AppError::NotFound("Playbook not found".to_string()))?;
 
-    if current.created_by != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(current.created_by, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Only the creator can edit this playbook".to_string(),
         ));
@@ -218,7 +219,7 @@ async fn delete_playbook(
         .await?
         .ok_or_else(|| AppError::NotFound("Playbook not found".to_string()))?;
 
-    if current != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(current, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Only the creator can archive this playbook".to_string(),
         ));

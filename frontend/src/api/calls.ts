@@ -453,12 +453,5 @@ export default {
         return apiClient.post<CallChannelState>(`${CALLS_ROUTE}/${channelId}`, { enabled: enable })
     },
 
-    // Legacy MiroTalk video meetings (kept for backward compatibility)
-    createMeeting(scope: 'channel' | 'dm', channelId?: string, dmUserId?: string) {
-        return apiClient.post<CreateMeetingResponse>('/api/v4/video/meetings', {
-            scope,
-            channel_id: channelId,
-            dm_user_id: dmUserId
-        })
-    },
+
 }

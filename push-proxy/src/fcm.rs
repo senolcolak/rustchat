@@ -178,7 +178,8 @@ impl FcmClient {
                 "token": payload.token,
                 // NO "notification" field - this is critical for VoIP ringing!
                 "data": {
-                    "type": "call",
+                    "type": "message",
+                    "sub_type": "calls",
                     "channel_id": payload.data.channel_id,
                     "post_id": payload.data.post_id,
                     "sender_name": payload.data.sender_name.unwrap_or_default(),

@@ -14,30 +14,33 @@ const emit = defineEmits<{
 const auth = useAuthStore();
 const emoji = ref('💬');
 const text = ref('');
-const duration = ref<number | undefined>(undefined);
+const duration = ref<string>('');
 
 // Initialize from current status when opening
 watch(() => props.show, (isOpen) => {
   if (isOpen && auth.user) {
     text.value = auth.user.status_text || '';
     emoji.value = auth.user.status_emoji || '💬';
-    duration.value = undefined;
+    duration.value = '';
   }
 });
 
+// Mattermost-compatible duration options
 const durations = [
-  { label: "Don't clear", value: undefined },
-  { label: '30 minutes', value: 30 },
-  { label: '1 hour', value: 60 },
-  { label: '4 hours', value: 240 },
-  { label: 'Today', value: 0 }, 
+  { label: "Don't clear", value: '' },
+  { label: '30 minutes', value: 'thirty_minutes' },
+  { label: '1 hour', value: 'one_hour' },
+  { label: '4 hours', value: 'four_hours' },
+  { label: 'Today', value: 'today' },
+  { label: 'This week', value: 'this_week' },
+  { label: 'Custom date and time', value: 'custom_date_time' },
 ];
 
 async function save() {
     await auth.updateStatus({
         text: text.value,
         emoji: emoji.value,
-        duration_minutes: duration.value
+        duration: duration.value || undefined
     });
     emit('close');
 }
@@ -46,7 +49,7 @@ async function clear() {
     await auth.updateStatus({
         text: '',
         emoji: '',
-        duration_minutes: undefined
+        duration: undefined
     });
     emit('close');
 }
@@ -89,7 +92,7 @@ async function clear() {
             <div>
                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Clear after</label>
                 <select v-model="duration" class="block w-full rounded-md border-0 py-1.5 text-gray-900 dark:text-gray-100 dark:bg-gray-700 shadow-sm ring-1 ring-inset ring-gray-300 dark:ring-gray-600 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
-                    <option v-for="opt in durations" :key="opt.label" :value="opt.value">{{ opt.label }}</option>
+                    <option v-for="opt in durations" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
                 </select>
             </div>
         </div>

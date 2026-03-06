@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::api::v4::calls_plugin;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::api::AppState;
-use crate::auth::validate_token;
+use crate::auth::validate_token_with_policy;
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     mappers::map_channel_role,
@@ -39,12 +39,11 @@ use crate::realtime::{
     websocket_actor::{close_codes, WebSocketActor, WsEvent},
     WsBroadcast, WsEnvelope,
 };
+use crate::telemetry::metrics;
 
 /// WebSocket query parameters
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    /// Authentication token
-    pub token: Option<String>,
     /// Connection ID for session resumption
     pub connection_id: Option<String>,
     /// Last sequence number received by client
@@ -75,12 +74,7 @@ pub async fn handle_websocket(
         }
     };
 
-    let token = websocket_core::resolve_auth_token(
-        query.token.as_deref(),
-        &headers,
-        requested_protocol.as_deref(),
-        true,
-    );
+    let token = websocket_core::resolve_auth_token(&headers, requested_protocol.as_deref());
     let sequence_number = query.sequence_number;
     let connection_id = query.connection_id.and_then(|value| {
         let trimmed = value.trim();
@@ -91,7 +85,7 @@ pub async fn handle_websocket(
         }
     });
 
-    let user_id = websocket_core::validate_user_id(token.as_deref(), &state.jwt_secret);
+    let user_id = websocket_core::validate_user_id(token.as_deref(), &state);
 
     trace!(
         has_token = token.is_some(),
@@ -162,7 +156,15 @@ async fn authenticate_via_websocket(
             Ok(Some(Ok(Message::Text(text)))) => {
                 if let Some(challenge) = parse_authentication_challenge(&text) {
                     let valid_user = websocket_core::normalize_auth_token(&challenge.token)
-                        .and_then(|t| validate_token(&t, &state.jwt_secret).ok())
+                        .and_then(|t| {
+                            validate_token_with_policy(
+                                &t,
+                                &state.jwt_secret,
+                                state.jwt_issuer.as_deref(),
+                                state.jwt_audience.as_deref(),
+                            )
+                            .ok()
+                        })
                         .map(|c| c.claims.sub);
 
                     if let Some(user_id) = valid_user {
@@ -265,11 +267,30 @@ async fn run_connection(
         }
     };
 
-    // Add connection to hub
+    // Add connection to hub.
+    // Presence tracking must use a per-socket unique id instead of the resumable
+    // actor connection id, otherwise reconnect races can unregister an active
+    // socket that reused the same actor connection id.
     let (hub_conn_id, mut hub_rx) = state.ws_hub.add_connection(user_id, username.clone()).await;
-    websocket_core::register_presence_connection(&state, user_id, &actor_connection_id).await;
+    let presence_connection_id = hub_conn_id.to_string();
+    websocket_core::register_presence_connection(&state, user_id, &presence_connection_id).await;
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
+
+    let heartbeat_state = state.clone();
+    let heartbeat_connection_id = presence_connection_id.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            interval.tick().await;
+            websocket_core::heartbeat_presence_connection(
+                &heartbeat_state,
+                user_id,
+                &heartbeat_connection_id,
+            )
+            .await;
+        }
+    });
 
     // Send hello event. Mattermost reliable websocket clients reset their local sequence
     // to 0 whenever connection_id changes, so hello.seq must also be 0 in that case.
@@ -326,6 +347,8 @@ async fn run_connection(
                 "Failed to send missed message"
             );
             break;
+        } else {
+            metrics::record_ws_message("sent", "replay");
         }
     }
 
@@ -349,6 +372,7 @@ async fn run_connection(
             let msg_str = match hub_rx.recv().await {
                 Ok(msg) => msg,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    metrics::record_ws_dropped("hub_receiver_lagged", skipped as u64);
                     warn!(
                         connection_id = %replay_connection_id,
                         skipped = skipped,
@@ -392,7 +416,10 @@ async fn run_connection(
             }
 
             if actor_clone.send(mm_msg).is_err() {
+                metrics::record_ws_dropped("actor_send_failed", 1);
                 break;
+            } else {
+                metrics::record_ws_message("sent", "hub_event");
             }
         }
     });
@@ -404,6 +431,7 @@ async fn run_connection(
             event = actor.recv() => {
                 match event {
                     Some(WsEvent::MessageReceived(text)) => {
+                        metrics::record_ws_message("received", "client_text");
                         handle_client_text_message(
                             &state,
                             &actor,
@@ -415,6 +443,7 @@ async fn run_connection(
                         .await;
                     }
                     Some(WsEvent::BinaryReceived(bytes)) => {
+                        metrics::record_ws_message("received", "client_binary");
                         handle_client_binary_message(
                             &state,
                             &actor,
@@ -462,6 +491,7 @@ async fn run_connection(
 
     // Cleanup
     hub_forward_task.abort();
+    heartbeat_task.abort();
 
     // Mark connection as disconnected (for potential resumption)
     actor.disconnect();
@@ -490,7 +520,7 @@ async fn run_connection(
 
     // Remove from hub
     state.ws_hub.remove_connection(user_id, hub_conn_id).await;
-    websocket_core::handle_disconnect(&state, user_id, &actor_connection_id).await;
+    websocket_core::handle_disconnect(&state, user_id, &presence_connection_id).await;
 
     info!(
         connection_id = %actor_connection_id,
@@ -672,7 +702,10 @@ async fn handle_client_value_message(
 struct ChannelUnreadSnapshot {
     channel_id: String,
     msg_count: i64,
+    msg_count_root: i64,
     mention_count: i64,
+    mention_count_root: i64,
+    urgent_mention_count: i64,
     last_viewed_at: i64,
 }
 
@@ -773,7 +806,22 @@ async fn build_reconnect_snapshot(
     let mm_channels: Vec<mm::Channel> = channels.iter().cloned().map(Into::into).collect();
     let channel_ids: Vec<Uuid> = channels.iter().map(|c| c.id).collect();
 
-    let membership_rows: Vec<(Uuid, String, serde_json::Value, Option<DateTime<Utc>>, i64)> =
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let membership_rows: Vec<(
+        Uuid,
+        String,
+        serde_json::Value,
+        Option<DateTime<Utc>>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    )> =
         sqlx::query_as(
             r#"
             SELECT
@@ -781,32 +829,72 @@ async fn build_reconnect_snapshot(
                 cm.role,
                 cm.notify_props,
                 cm.last_viewed_at,
-                COUNT(p.id)::BIGINT AS msg_count
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > COALESCE(cr.last_read_message_id, 0))::BIGINT AS msg_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                )::BIGINT AS mention_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                )::BIGINT AS msg_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                )::BIGINT AS mention_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                      AND p.message LIKE '%@here%'
+                )::BIGINT AS urgent_mention_count
             FROM channel_members cm
+            LEFT JOIN channel_reads cr
+                ON cr.channel_id = cm.channel_id
+               AND cr.user_id = cm.user_id
             LEFT JOIN posts p
                 ON p.channel_id = cm.channel_id
-               AND p.deleted_at IS NULL
-               AND p.user_id <> cm.user_id
-               AND p.created_at > COALESCE(cm.last_viewed_at, to_timestamp(0))
             WHERE cm.user_id = $1
             GROUP BY cm.channel_id, cm.role, cm.notify_props, cm.last_viewed_at
             ORDER BY cm.channel_id
             "#,
         )
         .bind(user_id)
+        .bind(&username)
         .fetch_all(&state.db)
         .await?;
 
     let channel_members: Vec<mm::ChannelMember> = membership_rows
         .iter()
         .map(
-            |(channel_id, role, notify_props, last_viewed_at, msg_count)| mm::ChannelMember {
+            |(
+                channel_id,
+                role,
+                notify_props,
+                last_viewed_at,
+                msg_count,
+                mention_count,
+                msg_count_root,
+                mention_count_root,
+                urgent_mention_count,
+            )| mm::ChannelMember {
                 channel_id: encode_mm_id(*channel_id),
                 user_id: encode_mm_id(user_id),
                 roles: map_channel_role(role),
                 last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
                 msg_count: *msg_count,
-                mention_count: 0,
+                mention_count: *mention_count,
+                mention_count_root: *mention_count_root,
+                urgent_mention_count: if state.config.unread.post_priority_enabled {
+                    *urgent_mention_count
+                } else {
+                    0
+                },
+                msg_count_root: *msg_count_root,
                 notify_props: normalize_notify_props_for_snapshot(notify_props.clone()),
                 last_update_at: 0,
                 scheme_guest: false,
@@ -819,10 +907,27 @@ async fn build_reconnect_snapshot(
     let channel_unreads: Vec<ChannelUnreadSnapshot> = membership_rows
         .iter()
         .map(
-            |(channel_id, _role, _notify_props, last_viewed_at, msg_count)| ChannelUnreadSnapshot {
+            |(
+                channel_id,
+                _role,
+                _notify_props,
+                last_viewed_at,
+                msg_count,
+                mention_count,
+                msg_count_root,
+                mention_count_root,
+                urgent_mention_count,
+            )| ChannelUnreadSnapshot {
                 channel_id: encode_mm_id(*channel_id),
                 msg_count: *msg_count,
-                mention_count: 0,
+                msg_count_root: *msg_count_root,
+                mention_count: *mention_count,
+                mention_count_root: *mention_count_root,
+                urgent_mention_count: if state.config.unread.post_priority_enabled {
+                    *urgent_mention_count
+                } else {
+                    0
+                },
                 last_viewed_at: last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
             },
         )
@@ -1325,6 +1430,31 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 broadcast: map_broadcast(env.broadcast.as_ref()),
             })
         }
+        "post_unread" => {
+            let channel_id = extract_mm_id(env.data.get("channel_id"));
+            let post_id = extract_mm_id(env.data.get("post_id"));
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "post_unread".to_string(),
+                data: json!({
+                    "channel_id": channel_id,
+                    "post_id": post_id,
+                    "msg_count": extract_i64(env.data.get("msg_count")),
+                    "msg_count_root": extract_i64(env.data.get("msg_count_root")),
+                    "mention_count": extract_i64(env.data.get("mention_count")),
+                    "mention_count_root": extract_i64(env.data.get("mention_count_root")),
+                    "urgent_mention_count": extract_i64(env.data.get("urgent_mention_count")),
+                    "last_viewed_at": extract_i64(env.data.get("last_viewed_at")),
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "thread_updated" => Some(mm::WebSocketMessage {
+            seq,
+            event: "thread_updated".to_string(),
+            data: env.data.clone(),
+            broadcast: map_broadcast(env.broadcast.as_ref()),
+        }),
         "user_added" => {
             let user_id = extract_mm_id(env.data.get("user_id"));
             let channel_id = extract_mm_id(env.data.get("channel_id"));
@@ -1353,6 +1483,56 @@ fn map_envelope_to_mm(env: &WsEnvelope) -> Option<mm::WebSocketMessage> {
                 broadcast: map_broadcast(env.broadcast.as_ref()),
             })
         }
+        "received_group" => {
+            let group = extract_embedded_json(env.data.get("group"))?;
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "received_group".to_string(),
+                data: json!({
+                    "group": group,
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "group_member_add" => {
+            let group_member = extract_embedded_json(env.data.get("group_member"))?;
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "group_member_add".to_string(),
+                data: json!({
+                    "group_member": group_member,
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "group_member_deleted" => {
+            let group_member = extract_embedded_json(env.data.get("group_member"))?;
+            Some(mm::WebSocketMessage {
+                seq,
+                event: "group_member_deleted".to_string(),
+                data: json!({
+                    "group_member": group_member,
+                }),
+                broadcast: map_broadcast(env.broadcast.as_ref()),
+            })
+        }
+        "received_group_associated_to_team"
+        | "received_group_not_associated_to_team"
+        | "received_group_associated_to_channel"
+        | "received_group_not_associated_to_channel" => Some(mm::WebSocketMessage {
+            seq,
+            event: env.event.clone(),
+            data: json!({
+                "group_id": extract_mm_id(env.data.get("group_id")),
+            }),
+            broadcast: map_broadcast(env.broadcast.as_ref()),
+        }),
+        "first_admin_visit_marketplace_status_received" => Some(mm::WebSocketMessage {
+            seq,
+            event: "first_admin_visit_marketplace_status_received".to_string(),
+            data: env.data.clone(),
+            broadcast: map_broadcast(env.broadcast.as_ref()),
+        }),
         event_name if event_name.starts_with("custom_") => Some(mm::WebSocketMessage {
             seq,
             event: event_name.to_string(),
@@ -1369,6 +1549,25 @@ fn extract_mm_id(value: Option<&serde_json::Value>) -> String {
         .and_then(parse_mm_or_uuid)
         .map(encode_mm_id)
         .unwrap_or_default()
+}
+
+fn extract_i64(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .unwrap_or_default()
+}
+
+fn extract_embedded_json(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        Some(text.to_string())
+    } else {
+        serde_json::to_string(value).ok()
+    }
 }
 
 fn map_broadcast(b_opt: Option<&crate::realtime::WsBroadcast>) -> mm::Broadcast {
@@ -1561,6 +1760,181 @@ mod tests {
             serde_json::json!(encode_mm_id(user_id))
         );
         assert_eq!(mapped.data["parent_id"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_post_unread_payload() {
+        let channel_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let post_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "post_unread".to_string(),
+            seq: None,
+            channel_id: Some(channel_id),
+            data: serde_json::json!({
+                "channel_id": channel_id,
+                "post_id": post_id,
+                "msg_count": 12,
+                "msg_count_root": 7,
+                "mention_count": 3,
+                "mention_count_root": 2,
+                "urgent_mention_count": 1,
+                "last_viewed_at": 1739500000000i64
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: Some(channel_id),
+                team_id: None,
+                user_id: Some(user_id),
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("post_unread should map");
+        assert_eq!(mapped.event, "post_unread");
+        assert_eq!(mapped.data["msg_count"], serde_json::json!(12));
+        assert_eq!(mapped.data["mention_count_root"], serde_json::json!(2));
+        assert_eq!(mapped.data["urgent_mention_count"], serde_json::json!(1));
+        assert_eq!(
+            mapped.data["channel_id"],
+            serde_json::json!(encode_mm_id(channel_id))
+        );
+        assert_eq!(
+            mapped.data["post_id"],
+            serde_json::json!(encode_mm_id(post_id))
+        );
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_thread_updated_payload() {
+        let team_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "thread_updated".to_string(),
+            seq: None,
+            channel_id: None,
+            data: serde_json::json!({
+                "thread": "{\"id\":\"thread-1\"}"
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: None,
+                team_id: Some(team_id),
+                user_id: Some(user_id),
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("thread_updated should map");
+        assert_eq!(mapped.event, "thread_updated");
+        assert_eq!(
+            mapped.data["thread"],
+            serde_json::json!("{\"id\":\"thread-1\"}")
+        );
+        assert_eq!(
+            mapped.broadcast.team_id,
+            encode_mm_id(team_id),
+            "thread_updated team routing must be preserved"
+        );
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_received_group_payload() {
+        let group_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "received_group".to_string(),
+            seq: None,
+            channel_id: None,
+            data: serde_json::json!({
+                "group": {
+                    "id": encode_mm_id(group_id),
+                    "display_name": "Keycloak Group"
+                }
+            }),
+            broadcast: None,
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("received_group should map");
+        assert_eq!(mapped.event, "received_group");
+        let group = mapped
+            .data
+            .get("group")
+            .and_then(|v| v.as_str())
+            .expect("group payload should be encoded json text");
+        let decoded: serde_json::Value =
+            serde_json::from_str(group).expect("group payload should be valid json");
+        assert_eq!(decoded["id"], serde_json::json!(encode_mm_id(group_id)));
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_group_member_event_payload() {
+        let group_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "group_member_add".to_string(),
+            seq: None,
+            channel_id: None,
+            data: serde_json::json!({
+                "group_member": {
+                    "group_id": encode_mm_id(group_id),
+                    "user_id": encode_mm_id(user_id),
+                    "create_at": 1739500000000i64,
+                    "delete_at": 0
+                }
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: None,
+                team_id: None,
+                user_id: Some(user_id),
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("group_member_add should map");
+        assert_eq!(mapped.event, "group_member_add");
+        let member = mapped
+            .data
+            .get("group_member")
+            .and_then(|v| v.as_str())
+            .expect("group_member payload should be encoded json text");
+        let decoded: serde_json::Value =
+            serde_json::from_str(member).expect("group_member payload should be valid json");
+        assert_eq!(
+            decoded["group_id"],
+            serde_json::json!(encode_mm_id(group_id))
+        );
+        assert_eq!(mapped.broadcast.user_id, encode_mm_id(user_id));
+    }
+
+    #[test]
+    fn map_envelope_to_mm_maps_group_syncable_association_payload() {
+        let team_id = Uuid::new_v4();
+        let group_id = Uuid::new_v4();
+        let env = WsEnvelope {
+            msg_type: "event".to_string(),
+            event: "received_group_associated_to_team".to_string(),
+            seq: None,
+            channel_id: None,
+            data: serde_json::json!({
+                "group_id": group_id
+            }),
+            broadcast: Some(WsBroadcast {
+                channel_id: None,
+                team_id: Some(team_id),
+                user_id: None,
+                exclude_user_id: None,
+            }),
+        };
+
+        let mapped = map_envelope_to_mm(&env).expect("association event should map");
+        assert_eq!(mapped.event, "received_group_associated_to_team");
+        assert_eq!(
+            mapped.data["group_id"],
+            serde_json::json!(encode_mm_id(group_id))
+        );
+        assert_eq!(mapped.broadcast.team_id, encode_mm_id(team_id));
     }
 
     #[test]

@@ -35,7 +35,7 @@ RustMatch is containerized using Docker Compose for easy setup and development. 
 
     - **Frontend:** [http://localhost:8080](http://localhost:8080)
     - **Backend API:** [http://localhost:3000](http://localhost:3000)
-    - **MinIO Console:** [http://localhost:9001](http://localhost:9001) (User: `minioadmin`, Pass: `minioadmin`)
+    - **MinIO Console:** [http://localhost:9001](http://localhost:9001) (use your `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`)
     - **Meilisearch:** [http://localhost:7700](http://localhost:7700) (if enabled)
 
 ## Development Mode
@@ -73,8 +73,11 @@ Recommended production settings:
 - Set `RUSTCHAT_ENVIRONMENT=production`
 - Set `RUSTCHAT_CORS_ALLOWED_ORIGINS` to your exact frontend origins (comma-separated)
 - Use strong secrets for `RUSTCHAT_JWT_SECRET` and `RUSTCHAT_ENCRYPTION_KEY`
+- Terminate TLS at the reverse proxy/load balancer (HTTPS at the edge)
 - Use encrypted SSO client secrets (stored via Admin UI/API)
 - Set TURN credentials explicitly if `TURN_SERVER_ENABLED=true`
+- Query-token compatibility is removed (`RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=query` and `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true` are rejected at startup)
+- If `RUSTCHAT_SITE_URL` is set in production, it must use `https://`; `RUSTCHAT_CORS_ALLOWED_ORIGINS` entries must also be `https://` only.
 
 ## Troubleshooting
 

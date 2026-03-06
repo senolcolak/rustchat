@@ -3,8 +3,8 @@ FROM rust:1.93-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev
 
-# Ensure portable builds (avoid CPU-specific instructions)
-ENV RUSTFLAGS="-C target-cpu=x86-64"
+# Keep builds architecture-neutral across amd64/arm64 hosts.
+ENV RUSTFLAGS="-C target-cpu=generic"
 
 WORKDIR /app
 
@@ -20,11 +20,11 @@ RUN cargo build --release && rm -rf src
 # Copy actual source
 COPY src ./src
 COPY migrations ./migrations
-COPY .sqlx ./.sqlx
+# COPY .sqlx ./.sqlx
 
 # Build with cache mounts for faster rebuilds
 # BuildKit caches cargo registry and build artifacts between builds
-ENV SQLX_OFFLINE=true
+ENV SQLX_OFFLINE=false
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     touch src/main.rs && \

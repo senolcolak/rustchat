@@ -2,7 +2,8 @@ use crate::api::AppState;
 use crate::error::ApiResult;
 use crate::mattermost_compat::models as mm;
 use crate::mattermost_compat::{id::encode_mm_id, MM_VERSION};
-use crate::models::server_config::{AuthConfig, EmailConfig, SiteConfig};
+use crate::models::email::MailProviderSettings;
+use crate::models::server_config::{AuthConfig, SiteConfig};
 use axum::{
     extract::{Query, State},
     response::IntoResponse,
@@ -41,32 +42,41 @@ pub async fn get_client_config(
         ));
     }
 
-    let (site, auth, email) =
-        sqlx::query_as::<
-            _,
-            (
-                sqlx::types::Json<SiteConfig>,
-                sqlx::types::Json<AuthConfig>,
-                sqlx::types::Json<EmailConfig>,
-            ),
-        >("SELECT site, authentication, email FROM server_config WHERE id = 'default'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| (row.0 .0, row.1 .0, row.2 .0))
-        .unwrap_or_else(|| {
-            (
-                SiteConfig::default(),
-                AuthConfig::default(),
-                EmailConfig::default(),
-            )
-        });
+    let (site, auth) = sqlx::query_as::<
+        _,
+        (sqlx::types::Json<SiteConfig>, sqlx::types::Json<AuthConfig>),
+    >("SELECT site, authentication FROM server_config WHERE id = 'default'")
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| (row.0 .0, row.1 .0))
+    .unwrap_or_else(|| (SiteConfig::default(), AuthConfig::default()));
+
+    // Get email settings from provider system
+    let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
+        r#"
+        SELECT * FROM mail_provider_settings
+        WHERE enabled = true AND is_default = true
+        ORDER BY tenant_id NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     let diagnostic_id = diagnostic_id(&site);
     Ok((
         axum::http::StatusCode::OK,
-        Json(legacy_config(&site, &auth, &email, &diagnostic_id)),
+        Json(legacy_config(
+            &site,
+            &auth,
+            provider_settings.as_ref(),
+            &diagnostic_id,
+            state.config.compatibility.mobile_sso_code_exchange,
+        )),
     ))
 }
 
@@ -76,11 +86,40 @@ pub async fn get_client_license(
 ) -> ApiResult<impl IntoResponse> {
     let body = if matches!(query.format.as_deref(), Some("old")) {
         serde_json::json!({
-            "IsLicensed": "false"
+            "IsLicensed": "true",
+            "LDAP": "true",
+            "LDAPGroups": "true",
+            "MFA": "true",
+            "SAML": "true",
+            "Cluster": "true",
+            "Metrics": "true",
+            "GoogleOAuth": "true",
+            "Office365OAuth": "true",
+            "OpenId": "true",
+            "Compliance": "true",
+            "MHPNS": "true",
+            "Announcement": "true",
+            "Elasticsearch": "true",
+            "DataRetention": "true",
+            "IDLoadedPushNotifications": "true",
+            "EmailNotificationContents": "true",
+            "MessageExport": "true",
+            "CustomPermissionsSchemes": "true",
+            "GuestAccounts": "true",
+            "GuestAccountsPermissions": "true",
+            "CustomTermsOfService": "true",
+            "LockTeammateNameDisplay": "true",
+            "Cloud": "false",
+            "SharedChannels": "true",
+            "RemoteClusterService": "true",
+            "OutgoingOAuthConnections": "true",
+            "SelfHostedProducts": "true",
+            "SkuShortName": "enterprise",
+            "Users": "0"
         })
     } else {
         serde_json::to_value(mm::License {
-            is_licensed: false,
+            is_licensed: true,
             issued_at: 0,
             starts_at: 0,
             expires_at: 0,
@@ -94,9 +133,16 @@ pub async fn get_client_license(
 fn legacy_config(
     site: &SiteConfig,
     auth: &AuthConfig,
-    email: &EmailConfig,
+    provider_settings: Option<&MailProviderSettings>,
     diagnostic_id: &str,
+    mobile_sso_code_exchange_enabled: bool,
 ) -> serde_json::Value {
+    // Extract email settings from provider or use defaults
+    let send_email_notifications = provider_settings
+        .map(|p| p.enabled && !p.from_address.is_empty())
+        .unwrap_or(false);
+    let enable_email_batching = false; // Not yet implemented in provider system
+    let email_notification_content = "full"; // Default value
     use serde_json::{json, Map, Value};
 
     let mut map = Map::new();
@@ -262,7 +308,11 @@ fn legacy_config(
         "FeatureFlagExperimentalAuditSettingsSystemConsoleUI",
         "true",
     );
-    insert(&mut map, "FeatureFlagMobileSSOCodeExchange", "true");
+    insert(
+        &mut map,
+        "FeatureFlagMobileSSOCodeExchange",
+        bool_str(mobile_sso_code_exchange_enabled),
+    );
     insert(&mut map, "FeatureFlagMoveThreadsEnabled", "false");
     insert(&mut map, "FeatureFlagNormalizeLdapDNs", "false");
     insert(&mut map, "FeatureFlagNotificationMonitoring", "true");
@@ -371,21 +421,21 @@ fn legacy_config(
     ); // Dummy value, actual push goes through our proxy
     insert(&mut map, "PushNotificationContents", "full"); // full, generic, or id
 
-    // Email notifications settings
+    // Email notifications settings (from provider system)
     insert(
         &mut map,
         "SendEmailNotifications",
-        bool_str(email.send_email_notifications),
+        bool_str(send_email_notifications),
     );
     insert(
         &mut map,
         "EnableEmailBatching",
-        bool_str(email.enable_email_batching),
+        bool_str(enable_email_batching),
     );
     insert(
         &mut map,
         "EmailNotificationContentsType",
-        &email.email_notification_content,
+        email_notification_content,
     );
 
     // WebSocket settings for stable connections

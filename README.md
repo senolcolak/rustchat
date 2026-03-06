@@ -16,7 +16,7 @@ Verification signals from this repo:
 - Frontend builds: `npm run build` passes.
 - Test health is not green yet:
   - `cargo test` fails to compile several integration tests because `api::router` call sites were not updated after adding a new `Config` argument.
-  - `cargo test --lib` runs, but 5 MiroTalk-related tests fail on `system-configuration` runtime panic; 20 lib tests pass.
+  - `cargo test --lib` runs, and lib tests pass.
 
 ## Implemented Functions
 
@@ -44,7 +44,6 @@ RustChat currently includes these major function groups.
 - Bot accounts and bot tokens.
 - OAuth provider integration endpoints.
 - Playbooks/checklists/runs APIs.
-- Video meeting integration path for MiroTalk.
 
 ### Calls
 - Mattermost Calls plugin route namespace under `/api/v4/plugins/com.mattermost.calls/*`.
@@ -144,7 +143,12 @@ docker compose up -d --build
 Important:
 - `docker-compose.yml` no longer ships fallback JWT/encryption secrets.
 - Set `RUSTCHAT_JWT_SECRET` and `RUSTCHAT_ENCRYPTION_KEY` in `.env` before startup.
+- Set `RUSTCHAT_S3_ACCESS_KEY`, `RUSTCHAT_S3_SECRET_KEY`, `RUSTFS_ACCESS_KEY`, and `RUSTFS_SECRET_KEY` in `.env` before startup.
+  For bundled `rustfs`, the `RUSTCHAT_S3_*` and `RUSTFS_*` credential values must match.
 - For production, set `RUSTCHAT_ENVIRONMENT=production` and define `RUSTCHAT_CORS_ALLOWED_ORIGINS`.
+- For production, terminate TLS at the edge/proxy and avoid HTTP-only exposure.
+- Query-token transport is removed and rejected at startup (`RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY=query` and `RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true` are invalid).
+- In production mode, `RUSTCHAT_SITE_URL` (if set) and all `RUSTCHAT_CORS_ALLOWED_ORIGINS` entries must use `https://`.
 
 Default services:
 - Web UI / reverse proxy: `http://localhost:8080`

@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
 use crate::realtime::{EventType, WsBroadcast, WsEnvelope};
@@ -361,14 +362,8 @@ struct HostMakeRequest {
     new_host_id: String,
 }
 
-fn is_system_admin(auth: &MmAuthUser) -> bool {
-    auth.role
-        .split_whitespace()
-        .any(|role| role == "system_admin")
-}
-
 fn can_manage_call(auth: &MmAuthUser, call: &CallState) -> bool {
-    call.host_id == auth.user_id || is_system_admin(auth)
+    call.host_id == auth.user_id || auth.has_permission(&permissions::ADMIN_FULL)
 }
 
 fn is_host_session_active(_state: &AppState, call: &CallState) -> bool {
@@ -2291,6 +2286,19 @@ async fn ring_users(
     // from calls_call_start and do not handle calls_ringing directly.
     // Note: thread_id is used as post_id for call posts in Mattermost
     let thread_id_str = thread_id.map(encode_mm_id).unwrap_or_default();
+    // Fetch caller info for better mobile client support
+    let caller_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT username, COALESCE(display_name, '') as display_name FROM users WHERE id = $1",
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (username, display_name) =
+        caller_info.unwrap_or_else(|| (encode_mm_id(auth.user_id), String::new()));
+
     broadcast_call_event(
         &state,
         "custom_com.mattermost.calls_call_start",
@@ -2306,6 +2314,8 @@ async fn ring_users(
             "call_id": encode_mm_id(call.call_id),
             "channel_id": encode_mm_id(channel_uuid),
             "user_id": encode_mm_id(call.owner_id),
+            "sender_id": encode_mm_id(auth.user_id),
+            "caller_name": if display_name.is_empty() { username } else { display_name },
         }),
         Some(auth.user_id),
     )
@@ -3703,6 +3713,7 @@ async fn check_channel_permission(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn is_dm_or_gm_channel(state: &AppState, channel_id: Uuid) -> ApiResult<bool> {
     let channel_type: Option<String> =
         sqlx::query_scalar("SELECT type::text FROM channels WHERE id = $1")
@@ -3940,7 +3951,7 @@ fn spawn_signaling_forwarder(
     channel_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    mut rx: mpsc::UnboundedReceiver<SignalingMessage>,
+    mut rx: mpsc::Receiver<SignalingMessage>,
 ) {
     let state = state.clone();
     tokio::spawn(async move {
@@ -4170,10 +4181,7 @@ async fn send_signaling_event(
 }
 
 /// Start a background task to listen for voice events from the SFU and broadcast them via WebSockets
-pub async fn start_voice_event_listener(
-    state: AppState,
-    mut rx: mpsc::UnboundedReceiver<VoiceEvent>,
-) {
+pub async fn start_voice_event_listener(state: AppState, mut rx: mpsc::Receiver<VoiceEvent>) {
     info!("Starting Calls Voice Event Listener");
     while let Some(event) = rx.recv().await {
         match event {

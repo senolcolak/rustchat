@@ -3,44 +3,40 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        State,
     },
     http::HeaderMap,
+    middleware,
     response::Response,
     routing::get,
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use tokio::time::Duration;
 
 use super::AppState;
 use crate::api::websocket_core::{self, EnvelopeCommandOptions};
 use crate::realtime::WsEnvelope;
+use crate::telemetry::metrics;
 
 /// Build WebSocket routes
-pub fn router() -> Router<AppState> {
-    Router::new().route("/ws", get(ws_handler))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    token: Option<String>,
+pub fn router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .layer(middleware::from_fn_with_state(
+            state,
+            crate::middleware::rate_limit::websocket_ip_rate_limit,
+        ))
 }
 
 /// WebSocket upgrade handler
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Query(query): Query<WsQuery>,
     headers: HeaderMap,
 ) -> Response {
     let requested_protocol = websocket_core::requested_protocol(&headers);
-    let token = websocket_core::resolve_auth_token(
-        query.token.as_deref(),
-        &headers,
-        requested_protocol.as_deref(),
-        true,
-    );
+    let token = websocket_core::resolve_auth_token(&headers, requested_protocol.as_deref());
 
     tracing::info!(
         "WS Handshake - Token present: {}, Protocol: {:?}",
@@ -48,7 +44,7 @@ async fn ws_handler(
         requested_protocol
     );
 
-    let user_id = match websocket_core::validate_user_id(token.as_deref(), &state.jwt_secret) {
+    let user_id = match websocket_core::validate_user_id(token.as_deref(), &state) {
         Some(user_id) => user_id,
         None => {
             tracing::warn!("WS Handshake failed: Invalid token");
@@ -98,6 +94,21 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
 
     websocket_core::initialize_connection_state(&state, user_id, true).await;
 
+    let heartbeat_state = state.clone();
+    let heartbeat_connection_id = connection_id_str.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            interval.tick().await;
+            websocket_core::heartbeat_presence_connection(
+                &heartbeat_state,
+                user_id,
+                &heartbeat_connection_id,
+            )
+            .await;
+        }
+    });
+
     // Send hello message with connection_id for reliable WebSocket support
     let connection_uuid = uuid::Uuid::new_v4();
     let hello = WsEnvelope::hello(
@@ -110,9 +121,19 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
 
     // Spawn task to forward hub messages to client
     let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if sender.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                    metrics::record_ws_message("sent", "hub_event");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    metrics::record_ws_dropped("hub_receiver_lagged", skipped as u64);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -125,6 +146,7 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(Message::Text(text)) => {
+                    metrics::record_ws_message("received", "client_message");
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(action) = value.get("action").and_then(|v| v.as_str()) {
                             if crate::api::v4::calls_plugin::handle_ws_action(
@@ -165,6 +187,8 @@ async fn handle_socket(socket: WebSocket, user_id: uuid::Uuid, username: String,
         _ = send_task => {},
         _ = receive_task => {},
     }
+
+    heartbeat_task.abort();
 
     // Cleanup
     state.ws_hub.remove_connection(user_id, connection_id).await;

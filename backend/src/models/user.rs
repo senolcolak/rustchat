@@ -26,7 +26,7 @@ pub struct User {
     pub username: String,
     pub email: String,
     #[serde(skip_serializing)]
-    pub password_hash: String,
+    pub password_hash: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     #[sqlx(default)]
@@ -52,7 +52,19 @@ pub struct User {
     pub custom_status: Option<serde_json::Value>,
     #[sqlx(default)]
     pub notify_props: serde_json::Value,
+    #[sqlx(default)]
+    pub timezone: Option<String>,
     pub last_login_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub email_verified: bool,
+    #[sqlx(default)]
+    pub email_verified_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub deleted_by: Option<Uuid>,
+    #[sqlx(default)]
+    pub delete_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -78,7 +90,39 @@ pub struct UserResponse {
     pub status_expires_at: Option<DateTime<Utc>>,
     pub custom_status: Option<serde_json::Value>,
     pub notify_props: serde_json::Value,
+    pub timezone: Option<String>,
+    pub email_verified: bool,
     pub created_at: DateTime<Utc>,
+}
+
+impl User {
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
+    pub fn public_username(&self) -> String {
+        if self.is_deleted() {
+            "Deleted user".to_string()
+        } else {
+            self.username.clone()
+        }
+    }
+
+    pub fn public_display_name(&self) -> Option<String> {
+        if self.is_deleted() {
+            Some("Deleted user".to_string())
+        } else {
+            self.display_name.clone()
+        }
+    }
+
+    pub fn public_email(&self) -> String {
+        if self.is_deleted() {
+            "deleted-user@local".to_string()
+        } else {
+            self.email.clone()
+        }
+    }
 }
 
 impl From<User> for UserResponse {
@@ -86,9 +130,9 @@ impl From<User> for UserResponse {
         Self {
             id: user.id,
             org_id: user.org_id,
-            username: user.username,
-            email: user.email,
-            display_name: user.display_name,
+            username: user.public_username(),
+            email: user.public_email(),
+            display_name: user.public_display_name(),
             avatar_url: user.avatar_url,
             first_name: user.first_name,
             last_name: user.last_name,
@@ -102,6 +146,8 @@ impl From<User> for UserResponse {
             status_expires_at: user.status_expires_at,
             custom_status: user.custom_status,
             notify_props: user.notify_props,
+            timezone: user.timezone,
+            email_verified: user.email_verified,
             created_at: user.created_at,
         }
     }
@@ -112,9 +158,15 @@ impl From<User> for UserResponse {
 pub struct CreateUser {
     pub username: String,
     pub email: String,
-    pub password: String,
+    pub password: Option<String>,
     pub display_name: Option<String>,
     pub org_id: Option<Uuid>,
+    /// Cloudflare Turnstile token (bot protection)
+    #[serde(rename = "cf-turnstile-response")]
+    pub turnstile_token: Option<String>,
+    /// Honeypot field - should be empty (bots usually fill this)
+    #[serde(rename = "website")]
+    pub honeypot: Option<String>,
 }
 
 /// DTO for updating a user

@@ -94,9 +94,7 @@ async function handlePin() {
 
 async function handleMarkAsUnread() {
     try {
-        // Set last read to the sequence BEFORE this message
-        const targetSeq = Number(props.message.seq) - 1;
-        await unreadStore.markAsRead(props.message.channelId, targetSeq);
+        await unreadStore.markAsUnreadFromPost(props.message.id);
         showMenu.value = false;
     } catch (e) {
         console.error('Failed to mark as unread', e)

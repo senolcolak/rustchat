@@ -8,8 +8,9 @@ use axum::{
 use uuid::Uuid;
 
 use crate::api::AppState;
-use crate::auth::middleware::FromRef;
-use crate::auth::{validate_token, Claims};
+use crate::auth::middleware::{ensure_user_access_active, FromRef};
+use crate::auth::policy::{AuthzResult, Permission, PolicyEngine};
+use crate::auth::{validate_token_with_policy, Claims};
 use crate::error::AppError;
 
 pub struct MmAuthUser {
@@ -30,6 +31,26 @@ impl From<Claims> for MmAuthUser {
             role: claims.role,
             org_id: claims.org_id,
         }
+    }
+}
+
+impl MmAuthUser {
+    pub fn has_role(&self, role: &str) -> bool {
+        self.role.split_whitespace().any(|r| r == role)
+    }
+
+    pub fn has_permission(&self, permission: &Permission) -> bool {
+        matches!(
+            PolicyEngine::check_permission(&self.role, permission),
+            AuthzResult::Allow
+        )
+    }
+
+    pub fn can_access_owned(&self, owner_id: Uuid, permission: &Permission) -> bool {
+        matches!(
+            PolicyEngine::check_ownership(&self.role, permission, self.user_id, owner_id),
+            AuthzResult::Allow
+        )
     }
 }
 
@@ -76,8 +97,50 @@ where
             ));
         };
 
-        let token_data = validate_token(token, &app_state.jwt_secret)?;
+        let token_data = validate_token_with_policy(
+            token,
+            &app_state.jwt_secret,
+            app_state.jwt_issuer.as_deref(),
+            app_state.jwt_audience.as_deref(),
+        )?;
+        ensure_user_access_active(&app_state, token_data.claims.sub).await?;
 
         Ok(MmAuthUser::from(token_data.claims))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MmAuthUser;
+    use uuid::Uuid;
+
+    #[test]
+    fn mm_auth_user_role_helpers_support_multi_role_strings() {
+        let user = MmAuthUser {
+            user_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            role: "member admin".to_string(),
+            org_id: None,
+        };
+
+        assert!(user.has_role("admin"));
+        assert!(user.has_role("member"));
+        assert!(!user.has_role("org_admin"));
+    }
+
+    #[test]
+    fn mm_auth_user_permission_helpers_work() {
+        use crate::auth::policy::permissions;
+
+        let user = MmAuthUser {
+            user_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            role: "org_admin member".to_string(),
+            org_id: None,
+        };
+
+        assert!(user.has_permission(&permissions::USER_MANAGE));
+        assert!(!user.has_permission(&permissions::ADMIN_FULL));
+        assert!(user.can_access_owned(user.user_id, &permissions::ADMIN_FULL));
     }
 }

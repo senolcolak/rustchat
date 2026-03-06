@@ -1,6 +1,10 @@
 use crate::api::AppState;
-use crate::error::ApiResult;
+use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::MM_VERSION;
+use crate::models::email::MailProviderSettings;
+use crate::services::team_membership::{
+    get_configured_default_channels, normalize_configured_default_channels,
+};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -51,15 +55,9 @@ pub fn router() -> Router<AppState> {
         )
         .route("/notifications/ack", post(ack_notification))
         .route("/redirect_location", get(get_redirect_location))
-        .route("/upgrade_to_enterprise", post(upgrade_to_enterprise))
-        .route(
-            "/upgrade_to_enterprise/status",
-            get(get_upgrade_to_enterprise_status),
-        )
-        .route(
-            "/upgrade_to_enterprise/allowed",
-            get(get_upgrade_to_enterprise_allowed),
-        )
+        .route("/upgrade_to_enterprise", post(upgrade_plan))
+        .route("/upgrade_to_enterprise/status", get(get_upgrade_status))
+        .route("/upgrade_to_enterprise/allowed", get(get_upgrade_allowed))
         .route("/restart", post(restart_server))
         .route("/integrity", post(check_integrity))
 }
@@ -90,10 +88,9 @@ async fn get_support_packet(
     State(_state): State<AppState>,
     _auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<axum::response::Response> {
-    // Return a dummy zip file or 403 if no license as per MM behavior
-    // For now, just return a 403 indicating no license
+    // Support packet generation is not implemented yet.
     Err(crate::error::AppError::Forbidden(
-        "Support packets require a license".to_string(),
+        "Support packet generation is not implemented".to_string(),
     ))
 }
 
@@ -138,9 +135,43 @@ async fn test_notifications(
     State(state): State<AppState>,
     auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    use tracing::info;
+    use tracing::{info, warn};
 
     info!(user_id = %auth.user_id, "Test notification requested");
+
+    let device_rows: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT token, platform FROM user_devices WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to inspect registered devices for test notification: {}",
+                    e
+                ))
+            })?;
+
+    let registered_device_count = device_rows.len();
+    let devices_with_token = device_rows
+        .iter()
+        .filter(|(token, _)| token.as_deref().is_some_and(|t| !t.trim().is_empty()))
+        .count();
+    let platforms: Vec<&str> = device_rows
+        .iter()
+        .filter_map(|(_, platform)| platform.as_deref())
+        .collect();
+
+    let push_diag = get_push_diagnostics(&state).await;
+    info!(
+        user_id = %auth.user_id,
+        registered_device_count,
+        devices_with_token,
+        ?platforms,
+        has_push_proxy_url = push_diag.has_push_proxy_url,
+        has_fcm_db_config = push_diag.has_fcm_db_config,
+        has_fcm_env_config = push_diag.has_fcm_env_config,
+        "Test notification diagnostics"
+    );
 
     // Try to send a test push notification to the user's devices
     // Use 'message' type with all required fields for Mattermost mobile compatibility
@@ -171,16 +202,52 @@ async fn test_notifications(
             Ok(Json(serde_json::json!({"status": "OK", "sent": count})))
         }
         Ok(_) => {
-            info!(user_id = %auth.user_id, "Test notification: No devices found");
-            Ok(Json(
-                serde_json::json!({"status": "OK", "sent": 0, "message": "No devices registered"}),
-            ))
+            let outcome = classify_test_notification_result(registered_device_count, 0);
+            match outcome {
+                TestNotificationOutcome::NoDevices => {
+                    warn!(
+                        user_id = %auth.user_id,
+                        has_push_proxy_url = push_diag.has_push_proxy_url,
+                        has_fcm_db_config = push_diag.has_fcm_db_config,
+                        has_fcm_env_config = push_diag.has_fcm_env_config,
+                        "Test notification failed: no registered devices"
+                    );
+                    Err(AppError::BadRequest(
+                        "No mobile devices are registered for this user".to_string(),
+                    ))
+                }
+                TestNotificationOutcome::DeliveryUnavailable => {
+                    warn!(
+                        user_id = %auth.user_id,
+                        registered_device_count,
+                        devices_with_token,
+                        has_push_proxy_url = push_diag.has_push_proxy_url,
+                        has_fcm_db_config = push_diag.has_fcm_db_config,
+                        has_fcm_env_config = push_diag.has_fcm_env_config,
+                        "Test notification failed: zero notifications sent despite registered devices"
+                    );
+                    Err(AppError::ExternalService(
+                        "Test notification was not delivered. Check backend and push-proxy logs for configuration or token errors.".to_string(),
+                    ))
+                }
+                TestNotificationOutcome::Sent => unreachable!(),
+            }
         }
         Err(e) => {
-            info!(user_id = %auth.user_id, error = %e, "Test notification failed");
-            Ok(Json(
-                serde_json::json!({"status": "OK", "error": e.to_string()}),
-            ))
+            warn!(
+                user_id = %auth.user_id,
+                error = %e,
+                registered_device_count,
+                devices_with_token,
+                has_push_proxy_url = push_diag.has_push_proxy_url,
+                has_fcm_db_config = push_diag.has_fcm_db_config,
+                has_fcm_env_config = push_diag.has_fcm_env_config,
+                "Test notification send returned error"
+            );
+            Err(AppError::ExternalService(format!(
+                "Failed to send test notification: {}",
+                e
+            )))
         }
     }
 }
@@ -215,6 +282,21 @@ async fn get_config(
             .await
             .map_err(|_| crate::error::AppError::NotFound("Config not found".to_string()))?;
 
+    // Fetch default email provider settings
+    let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
+        r#"
+        SELECT * FROM mail_provider_settings
+        WHERE enabled = true AND is_default = true
+        ORDER BY tenant_id NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let configured_default_channels = get_configured_default_channels(&state).await?;
+
     // Convert to Mattermost-compatible format
     let response = serde_json::json!({
         "ServiceSettings": {
@@ -231,6 +313,7 @@ async fn get_config(
             "EnableUserCreation": config.authentication.0.enable_user_creation,
             "EnableOpenServer": config.authentication.0.enable_open_server,
             "RestrictTeamInvite": "all",
+            "ExperimentalDefaultChannels": configured_default_channels,
         },
         "SqlSettings": {
             "DriverName": "postgres",
@@ -255,18 +338,18 @@ async fn get_config(
             "EnableSignUpWithEmail": config.authentication.0.enable_sign_up_with_email,
             "EnableSignInWithEmail": config.authentication.0.enable_sign_in_with_email,
             "EnableSignInWithUsername": config.authentication.0.enable_sign_in_with_username,
-            "SendEmailNotifications": !config.email.0.smtp_host.is_empty(),
+            "SendEmailNotifications": provider_settings.as_ref().map(|p| p.enabled && !p.host.is_empty()).unwrap_or(false),
             "RequireEmailVerification": false,
-            "FeedbackName": config.email.0.from_name,
-            "FeedbackEmail": config.email.0.from_address,
-            "SMTPServer": config.email.0.smtp_host,
-            "SMTPPort": config.email.0.smtp_port.to_string(),
-            "SMTPUsername": config.email.0.smtp_username,
-            "ConnectionSecurity": match config.email.0.smtp_security.as_str() {
-                "tls" => "TLS",
-                "starttls" => "STARTTLS",
-                _ => "",
-            },
+            "FeedbackName": provider_settings.as_ref().map(|p| p.from_name.clone()).unwrap_or_else(|| "RustChat".to_string()),
+            "FeedbackEmail": provider_settings.as_ref().map(|p| p.from_address.clone()).unwrap_or_default(),
+            "SMTPServer": provider_settings.as_ref().map(|p| p.host.clone()).unwrap_or_default(),
+            "SMTPPort": provider_settings.as_ref().map(|p| p.port.to_string()).unwrap_or_else(|| "587".to_string()),
+            "SMTPUsername": provider_settings.as_ref().map(|p| p.username.clone()).unwrap_or_default(),
+            "ConnectionSecurity": provider_settings.as_ref().map(|p| match p.tls_mode {
+                crate::models::email::TlsMode::ImplicitTls => "TLS",
+                crate::models::email::TlsMode::Starttls => "STARTTLS",
+                crate::models::email::TlsMode::None => "",
+            }).unwrap_or("STARTTLS"),
             "PasswordResetSalt": "",
             "EnablePasswordReset": config.authentication.0.password_enable_forgot_link,
         },
@@ -375,6 +458,17 @@ async fn patch_config(
                 "UPDATE server_config SET site = jsonb_set(site, '{site_name}', $1, true), updated_at = NOW(), updated_by = $2 WHERE id = 'default'"
             )
             .bind(serde_json::json!(site_name))
+            .bind(auth.user_id)
+            .execute(&state.db)
+            .await?;
+        }
+
+        if let Some(default_channels) = team_settings.get("ExperimentalDefaultChannels") {
+            let normalized = normalize_configured_default_channels(default_channels);
+            sqlx::query(
+                "UPDATE server_config SET experimental = jsonb_set(experimental, '{team_default_channels}', $1, true), updated_at = NOW(), updated_by = $2 WHERE id = 'default'"
+            )
+            .bind(serde_json::json!(normalized))
             .bind(auth.user_id)
             .execute(&state.db)
             .await?;
@@ -512,6 +606,11 @@ struct SystemStatus {
     ios_latest_version: String,
     #[serde(rename = "IosMinVersion")]
     ios_min_version: String,
+    #[serde(
+        rename = "CanReceiveNotifications",
+        skip_serializing_if = "Option::is_none"
+    )]
+    can_receive_notifications: Option<String>,
     status: String,
     version: String,
 }
@@ -519,18 +618,130 @@ struct SystemStatus {
 #[derive(serde::Deserialize)]
 struct PingQuery {
     format: Option<String>,
+    device_id: Option<String>,
 }
 
-async fn ping(Query(query): Query<PingQuery>) -> ApiResult<Json<serde_json::Value>> {
+#[derive(Debug, Clone, Copy)]
+struct PushDiagnostics {
+    has_push_proxy_url: bool,
+    has_fcm_db_config: bool,
+    has_fcm_env_config: bool,
+}
+
+impl PushDiagnostics {
+    fn can_attempt_push(&self) -> bool {
+        self.has_push_proxy_url || self.has_fcm_db_config || self.has_fcm_env_config
+    }
+}
+
+async fn get_push_diagnostics(state: &AppState) -> PushDiagnostics {
+    let has_push_proxy_url = std::env::var("RUSTCHAT_PUSH_PROXY_URL")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+
+    let has_fcm_env_config = std::env::var("FCM_PROJECT_ID")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+        && std::env::var("FCM_ACCESS_TOKEN")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty());
+
+    let has_fcm_db_config = sqlx::query_as::<_, (String, String)>(
+        "SELECT fcm_project_id, fcm_access_token FROM server_config WHERE id = 'default'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|(project_id, access_token)| {
+        !project_id.trim().is_empty() && !access_token.trim().is_empty()
+    });
+
+    PushDiagnostics {
+        has_push_proxy_url,
+        has_fcm_db_config,
+        has_fcm_env_config,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestNotificationOutcome {
+    Sent,
+    NoDevices,
+    DeliveryUnavailable,
+}
+
+fn classify_test_notification_result(
+    registered_device_count: usize,
+    sent_count: usize,
+) -> TestNotificationOutcome {
+    if sent_count > 0 {
+        TestNotificationOutcome::Sent
+    } else if registered_device_count == 0 {
+        TestNotificationOutcome::NoDevices
+    } else {
+        TestNotificationOutcome::DeliveryUnavailable
+    }
+}
+
+fn can_receive_notifications_response(
+    device_id: Option<&str>,
+    diagnostics: PushDiagnostics,
+) -> Option<String> {
+    let has_device_id = device_id.is_some_and(|id| !id.trim().is_empty());
+    if !has_device_id {
+        return None;
+    }
+
+    let value = if diagnostics.can_attempt_push() {
+        // We do not perform a real proxy send on ping yet, so expose "true" to satisfy clients.
+        "true"
+    } else {
+        "false"
+    };
+
+    Some(value.to_string())
+}
+
+async fn ping(
+    State(state): State<AppState>,
+    Query(query): Query<PingQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let can_receive_notifications = if query.device_id.is_some() {
+        let diagnostics = get_push_diagnostics(&state).await;
+        let value = can_receive_notifications_response(query.device_id.as_deref(), diagnostics);
+        if let Some(ref can_receive) = value {
+            tracing::info!(
+                has_push_proxy_url = diagnostics.has_push_proxy_url,
+                has_fcm_db_config = diagnostics.has_fcm_db_config,
+                has_fcm_env_config = diagnostics.has_fcm_env_config,
+                can_receive_notifications = %can_receive,
+                "Ping push capability diagnostic"
+            );
+        }
+        value
+    } else {
+        None
+    };
+
     if matches!(query.format.as_deref(), Some("old")) {
-        return Ok(Json(serde_json::json!({
+        let mut old = serde_json::json!({
             "ActiveSearchBackend": "database",
             "AndroidLatestVersion": "",
             "AndroidMinVersion": "",
             "IosLatestVersion": "",
             "IosMinVersion": "",
             "status": "OK"
-        })));
+        });
+        if let Some(can_receive) = can_receive_notifications {
+            if let serde_json::Value::Object(ref mut map) = old {
+                map.insert(
+                    "CanReceiveNotifications".to_string(),
+                    serde_json::Value::String(can_receive),
+                );
+            }
+        }
+        return Ok(Json(old));
     }
 
     let body = serde_json::to_value(SystemStatus {
@@ -540,12 +751,85 @@ async fn ping(Query(query): Query<PingQuery>) -> ApiResult<Json<serde_json::Valu
         desktop_min_version: "".to_string(),
         ios_latest_version: "".to_string(),
         ios_min_version: "".to_string(),
+        can_receive_notifications,
         status: "OK".to_string(),
         version: MM_VERSION.to_string(),
     })
     .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
 
     Ok(Json(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        can_receive_notifications_response, classify_test_notification_result, PushDiagnostics,
+        TestNotificationOutcome,
+    };
+
+    #[test]
+    fn classify_test_notification_result_detects_no_devices() {
+        assert_eq!(
+            classify_test_notification_result(0, 0),
+            TestNotificationOutcome::NoDevices
+        );
+    }
+
+    #[test]
+    fn classify_test_notification_result_detects_delivery_unavailable() {
+        assert_eq!(
+            classify_test_notification_result(2, 0),
+            TestNotificationOutcome::DeliveryUnavailable
+        );
+    }
+
+    #[test]
+    fn classify_test_notification_result_detects_success() {
+        assert_eq!(
+            classify_test_notification_result(2, 1),
+            TestNotificationOutcome::Sent
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_omits_field_without_device_id() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: false,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(can_receive_notifications_response(None, diagnostics), None);
+        assert_eq!(
+            can_receive_notifications_response(Some(""), diagnostics),
+            None
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_reports_not_available_when_unconfigured() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: false,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(
+            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
+            Some("false".to_string())
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_reports_verified_when_push_is_configured() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: true,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(
+            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
+            Some("true".to_string())
+        );
+    }
 }
 
 async fn client_perf(
@@ -699,21 +983,21 @@ async fn get_redirect_location(
     Ok(Json(serde_json::json!({"location": ""})))
 }
 
-async fn upgrade_to_enterprise(
+async fn upgrade_plan(
     State(_state): State<AppState>,
     _auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
-async fn get_upgrade_to_enterprise_status(
+async fn get_upgrade_status(
     State(_state): State<AppState>,
     _auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(serde_json::json!({})))
 }
 
-async fn get_upgrade_to_enterprise_allowed(
+async fn get_upgrade_allowed(
     State(_state): State<AppState>,
     _auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {

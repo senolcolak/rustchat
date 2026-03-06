@@ -1,6 +1,6 @@
 use rustchat::{api, config::Config, db, realtime::WsHub, storage::S3Client, telemetry};
 use std::net::SocketAddr;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting rustchat server v{}", env!("CARGO_PKG_VERSION"));
 
     // Connect to database and run migrations
-    let db_pool = db::connect(&config.database_url).await?;
+    let db_pool = db::connect_with_config(&config.database_url, &config.db_pool).await?;
     info!("Database connected and migrations applied");
 
     // Seed admin user if configured
@@ -65,6 +65,27 @@ async fn main() -> anyhow::Result<()> {
     let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
     info!("Redis pool initialized");
 
+    let cluster_broadcast = rustchat::realtime::ClusterBroadcast::new(
+        redis_pool.clone(),
+        config.redis_url.clone(),
+        ws_hub.clone(),
+    );
+    match cluster_broadcast.start().await {
+        Ok(()) => {
+            ws_hub.set_cluster_broadcast(cluster_broadcast).await;
+            info!("WebSocket cluster fan-out enabled");
+        }
+        Err(e) => {
+            if config.require_cluster_fanout {
+                anyhow::bail!(
+                    "Failed to start websocket cluster fan-out and RUSTCHAT_REQUIRE_CLUSTER_FANOUT=true: {}",
+                    e
+                );
+            }
+            warn!(error = %e, "Failed to start websocket cluster fan-out; continuing in single-node mode");
+        }
+    }
+
     // Create S3 client
     let s3_client = S3Client::new(
         config.s3_endpoint.clone(),
@@ -74,13 +95,36 @@ async fn main() -> anyhow::Result<()> {
         config.s3_secret_key.clone(),
         config.s3_region.clone(),
     );
-    let _ = s3_client.ensure_bucket().await;
-    info!("S3 client initialized");
+
+    // Ensure S3 bucket exists - fail fast if storage is misconfigured
+    match s3_client.ensure_bucket().await {
+        Ok(()) => info!("S3 bucket verified/created successfully"),
+        Err(e) => {
+            // In production, storage is critical - fail startup
+            if config.is_production() {
+                anyhow::bail!(
+                    "Failed to initialize S3 storage: {}. Check your S3 configuration.",
+                    e
+                );
+            } else {
+                // In dev, log warning but continue
+                tracing::warn!("S3 bucket initialization failed (dev mode): {}", e);
+            }
+        }
+    }
 
     // Spawn background jobs
     rustchat::jobs::spawn_retention_job(db_pool.clone());
 
-    // Build application router
+    // Spawn email worker
+    let email_worker_config = rustchat::jobs::EmailWorkerConfig::default();
+    rustchat::jobs::spawn_email_worker(
+        db_pool.clone(),
+        email_worker_config,
+        config.encryption_key.clone(),
+    );
+
+    // Build application router (spawns reconciliation worker internally)
     let app = api::router(
         db_pool.clone(),
         redis_pool,
@@ -99,7 +143,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

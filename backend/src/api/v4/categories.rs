@@ -1,17 +1,19 @@
 use axum::{
     extract::{Path, State},
-    routing::{get, put},
+    routing::get,
     Json, Router,
 };
 use serde::Deserialize;
+use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
 use super::users::{
-    create_category_internal, get_categories_internal, resolve_user_id, update_categories_internal,
-    update_category_order_internal, CreateCategoryRequest, UpdateCategoriesRequest,
+    create_category_internal, get_categories_internal, get_category_order_internal,
+    resolve_user_id, update_categories_internal, update_category_order_internal,
+    CreateCategoryRequest, UpdateCategoriesPayload,
 };
 use crate::api::AppState;
-use crate::error::ApiResult;
+use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{id::parse_mm_or_uuid, models as mm};
 
 pub fn router() -> Router<AppState> {
@@ -24,7 +26,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/users/{user_id}/teams/{team_id}/channels/categories/order",
-            put(update_category_order),
+            get(get_category_order).put(update_category_order),
         )
         .route(
             "/users/{user_id}/teams/{team_id}/channels/categories/{category_id}",
@@ -46,8 +48,7 @@ async fn get_categories(
     Path(params): Path<CategoriesPath>,
 ) -> ApiResult<Json<mm::SidebarCategories>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
     get_categories_internal(state, user_id, team_id).await
 }
 
@@ -58,8 +59,7 @@ async fn create_category(
     Json(input): Json<CreateCategoryRequest>,
 ) -> ApiResult<Json<mm::SidebarCategory>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
     create_category_internal(state, user_id, team_id, input).await
 }
 
@@ -67,12 +67,21 @@ async fn update_categories(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(params): Path<CategoriesPath>,
-    Json(input): Json<UpdateCategoriesRequest>,
+    Json(input): Json<UpdateCategoriesPayload>,
 ) -> ApiResult<Json<Vec<mm::SidebarCategory>>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    update_categories_internal(state, user_id, team_id, input).await
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
+    update_categories_internal(state, user_id, team_id, input.into_request()).await
+}
+
+async fn get_category_order(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(params): Path<CategoriesPath>,
+) -> ApiResult<Json<Vec<String>>> {
+    let user_id = resolve_user_id(&params.user_id, &auth)?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
+    get_category_order_internal(state, user_id, team_id).await
 }
 
 async fn update_category_order(
@@ -82,9 +91,28 @@ async fn update_category_order(
     Json(order): Json<Vec<String>>,
 ) -> ApiResult<Json<Vec<String>>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
     update_category_order_internal(state, user_id, team_id, order).await
+}
+
+/// Resolves a team identifier to a UUID.
+/// First tries to parse as UUID/mm-id, then falls back to looking up by team name.
+async fn resolve_team_id(state: &AppState, team_id_str: &str) -> ApiResult<Uuid> {
+    // First try to parse as UUID or Mattermost ID
+    if let Some(team_id) = parse_mm_or_uuid(team_id_str) {
+        return Ok(team_id);
+    }
+
+    // Fall back to looking up by team name
+    let team: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM teams WHERE name = $1")
+        .bind(team_id_str)
+        .fetch_optional(&state.db)
+        .await?;
+
+    match team {
+        Some((id,)) => Ok(id),
+        None => Err(AppError::NotFound("Team not found".to_string())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,10 +147,10 @@ async fn get_category(
     Path(params): Path<SingleCategoryPath>,
 ) -> ApiResult<Json<mm::SidebarCategory>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     // Fetch the specific category
     let category: Option<CategoryRow> = sqlx::query_as(
@@ -190,10 +218,10 @@ async fn update_category(
     Json(input): Json<UpdateCategoryRequest>,
 ) -> ApiResult<Json<mm::SidebarCategory>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -280,10 +308,10 @@ async fn delete_category(
     Path(params): Path<SingleCategoryPath>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let user_id = resolve_user_id(&params.user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&params.team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    let category_id = parse_mm_or_uuid(&params.category_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid category_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &params.team_id).await?;
+    let category_id = parse_mm_or_uuid(&params.category_id).unwrap_or_else(|| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, params.category_id.as_bytes())
+    });
 
     // First check category exists
     let category: Option<CategoryRow> = sqlx::query_as(

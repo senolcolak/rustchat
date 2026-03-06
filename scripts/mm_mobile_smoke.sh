@@ -1,9 +1,14 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Configuration
-BASE=${BASE:-http://localhost:3000}
+if [ -z "${BASE:-}" ]; then
+    echo "BASE is required (example: BASE=http://127.0.0.1:3000 ./scripts/mm_mobile_smoke.sh)"
+    exit 1
+fi
+BASE="${BASE%/}"
 TOKEN=${TOKEN:-""}
+EXPECTED_MM_VERSION=${EXPECTED_MM_VERSION:-10.11.10}
 
 echo "=== RustChat Mattermost Compatibility Smoke Test ==="
 echo "Target: $BASE"
@@ -68,10 +73,10 @@ check_json "$BASE/api/v4/license/client?format=old" "IsLicensed"
 
 echo "Checking system version..."
 VERSION_OUT=$(curl -s "$BASE/api/v4/system/version")
-if [[ "$VERSION_OUT" == *"9.5.0"* ]]; then
-    echo "  [OK] Version is 9.5.0"
+if [[ "$VERSION_OUT" == *"$EXPECTED_MM_VERSION"* ]]; then
+    echo "  [OK] Version is $EXPECTED_MM_VERSION"
 else
-    echo "  [FAIL] Version mismatch: $VERSION_OUT"
+    echo "  [FAIL] Version mismatch: expected $EXPECTED_MM_VERSION, got $VERSION_OUT"
     exit 1
 fi
 

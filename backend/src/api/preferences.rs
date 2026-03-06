@@ -21,11 +21,6 @@ use crate::realtime::{EventType, PresenceEvent, WsEnvelope};
 /// Build preferences routes
 pub fn router() -> Router<AppState> {
     Router::new()
-        // User status
-        .route("/users/me/status", get(get_my_status))
-        .route("/users/me/status", put(update_my_status))
-        .route("/users/me/status", axum::routing::delete(clear_my_status))
-        .route("/users/{user_id}/status", get(get_user_status))
         // User preferences
         .route("/users/me/preferences", get(get_my_preferences))
         .route("/users/me/preferences", put(update_my_preferences))
@@ -61,6 +56,7 @@ fn to_system_time(last_activity: Option<chrono::DateTime<Utc>>) -> SystemTime {
 }
 
 /// Get current user's status
+#[allow(dead_code)]
 async fn get_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -94,6 +90,7 @@ async fn get_my_status(
 }
 
 /// Update current user's status
+#[allow(dead_code)]
 async fn update_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -200,6 +197,7 @@ async fn update_my_status(
 }
 
 /// Clear current user's status
+#[allow(dead_code)]
 async fn clear_my_status(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -254,6 +252,7 @@ async fn clear_my_status(
 }
 
 /// Get another user's status
+#[allow(dead_code)]
 async fn get_user_status(
     State(state): State<AppState>,
     _auth: AuthUser,
@@ -338,10 +337,23 @@ async fn update_my_preferences(
     // Upsert preferences
     let prefs = sqlx::query_as::<_, UserPreferences>(
         r#"
-        INSERT INTO user_preferences (user_id, notify_desktop, notify_push, notify_email, notify_sounds,
-            dnd_enabled, message_display, sidebar_behavior, time_format, mention_keywords)
-        VALUES ($1, COALESCE($2, 'all'), COALESCE($3, 'all'), COALESCE($4, 'none'), COALESCE($5, true),
-            COALESCE($6, false), COALESCE($7, 'standard'), COALESCE($8, 'unreads_first'), COALESCE($9, '12h'), $10)
+        INSERT INTO user_preferences (
+            user_id, notify_desktop, notify_push, notify_email, notify_sounds,
+            dnd_enabled, message_display, sidebar_behavior, time_format, mention_keywords,
+            collapsed_reply_threads, use_military_time, teammate_name_display,
+            availability_status_visible, show_last_active_time, timezone,
+            link_previews_enabled, image_previews_enabled, click_to_reply,
+            channel_display_mode, quick_reactions_enabled, emoji_picker_enabled, language,
+            group_unread_channels, limit_visible_dms_gms,
+            send_on_ctrl_enter, enable_post_formatting, enable_join_leave_messages,
+            enable_performance_debugging, unread_scroll_position, sync_drafts
+        )
+        VALUES (
+            $1, COALESCE($2, 'all'), COALESCE($3, 'all'), COALESCE($4, 'none'), COALESCE($5, true),
+            COALESCE($6, false), COALESCE($7, 'standard'), COALESCE($8, 'unreads_first'), COALESCE($9, '12h'), $10,
+            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+            $24, $25, $26, $27, $28, $29, $30, $31
+        )
         ON CONFLICT (user_id) DO UPDATE SET
             notify_desktop = COALESCE($2, user_preferences.notify_desktop),
             notify_push = COALESCE($3, user_preferences.notify_push),
@@ -352,6 +364,27 @@ async fn update_my_preferences(
             sidebar_behavior = COALESCE($8, user_preferences.sidebar_behavior),
             time_format = COALESCE($9, user_preferences.time_format),
             mention_keywords = COALESCE($10, user_preferences.mention_keywords),
+            collapsed_reply_threads = COALESCE($11, user_preferences.collapsed_reply_threads),
+            use_military_time = COALESCE($12, user_preferences.use_military_time),
+            teammate_name_display = COALESCE($13, user_preferences.teammate_name_display),
+            availability_status_visible = COALESCE($14, user_preferences.availability_status_visible),
+            show_last_active_time = COALESCE($15, user_preferences.show_last_active_time),
+            timezone = COALESCE($16, user_preferences.timezone),
+            link_previews_enabled = COALESCE($17, user_preferences.link_previews_enabled),
+            image_previews_enabled = COALESCE($18, user_preferences.image_previews_enabled),
+            click_to_reply = COALESCE($19, user_preferences.click_to_reply),
+            channel_display_mode = COALESCE($20, user_preferences.channel_display_mode),
+            quick_reactions_enabled = COALESCE($21, user_preferences.quick_reactions_enabled),
+            emoji_picker_enabled = COALESCE($22, user_preferences.emoji_picker_enabled),
+            language = COALESCE($23, user_preferences.language),
+            group_unread_channels = COALESCE($24, user_preferences.group_unread_channels),
+            limit_visible_dms_gms = COALESCE($25, user_preferences.limit_visible_dms_gms),
+            send_on_ctrl_enter = COALESCE($26, user_preferences.send_on_ctrl_enter),
+            enable_post_formatting = COALESCE($27, user_preferences.enable_post_formatting),
+            enable_join_leave_messages = COALESCE($28, user_preferences.enable_join_leave_messages),
+            enable_performance_debugging = COALESCE($29, user_preferences.enable_performance_debugging),
+            unread_scroll_position = COALESCE($30, user_preferences.unread_scroll_position),
+            sync_drafts = COALESCE($31, user_preferences.sync_drafts),
             updated_at = NOW()
         RETURNING *
         "#
@@ -366,6 +399,30 @@ async fn update_my_preferences(
     .bind(&payload.sidebar_behavior)
     .bind(&payload.time_format)
     .bind(&payload.mention_keywords)
+    // Display settings (S7)
+    .bind(payload.collapsed_reply_threads)
+    .bind(payload.use_military_time)
+    .bind(&payload.teammate_name_display)
+    .bind(payload.availability_status_visible)
+    .bind(payload.show_last_active_time)
+    .bind(&payload.timezone)
+    .bind(payload.link_previews_enabled)
+    .bind(payload.image_previews_enabled)
+    .bind(payload.click_to_reply)
+    .bind(&payload.channel_display_mode)
+    .bind(payload.quick_reactions_enabled)
+    .bind(payload.emoji_picker_enabled)
+    .bind(&payload.language)
+    // Sidebar settings (S6)
+    .bind(&payload.group_unread_channels)
+    .bind(&payload.limit_visible_dms_gms)
+    // Advanced settings (S5)
+    .bind(payload.send_on_ctrl_enter)
+    .bind(payload.enable_post_formatting)
+    .bind(payload.enable_join_leave_messages)
+    .bind(payload.enable_performance_debugging)
+    .bind(&payload.unread_scroll_position)
+    .bind(payload.sync_drafts)
     .fetch_one(&state.db)
     .await?;
 

@@ -5,6 +5,8 @@
 use anyhow::anyhow;
 use serde::Deserialize;
 
+pub mod security;
+
 /// Application configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -23,12 +25,29 @@ pub struct Config {
     /// PostgreSQL database URL
     pub database_url: String,
 
+    /// Database connection pool configuration
+    #[serde(default)]
+    pub db_pool: DbPoolConfig,
+
     /// Redis connection URL
     #[serde(default = "default_redis_url")]
     pub redis_url: String,
 
+    /// Require cluster websocket fan-out at startup.
+    /// If true, startup fails when cluster pub/sub cannot be initialized.
+    #[serde(default = "default_require_cluster_fanout")]
+    pub require_cluster_fanout: bool,
+
     /// JWT secret key
     pub jwt_secret: String,
+
+    /// Optional JWT issuer claim (`iss`) to embed and validate.
+    #[serde(default)]
+    pub jwt_issuer: Option<String>,
+
+    /// Optional JWT audience claim (`aud`) to embed and validate.
+    #[serde(default)]
+    pub jwt_audience: Option<String>,
 
     /// Encryption key for sensitive data
     pub encryption_key: String,
@@ -78,9 +97,33 @@ pub struct Config {
     #[serde(default)]
     pub cors_allowed_origins: Option<String>,
 
+    /// Cloudflare Turnstile configuration
+    #[serde(default)]
+    pub turnstile: TurnstileConfig,
+
     /// Calls plugin configuration
     #[serde(default)]
     pub calls: CallsConfig,
+
+    /// Security policy configuration
+    #[serde(default)]
+    pub security: SecurityConfig,
+
+    /// Unread/read parity behavior configuration
+    #[serde(default)]
+    pub unread: UnreadConfig,
+
+    /// Keycloak group sync configuration
+    #[serde(default)]
+    pub keycloak_sync: KeycloakSyncConfig,
+
+    /// Messaging policy configuration
+    #[serde(default)]
+    pub messaging: MessagingConfig,
+
+    /// Compatibility-oriented feature flags.
+    #[serde(default)]
+    pub compatibility: CompatibilityConfig,
 }
 
 /// Calls plugin configuration
@@ -154,6 +197,118 @@ impl Default for CallsConfig {
     }
 }
 
+/// Unread/read parity configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnreadConfig {
+    /// Enable unread cache v2 code paths.
+    #[serde(default = "default_unread_v2_enabled")]
+    pub unread_v2_enabled: bool,
+
+    /// Enable websocket `post_unread` fan-out.
+    #[serde(default = "default_post_unread_ws_enabled")]
+    pub post_unread_ws_enabled: bool,
+
+    /// Enable team unread v2 aggregation path.
+    #[serde(default = "default_team_unread_v2_enabled")]
+    pub team_unread_v2_enabled: bool,
+
+    /// Enable collapsed threads semantics for unread behavior.
+    #[serde(default = "default_collapsed_threads_enabled")]
+    pub collapsed_threads_enabled: bool,
+
+    /// Enable post priority/urgent mention counting.
+    #[serde(default = "default_post_priority_enabled")]
+    pub post_priority_enabled: bool,
+
+    /// Auto-follow thread when marking reply unread.
+    #[serde(default = "default_thread_auto_follow")]
+    pub thread_auto_follow: bool,
+}
+
+impl Default for UnreadConfig {
+    fn default() -> Self {
+        Self {
+            unread_v2_enabled: default_unread_v2_enabled(),
+            post_unread_ws_enabled: default_post_unread_ws_enabled(),
+            team_unread_v2_enabled: default_team_unread_v2_enabled(),
+            collapsed_threads_enabled: default_collapsed_threads_enabled(),
+            post_priority_enabled: default_post_priority_enabled(),
+            thread_auto_follow: default_thread_auto_follow(),
+        }
+    }
+}
+
+/// Keycloak synchronization configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeycloakSyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_keycloak_provider_key")]
+    pub provider_key: String,
+    #[serde(default)]
+    pub admin_base_url: String,
+    #[serde(default)]
+    pub realm: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default = "default_keycloak_interval_seconds")]
+    pub interval_seconds: u64,
+    #[serde(default = "default_keycloak_mapping_mode")]
+    pub mapping_mode: String,
+}
+
+impl Default for KeycloakSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_key: default_keycloak_provider_key(),
+            admin_base_url: String::new(),
+            realm: String::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            interval_seconds: default_keycloak_interval_seconds(),
+            mapping_mode: default_keycloak_mapping_mode(),
+        }
+    }
+}
+
+/// Messaging policy configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessagingConfig {
+    #[serde(default)]
+    pub dm_acl_enabled: bool,
+}
+
+impl Default for MessagingConfig {
+    fn default() -> Self {
+        Self {
+            dm_acl_enabled: false,
+        }
+    }
+}
+
+/// Compatibility feature flags.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompatibilityConfig {
+    /// Mirrors FeatureFlagMobileSSOCodeExchange behavior.
+    #[serde(default = "default_compat_mobile_sso_code_exchange")]
+    pub mobile_sso_code_exchange: bool,
+}
+
+impl Default for CompatibilityConfig {
+    fn default() -> Self {
+        Self {
+            mobile_sso_code_exchange: default_compat_mobile_sso_code_exchange(),
+        }
+    }
+}
+
+fn default_compat_mobile_sso_code_exchange() -> bool {
+    true
+}
+
 fn default_calls_enabled() -> bool {
     false // Disabled by default
 }
@@ -191,6 +346,195 @@ fn default_calls_state_backend() -> String {
     "auto".to_string()
 }
 
+fn default_unread_v2_enabled() -> bool {
+    false
+}
+
+fn default_post_unread_ws_enabled() -> bool {
+    true
+}
+
+fn default_team_unread_v2_enabled() -> bool {
+    true
+}
+
+fn default_collapsed_threads_enabled() -> bool {
+    true
+}
+
+fn default_post_priority_enabled() -> bool {
+    false
+}
+
+fn default_thread_auto_follow() -> bool {
+    true
+}
+
+fn default_keycloak_provider_key() -> String {
+    "oidc-main".to_string()
+}
+
+fn default_keycloak_interval_seconds() -> u64 {
+    300
+}
+
+fn default_keycloak_mapping_mode() -> String {
+    "attributes_only".to_string()
+}
+
+/// Database connection pool configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbPoolConfig {
+    /// Maximum number of connections in the pool
+    #[serde(default = "default_db_pool_max_connections")]
+    pub max_connections: u32,
+
+    /// Minimum number of connections to maintain
+    #[serde(default = "default_db_pool_min_connections")]
+    pub min_connections: u32,
+
+    /// Connection timeout in seconds
+    #[serde(default = "default_db_pool_acquire_timeout")]
+    pub acquire_timeout_secs: u64,
+
+    /// Idle connection timeout in seconds
+    #[serde(default = "default_db_pool_idle_timeout")]
+    pub idle_timeout_secs: u64,
+
+    /// Max connection lifetime in seconds
+    #[serde(default = "default_db_pool_max_lifetime")]
+    pub max_lifetime_secs: u64,
+}
+
+impl Default for DbPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_db_pool_max_connections(),
+            min_connections: default_db_pool_min_connections(),
+            acquire_timeout_secs: default_db_pool_acquire_timeout(),
+            idle_timeout_secs: default_db_pool_idle_timeout(),
+            max_lifetime_secs: default_db_pool_max_lifetime(),
+        }
+    }
+}
+
+fn default_db_pool_max_connections() -> u32 {
+    // Default: 20 connections (increased from conservative defaults)
+    // Adjust based on your database capacity and load
+    std::env::var("DB_POOL_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+}
+
+fn default_db_pool_min_connections() -> u32 {
+    // Default: 5 connections maintained
+    std::env::var("DB_POOL_MIN_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+fn default_db_pool_acquire_timeout() -> u64 {
+    // Default: 3 seconds to acquire a connection
+    std::env::var("DB_POOL_ACQUIRE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+fn default_db_pool_idle_timeout() -> u64 {
+    // Default: 10 minutes
+    std::env::var("DB_POOL_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600)
+}
+
+fn default_db_pool_max_lifetime() -> u64 {
+    // Default: 30 minutes
+    std::env::var("DB_POOL_MAX_LIFETIME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800)
+}
+
+/// Security policy configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    /// OAuth token delivery method. Only `cookie` is supported.
+    #[serde(default = "default_oauth_token_delivery")]
+    pub oauth_token_delivery: String,
+
+    /// Enable global rate limiting for auth endpoints
+    #[serde(default = "default_rate_limit_enabled")]
+    pub rate_limit_enabled: bool,
+
+    /// Rate limit: requests per minute per IP for auth endpoints
+    #[serde(default = "default_rate_limit_auth_per_minute")]
+    pub rate_limit_auth_per_minute: u32,
+
+    /// Rate limit: WebSocket connection attempts per minute per IP
+    #[serde(default = "default_rate_limit_ws_per_minute")]
+    pub rate_limit_ws_per_minute: u32,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            oauth_token_delivery: default_oauth_token_delivery(),
+            rate_limit_enabled: default_rate_limit_enabled(),
+            rate_limit_auth_per_minute: default_rate_limit_auth_per_minute(),
+            rate_limit_ws_per_minute: default_rate_limit_ws_per_minute(),
+        }
+    }
+}
+
+fn default_oauth_token_delivery() -> String {
+    // Secure-by-default: one-time code exchange flow.
+    "cookie".to_string()
+}
+
+fn default_rate_limit_enabled() -> bool {
+    true
+}
+
+fn default_rate_limit_auth_per_minute() -> u32 {
+    10
+}
+
+fn default_rate_limit_ws_per_minute() -> u32 {
+    30
+}
+
+/// Cloudflare Turnstile configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnstileConfig {
+    /// Enable Turnstile protection
+    #[serde(default = "default_turnstile_enabled")]
+    pub enabled: bool,
+    /// Site key for frontend (public)
+    #[serde(default)]
+    pub site_key: String,
+    /// Secret key for backend verification
+    #[serde(default)]
+    pub secret_key: String,
+}
+
+impl Default for TurnstileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_turnstile_enabled(),
+            site_key: String::new(),
+            secret_key: String::new(),
+        }
+    }
+}
+
+fn default_turnstile_enabled() -> bool {
+    false // Disabled by default
+}
+
 fn default_host() -> String {
     "0.0.0.0".to_string()
 }
@@ -205,6 +549,10 @@ fn default_port() -> u16 {
 
 fn default_redis_url() -> String {
     "redis://localhost:6379".to_string()
+}
+
+fn default_require_cluster_fanout() -> bool {
+    false
 }
 
 fn default_jwt_expiry() -> u64 {
@@ -294,6 +642,77 @@ impl Config {
         Ok(())
     }
 
+    fn apply_unread_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_UNREAD_V2_ENABLED") {
+            self.unread.unread_v2_enabled = parse_bool_env("RUSTCHAT_UNREAD_V2_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_POST_UNREAD_WS_ENABLED") {
+            self.unread.post_unread_ws_enabled =
+                parse_bool_env("RUSTCHAT_POST_UNREAD_WS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_TEAM_UNREAD_V2_ENABLED") {
+            self.unread.team_unread_v2_enabled =
+                parse_bool_env("RUSTCHAT_TEAM_UNREAD_V2_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_COLLAPSED_THREADS_ENABLED") {
+            self.unread.collapsed_threads_enabled =
+                parse_bool_env("RUSTCHAT_COLLAPSED_THREADS_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_POST_PRIORITY_ENABLED") {
+            self.unread.post_priority_enabled =
+                parse_bool_env("RUSTCHAT_POST_PRIORITY_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_THREAD_AUTO_FOLLOW") {
+            self.unread.thread_auto_follow = parse_bool_env("RUSTCHAT_THREAD_AUTO_FOLLOW", &raw)?;
+        }
+        Ok(())
+    }
+
+    fn apply_keycloak_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_ENABLED") {
+            self.keycloak_sync.enabled = parse_bool_env("RUSTCHAT_KEYCLOAK_SYNC_ENABLED", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_PROVIDER_KEY") {
+            self.keycloak_sync.provider_key = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_ADMIN_BASE_URL") {
+            self.keycloak_sync.admin_base_url = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_REALM") {
+            self.keycloak_sync.realm = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_CLIENT_ID") {
+            self.keycloak_sync.client_id = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_CLIENT_SECRET") {
+            self.keycloak_sync.client_secret = raw.trim().to_string();
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_INTERVAL_SECONDS") {
+            self.keycloak_sync.interval_seconds =
+                parse_u64_env("RUSTCHAT_KEYCLOAK_SYNC_INTERVAL_SECONDS", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("RUSTCHAT_KEYCLOAK_SYNC_MAPPING_MODE") {
+            self.keycloak_sync.mapping_mode = raw.trim().to_string();
+        }
+        Ok(())
+    }
+
+    fn apply_messaging_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_MESSAGING_DM_ACL_ENABLED") {
+            self.messaging.dm_acl_enabled =
+                parse_bool_env("RUSTCHAT_MESSAGING_DM_ACL_ENABLED", &raw)?;
+        }
+        Ok(())
+    }
+
+    fn apply_compatibility_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(raw) = std::env::var("RUSTCHAT_COMPAT_MOBILE_SSO_CODE_EXCHANGE") {
+            self.compatibility.mobile_sso_code_exchange =
+                parse_bool_env("RUSTCHAT_COMPAT_MOBILE_SSO_CODE_EXCHANGE", &raw)?;
+        }
+        Ok(())
+    }
+
     /// Load configuration from environment variables
     pub fn load() -> anyhow::Result<Self> {
         let mut builder = config::Config::builder();
@@ -316,7 +735,132 @@ impl Config {
         let config = builder.build()?;
         let mut settings: Config = config.try_deserialize()?;
         settings.apply_calls_env_overrides()?;
+        settings.apply_unread_env_overrides()?;
+        settings.apply_keycloak_env_overrides()?;
+        settings.apply_messaging_env_overrides()?;
+        settings.apply_compatibility_env_overrides()?;
+
+        // Validate security settings
+        settings.validate_security()?;
+
         Ok(settings)
+    }
+
+    /// Validate security-critical configuration
+    fn validate_security(&self) -> anyhow::Result<()> {
+        let validation = security::validate_secrets(self);
+
+        // Log all warnings
+        for warning in &validation.warnings {
+            tracing::warn!("Security configuration warning: {}", warning);
+        }
+
+        if self.is_production() {
+            // In production, fail fast on security issues
+            if !validation.is_valid {
+                for error in &validation.errors {
+                    tracing::error!("Security configuration error: {}", error);
+                }
+                anyhow::bail!(
+                    "Security validation failed with {} error(s). Fix the issues above before starting in production mode.",
+                    validation.errors.len()
+                );
+            }
+        } else {
+            // In development, log errors but continue
+            for error in &validation.errors {
+                tracing::warn!("Security configuration issue (allowed in dev): {}", error);
+            }
+        }
+
+        let oauth_delivery = self
+            .security
+            .oauth_token_delivery
+            .trim()
+            .to_ascii_lowercase();
+        if oauth_delivery != "cookie" {
+            anyhow::bail!(
+                "Invalid RUSTCHAT_SECURITY_OAUTH_TOKEN_DELIVERY value '{}'. Query-token delivery has been removed; expected 'cookie'.",
+                self.security.oauth_token_delivery
+            );
+        }
+
+        if let Ok(raw) = std::env::var("RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN") {
+            let enabled = parse_bool_env("RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN", &raw)?;
+            if enabled {
+                anyhow::bail!(
+                    "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN=true is no longer supported. WebSocket query-token authentication has been removed."
+                );
+            } else {
+                tracing::warn!(
+                    "RUSTCHAT_SECURITY_WS_ALLOW_QUERY_TOKEN is deprecated and ignored. Remove it from your environment."
+                );
+            }
+        }
+
+        if self.is_production() {
+            if self
+                .jwt_issuer
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "RUSTCHAT_JWT_ISSUER is required in production and must be non-empty."
+                );
+            }
+            if self
+                .jwt_audience
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "RUSTCHAT_JWT_AUDIENCE is required in production and must be non-empty."
+                );
+            }
+
+            if let Ok(site_url) = std::env::var("RUSTCHAT_SITE_URL") {
+                let normalized = site_url.trim().to_ascii_lowercase();
+                if !normalized.is_empty() && !normalized.starts_with("https://") {
+                    anyhow::bail!(
+                        "RUSTCHAT_SITE_URL must use https:// in production (current value: '{}').",
+                        site_url
+                    );
+                }
+            } else {
+                anyhow::bail!("RUSTCHAT_SITE_URL is required in production and must use https://.");
+            }
+
+            if let Some(origins) = self.cors_allowed_origins.as_deref() {
+                let insecure_origins: Vec<&str> = origins
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|origin| !origin.is_empty())
+                    .filter(|origin| origin.to_ascii_lowercase().starts_with("http://"))
+                    .collect();
+
+                if !insecure_origins.is_empty() {
+                    anyhow::bail!(
+                        "In production, RUSTCHAT_CORS_ALLOWED_ORIGINS must use https:// only. Insecure origin(s): {}",
+                        insecure_origins.join(", ")
+                    );
+                }
+            }
+        } else {
+            if let Ok(site_url) = std::env::var("RUSTCHAT_SITE_URL") {
+                let normalized = site_url.trim().to_ascii_lowercase();
+                if !normalized.is_empty() && !normalized.starts_with("https://") {
+                    tracing::warn!(
+                        "RUSTCHAT_SITE_URL does not use https:// (allowed in non-production)"
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn is_production(&self) -> bool {

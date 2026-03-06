@@ -3,7 +3,10 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use rustchat::mattermost_compat::id::{encode_mm_id, parse_mm_or_uuid};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+};
 use uuid::Uuid;
 
 use crate::common::spawn_app;
@@ -1105,8 +1108,15 @@ async fn create_team_and_channel_with_members_of_type(
 
 async fn connect_ws(base_http_url: &str, token: &str) -> WsClient {
     let ws_base = base_http_url.replacen("http://", "ws://", 1);
-    let ws_url = format!("{ws_base}/api/v1/ws?token={token}");
-    let (ws_stream, _) = connect_async(ws_url)
+    let ws_url = format!("{ws_base}/api/v1/ws");
+    let mut request = ws_url
+        .into_client_request()
+        .expect("websocket request should be valid");
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_str(token).expect("valid websocket subprotocol token"),
+    );
+    let (ws_stream, _) = connect_async(request)
         .await
         .expect("websocket connection should succeed");
     ws_stream

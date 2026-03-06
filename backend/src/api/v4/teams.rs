@@ -10,13 +10,15 @@ use std::collections::HashMap;
 
 use super::extractors::MmAuthUser;
 use crate::api::AppState;
-use crate::error::ApiResult;
+use crate::auth::policy::permissions;
+use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     models as mm,
 };
 use crate::models::channel::ChannelType;
 use crate::models::{Channel, Team, TeamMember};
+use crate::services::team_membership::apply_default_channel_membership_for_team_join;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -291,6 +293,15 @@ async fn add_team_member(
     .bind("member")
     .execute(&state.db)
     .await?;
+    if let Err(err) = apply_default_channel_membership_for_team_join(&state, team_id, user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %user_id,
+            error = %err,
+            "Default channel auto-join failed after v4 add_team_member"
+        );
+    }
 
     Ok(Json(map_team_member(TeamMember {
         team_id,
@@ -301,11 +312,144 @@ async fn add_team_member(
 }
 
 async fn add_team_member_by_invite(
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid invite body")?;
-    Ok(status_ok())
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Query(query): Query<AddTeamMemberByInviteQuery>,
+) -> ApiResult<(axum::http::StatusCode, Json<mm::TeamMember>)> {
+    let token = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let invite_id = query
+        .invite_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let team_id = if let Some(token_value) = token {
+        let mut tx = state.db.begin().await?;
+        let token_row: TeamInviteTokenRow = sqlx::query_as(
+            r#"
+            SELECT team_id, expires_at, used_at
+            FROM team_invite_tokens
+            WHERE token = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_value)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            crate::error::AppError::BadRequest("Invalid invitation token".to_string())
+        })?;
+
+        if token_row.used_at.is_some() || token_row.expires_at <= chrono::Utc::now() {
+            return Err(crate::error::AppError::BadRequest(
+                "Invalid or expired invitation token".to_string(),
+            ));
+        }
+
+        let team: Team = sqlx::query_as("SELECT * FROM teams WHERE id = $1")
+            .bind(token_row.team_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO team_members (team_id, user_id, role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (team_id, user_id)
+            DO UPDATE SET role = EXCLUDED.role
+            "#,
+        )
+        .bind(team.id)
+        .bind(auth.user_id)
+        .bind("member")
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("UPDATE team_invite_tokens SET used_at = NOW() WHERE token = $1")
+            .bind(token_value)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        team.id
+    } else if let Some(invite_value) = invite_id {
+        if auth.has_role("guest") {
+            return Err(crate::error::AppError::Forbidden(
+                "Guests cannot join teams through invite_id".to_string(),
+            ));
+        }
+
+        let team: Team = sqlx::query_as("SELECT * FROM teams WHERE invite_id = $1")
+            .bind(invite_value)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+        if !team.allow_open_invite {
+            return Err(crate::error::AppError::Forbidden(
+                "This team does not allow open joining".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO team_members (team_id, user_id, role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (team_id, user_id)
+            DO UPDATE SET role = EXCLUDED.role
+            "#,
+        )
+        .bind(team.id)
+        .bind(auth.user_id)
+        .bind("member")
+        .execute(&state.db)
+        .await?;
+
+        team.id
+    } else {
+        return Err(crate::error::AppError::BadRequest(
+            "Missing invitation token or invite_id".to_string(),
+        ));
+    };
+
+    if let Err(err) =
+        apply_default_channel_membership_for_team_join(&state, team_id, auth.user_id).await
+    {
+        tracing::warn!(
+            team_id = %team_id,
+            user_id = %auth.user_id,
+            error = %err,
+            "Default channel auto-join failed after v4 add_team_member_by_invite"
+        );
+    }
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(map_team_member(TeamMember {
+            team_id,
+            user_id: auth.user_id,
+            role: "member".to_string(),
+            created_at: chrono::Utc::now(),
+        })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AddTeamMemberByInviteQuery {
+    token: Option<String>,
+    invite_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamInviteTokenRow {
+    team_id: Uuid,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -342,6 +486,16 @@ async fn add_team_members_batch(
         .bind("member")
         .execute(&state.db)
         .await?;
+        if let Err(err) =
+            apply_default_channel_membership_for_team_join(&state, team_id, user_id).await
+        {
+            tracing::warn!(
+                team_id = %team_id,
+                user_id = %user_id,
+                error = %err,
+                "Default channel auto-join failed after v4 add_team_members_batch"
+            );
+        }
         members.push(map_team_member(TeamMember {
             team_id,
             user_id,
@@ -438,12 +592,27 @@ async fn get_team_stats(
 }
 
 async fn regenerate_team_invite_id(
+    State(state): State<AppState>,
     _auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
+    let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(serde_json::json!({"invite_id": ""})))
+
+    let invite_id: String = sqlx::query_scalar(
+        r#"
+        UPDATE teams
+        SET invite_id = replace(gen_random_uuid()::text, '-', '')
+        WHERE id = $1
+        RETURNING invite_id
+        "#,
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+    Ok(Json(serde_json::json!({"invite_id": invite_id})))
 }
 
 #[derive(Deserialize)]
@@ -740,9 +909,10 @@ async fn import_team(
 async fn get_team_by_invite(
     State(state): State<AppState>,
     _auth: MmAuthUser,
-    Path(_invite_id): Path<String>,
+    Path(invite_id): Path<String>,
 ) -> ApiResult<Json<mm::Team>> {
-    let team: Team = sqlx::query_as("SELECT * FROM teams ORDER BY created_at ASC LIMIT 1")
+    let team: Team = sqlx::query_as("SELECT * FROM teams WHERE invite_id = $1")
+        .bind(invite_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
@@ -959,21 +1129,300 @@ async fn autocomplete_team_commands(
 }
 
 async fn get_team_groups(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
-    Query(_query): Query<serde_json::Value>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(vec![]))
+    Query(query): Query<GroupAssociationQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let team_id = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        ensure_team_member(&state, team_id, auth.user_id).await?;
+    }
+
+    let search_term = query.q.clone().unwrap_or_default().to_ascii_lowercase();
+    let filter_allow_reference = should_filter_allow_reference(&auth, &query);
+    let (paginate, offset, per_page) = pagination_from_group_query(&query);
+
+    let rows: Vec<TeamGroupRow> = sqlx::query_as(
+        r#"
+        SELECT
+            g.id,
+            g.name,
+            g.display_name,
+            g.description,
+            g.source,
+            g.remote_id,
+            g.allow_reference,
+            g.created_at,
+            g.updated_at,
+            g.deleted_at,
+            gs.scheme_admin,
+            EXISTS(
+                SELECT 1
+                FROM group_syncables gs2
+                WHERE gs2.group_id = g.id
+                  AND gs2.delete_at IS NULL
+            ) AS has_syncables,
+            (
+                SELECT COUNT(*)
+                FROM group_members gm
+                WHERE gm.group_id = g.id
+            ) AS member_count
+        FROM groups g
+        JOIN group_syncables gs
+          ON gs.group_id = g.id
+         AND gs.syncable_type = 'team'
+         AND gs.syncable_id = $1
+         AND gs.delete_at IS NULL
+        WHERE g.deleted_at IS NULL
+          AND ($2 = FALSE OR g.allow_reference = TRUE)
+          AND (
+                $3 = ''
+                OR LOWER(COALESCE(g.name, '')) LIKE $4
+                OR LOWER(g.display_name) LIKE $4
+          )
+        ORDER BY g.display_name ASC
+        "#,
+    )
+    .bind(team_id)
+    .bind(filter_allow_reference)
+    .bind(&search_term)
+    .bind(format!("%{}%", search_term))
+    .fetch_all(&state.db)
+    .await?;
+
+    let total_group_count = rows.len();
+    let paged_rows = if paginate {
+        rows.into_iter()
+            .skip(offset)
+            .take(per_page)
+            .collect::<Vec<_>>()
+    } else {
+        rows
+    };
+
+    Ok(Json(serde_json::json!({
+        "groups": paged_rows.iter().map(team_group_json).collect::<Vec<_>>(),
+        "total_group_count": total_group_count
+    })))
 }
 
 async fn get_team_groups_by_channels(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
-    Query(_query): Query<serde_json::Value>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(vec![]))
+    Query(query): Query<GroupAssociationQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let team_id = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        ensure_team_member(&state, team_id, auth.user_id).await?;
+    }
+
+    let search_term = query.q.clone().unwrap_or_default().to_ascii_lowercase();
+    let filter_allow_reference = should_filter_allow_reference(&auth, &query);
+    let (paginate, offset, per_page) = pagination_from_group_query(&query);
+
+    let rows: Vec<ChannelGroupByTeamRow> = sqlx::query_as(
+        r#"
+        SELECT
+            c.id AS channel_id,
+            g.id AS group_id,
+            g.name,
+            g.display_name,
+            g.description,
+            g.source,
+            g.remote_id,
+            g.allow_reference,
+            g.created_at,
+            g.updated_at,
+            g.deleted_at,
+            gs.scheme_admin,
+            EXISTS(
+                SELECT 1
+                FROM group_syncables gs2
+                WHERE gs2.group_id = g.id
+                  AND gs2.delete_at IS NULL
+            ) AS has_syncables,
+            (
+                SELECT COUNT(*)
+                FROM group_members gm
+                WHERE gm.group_id = g.id
+            ) AS member_count
+        FROM channels c
+        JOIN group_syncables gs
+          ON gs.syncable_type = 'channel'
+         AND gs.syncable_id = c.id
+         AND gs.delete_at IS NULL
+        JOIN groups g ON g.id = gs.group_id
+        WHERE c.team_id = $1
+          AND g.deleted_at IS NULL
+          AND ($2 = FALSE OR g.allow_reference = TRUE)
+          AND (
+                $3 = ''
+                OR LOWER(COALESCE(g.name, '')) LIKE $4
+                OR LOWER(g.display_name) LIKE $4
+          )
+        ORDER BY c.id, g.display_name ASC
+        "#,
+    )
+    .bind(team_id)
+    .bind(filter_allow_reference)
+    .bind(&search_term)
+    .bind(format!("%{}%", search_term))
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut grouped: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for row in rows {
+        grouped
+            .entry(encode_mm_id(row.channel_id))
+            .or_default()
+            .push(team_group_json_from_parts(
+                row.group_id,
+                row.name,
+                row.display_name,
+                row.description,
+                row.source,
+                row.remote_id,
+                row.allow_reference,
+                row.created_at,
+                row.updated_at,
+                row.deleted_at,
+                row.has_syncables,
+                row.member_count,
+                row.scheme_admin,
+            ));
+    }
+
+    if paginate {
+        for groups in grouped.values_mut() {
+            let paged = groups
+                .iter()
+                .skip(offset)
+                .take(per_page)
+                .cloned()
+                .collect::<Vec<_>>();
+            *groups = paged;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "groups": grouped
+    })))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GroupAssociationQuery {
+    q: Option<String>,
+    include_member_count: Option<bool>,
+    filter_allow_reference: Option<bool>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+    paginate: Option<bool>,
+}
+
+fn should_filter_allow_reference(auth: &MmAuthUser, query: &GroupAssociationQuery) -> bool {
+    let has_system_group_read = auth.has_permission(&permissions::SYSTEM_MANAGE)
+        || auth.has_permission(&permissions::ADMIN_FULL);
+
+    query.filter_allow_reference.unwrap_or(false) || !has_system_group_read
+}
+
+fn pagination_from_group_query(query: &GroupAssociationQuery) -> (bool, usize, usize) {
+    let _ = query.include_member_count.unwrap_or(false);
+    let paginate = query.paginate.unwrap_or(true);
+    let page = query.page.unwrap_or(0).max(0) as usize;
+    let per_page = query.per_page.unwrap_or(60).clamp(1, 200) as usize;
+    let offset = page.saturating_mul(per_page);
+    (paginate, offset, per_page)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct TeamGroupRow {
+    id: Uuid,
+    name: Option<String>,
+    display_name: String,
+    description: String,
+    source: String,
+    remote_id: Option<String>,
+    allow_reference: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    scheme_admin: bool,
+    has_syncables: bool,
+    member_count: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ChannelGroupByTeamRow {
+    channel_id: Uuid,
+    group_id: Uuid,
+    name: Option<String>,
+    display_name: String,
+    description: String,
+    source: String,
+    remote_id: Option<String>,
+    allow_reference: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    scheme_admin: bool,
+    has_syncables: bool,
+    member_count: i64,
+}
+
+fn team_group_json(row: &TeamGroupRow) -> serde_json::Value {
+    team_group_json_from_parts(
+        row.id,
+        row.name.clone(),
+        row.display_name.clone(),
+        row.description.clone(),
+        row.source.clone(),
+        row.remote_id.clone(),
+        row.allow_reference,
+        row.created_at,
+        row.updated_at,
+        row.deleted_at,
+        row.has_syncables,
+        row.member_count,
+        row.scheme_admin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn team_group_json_from_parts(
+    id: Uuid,
+    name: Option<String>,
+    display_name: String,
+    description: String,
+    source: String,
+    remote_id: Option<String>,
+    allow_reference: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    has_syncables: bool,
+    member_count: i64,
+    scheme_admin: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": encode_mm_id(id),
+        "name": name,
+        "display_name": display_name,
+        "description": description,
+        "source": source,
+        "remote_id": remote_id,
+        "allow_reference": allow_reference,
+        "create_at": created_at.timestamp_millis(),
+        "update_at": updated_at.timestamp_millis(),
+        "delete_at": deleted_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+        "has_syncables": has_syncables,
+        "member_count": member_count,
+        "scheme_admin": scheme_admin,
+    })
 }

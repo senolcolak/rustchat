@@ -6,7 +6,7 @@ import type { PresenceStatus } from '../core/entities/User'
 import { useUnreadStore } from '../stores/unreads'
 import { useChannelStore } from '../stores/channels'
 import { useToast } from './useToast'
-import { postsApi, type Post } from '../api/posts'
+import { postsApi, type ChannelUnreadAt, type Post } from '../api/posts'
 import type { Channel } from '../api/channels'
 import { normalizeEntityId, normalizeIdsDeep } from '../utils/idCompat'
 
@@ -283,10 +283,11 @@ export function useWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
         const host = window.location.host
         // Align with Mattermost mobile websocket endpoint semantics.
-        const url = `${protocol}//${host}/api/v4/websocket?token=${authStore.token}`
+        const url = `${protocol}//${host}/api/v4/websocket`
 
         try {
-            // Pass token in protocols array as a fallback for browsers like Brave
+            // Browsers can't set Authorization headers for WebSocket handshakes.
+            // Pass bearer token via Sec-WebSocket-Protocol.
             const socket = new WebSocket(url, [authStore.token])
             ws.value = socket
 
@@ -506,6 +507,14 @@ export function useWebSocket() {
             case 'unread_counts_updated': {
                 if (envelope.data) {
                     unreadStore.handleUnreadUpdate(envelope.data)
+                }
+                break
+            }
+
+            case 'post_unread': {
+                if (envelope.data) {
+                    const payload = normalizeIdsDeep(envelope.data) as ChannelUnreadAt
+                    unreadStore.applyPostUnread(payload)
                 }
                 break
             }

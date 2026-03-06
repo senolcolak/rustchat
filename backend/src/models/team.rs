@@ -13,6 +13,7 @@ pub struct Team {
     pub name: String,
     pub display_name: Option<String>,
     pub description: Option<String>,
+    pub invite_id: String,
     #[serde(default)]
     pub is_public: bool,
     #[serde(default)]

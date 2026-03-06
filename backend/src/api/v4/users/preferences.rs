@@ -30,6 +30,23 @@ pub(super) async fn get_preferences_for_user(
     fetch_preferences(&state, user_id).await
 }
 
+pub(super) async fn get_my_preferences_by_category(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(category): Path<String>,
+) -> ApiResult<Json<Vec<mm::Preference>>> {
+    let rows = sqlx::query(
+        "SELECT user_id, category, name, value FROM mattermost_preferences WHERE user_id = $1 AND category = $2",
+    )
+    .bind(auth.user_id)
+    .bind(&category)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Ok(Json(map_preference_rows(rows)))
+}
+
 pub(super) async fn get_preferences_by_category(
     State(state): State<AppState>,
     auth: MmAuthUser,

@@ -1,6 +1,8 @@
 //! Telemetry module for rustchat
 //!
-//! Provides structured logging and tracing setup.
+//! Provides structured logging, tracing, and metrics setup.
+
+pub mod metrics;
 
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},

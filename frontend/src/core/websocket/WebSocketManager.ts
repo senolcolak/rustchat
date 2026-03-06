@@ -44,10 +44,9 @@ class WebSocketManager {
 
     this.state.value = 'connecting'
 
-    const wsUrl = new URL(url)
-    wsUrl.searchParams.set('token', token)
-
-    this.ws = new WebSocket(wsUrl.toString())
+    // Use websocket subprotocol for auth token transport.
+    // Query-token transport is rejected by the backend.
+    this.ws = new WebSocket(url, [token])
 
     this.ws.onopen = () => {
       this.state.value = 'open'

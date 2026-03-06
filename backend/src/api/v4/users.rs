@@ -2,44 +2,57 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue},
+    middleware,
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
 };
-use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
 use crate::api::AppState;
-use crate::auth::{create_token, hash_password, verify_password};
+use crate::auth::policy::permissions;
+use crate::auth::{create_token_with_policy, hash_password, verify_password};
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
     models as mm,
 };
-use crate::models::{channel::Channel, channel::ChannelMember, Team, TeamMember, User};
+use crate::middleware::rate_limit::{self, RateLimitConfig};
+use crate::models::{channel::Channel, Team, TeamMember, User};
+use crate::services::oauth_token_exchange::{exchange_code_with_sso_verification, ExchangeError};
 
 mod preferences;
 mod sidebar_categories;
 
 use preferences::{
-    delete_preferences_for_user, get_preference_by_category_and_name, get_preferences,
-    get_preferences_by_category, get_preferences_for_user, update_preferences,
-    update_preferences_for_user,
+    delete_preferences_for_user, get_my_preferences_by_category,
+    get_preference_by_category_and_name, get_preferences, get_preferences_by_category,
+    get_preferences_for_user, update_preferences, update_preferences_for_user,
 };
 use sidebar_categories::{
     create_category, get_categories, get_my_categories, update_categories, update_category_order,
 };
 pub(crate) use sidebar_categories::{
-    create_category_internal, get_categories_internal, resolve_user_id, update_categories_internal,
-    update_category_order_internal, CreateCategoryRequest, UpdateCategoriesRequest,
+    create_category_internal, get_categories_internal, get_category_order_internal,
+    resolve_user_id, update_categories_internal, update_category_order_internal,
+    CreateCategoryRequest, UpdateCategoriesPayload,
 };
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
+    let login_routes =
+        Router::new()
+            .route("/users/login", post(login))
+            .layer(middleware::from_fn_with_state(
+                state,
+                crate::middleware::rate_limit::auth_ip_rate_limit,
+            ));
+
     Router::new()
-        .route("/users/login", post(login))
+        .merge(login_routes)
         .route("/users/login/type", post(login_type))
         .route("/users/login/cws", post(login_cws))
         .route(
@@ -89,6 +102,10 @@ pub fn router() -> Router<AppState> {
             get(get_preferences).put(update_preferences),
         )
         .route(
+            "/users/me/preferences/{category}",
+            get(get_my_preferences_by_category),
+        )
+        .route(
             "/users/{user_id}/preferences",
             get(get_preferences_for_user).put(update_preferences_for_user),
         )
@@ -104,13 +121,7 @@ pub fn router() -> Router<AppState> {
             "/users/{user_id}/preferences/{category}/name/{preference_name}",
             get(get_preference_by_category_and_name),
         )
-        .route("/users/status/ids", post(get_statuses_by_ids))
         .route("/users/ids", post(get_users_by_ids))
-        .route(
-            "/users/{user_id}/status",
-            get(get_status).put(update_status),
-        )
-        .route("/users/me/status", get(get_my_status).put(update_status))
         .route(
             "/users/{user_id}/channels/{channel_id}/typing",
             post(user_typing),
@@ -200,18 +211,6 @@ pub fn router() -> Router<AppState> {
             post(reset_failed_attempts),
         )
         .route(
-            "/users/{user_id}/status/custom",
-            put(update_custom_status).delete(clear_custom_status),
-        )
-        .route(
-            "/users/{user_id}/status/custom/recent",
-            get(get_recent_custom_status),
-        )
-        .route(
-            "/users/{user_id}/status/custom/recent/delete",
-            post(delete_recent_custom_status),
-        )
-        .route(
             "/users/{user_id}/sidebar/categories",
             get(get_categories)
                 .post(create_category)
@@ -290,7 +289,7 @@ async fn login(
         .ok_or_else(|| AppError::BadRequest("Missing login_id".to_string()))?;
 
     let user: Option<User> = sqlx::query_as(
-        "SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = true",
+        "SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = true AND deleted_at IS NULL",
     )
     .bind(&login_id)
     .fetch_optional(&state.db)
@@ -299,7 +298,31 @@ async fn login(
     let user =
         user.ok_or_else(|| AppError::Unauthorized("Invalid login credentials".to_string()))?;
 
-    if !verify_password(&input.password, &user.password_hash)? {
+    enforce_password_login_allowed(&state, &user.email).await?;
+
+    if state.config.security.rate_limit_enabled {
+        let config =
+            RateLimitConfig::auth_per_minute(state.config.security.rate_limit_auth_per_minute);
+        let user_key = format!("user:{}", user.id);
+        let user_result = rate_limit::check_rate_limit(&state.redis, &config, &user_key).await?;
+        if !user_result.allowed {
+            tracing::warn!(
+                user_id = %user.id,
+                "Rate limit exceeded for v4 user login"
+            );
+            return Err(AppError::TooManyRequests(
+                "Too many login attempts. Please try again later.".to_string(),
+            ));
+        }
+    }
+
+    // Verify password (OAuth users without password cannot login with password)
+    let password_hash = user
+        .password_hash
+        .as_deref()
+        .ok_or_else(|| AppError::Unauthorized("Please use SSO to login".to_string()))?;
+
+    if !verify_password(&input.password, password_hash)? {
         return Err(AppError::Unauthorized(
             "Invalid login credentials".to_string(),
         ));
@@ -312,12 +335,14 @@ async fn login(
         .await?;
 
     // Generate token
-    let token = create_token(
+    let token = create_token_with_policy(
         user.id,
         &user.email,
         &user.role,
         user.org_id,
         &state.jwt_secret,
+        state.jwt_issuer.as_deref(),
+        state.jwt_audience.as_deref(),
         state.jwt_expiry_hours,
     )?;
 
@@ -334,8 +359,14 @@ async fn login(
     headers.insert(
         axum::http::header::SET_COOKIE,
         HeaderValue::from_str(&format!(
-            "MMAUTHTOKEN={}; Path=/; Max-Age={}; HttpOnly",
-            token, max_age
+            "MMAUTHTOKEN={}; Path=/; Max-Age={}; HttpOnly{}; SameSite=Lax",
+            token,
+            max_age,
+            if state.config.is_production() {
+                "; Secure"
+            } else {
+                ""
+            }
         ))
         .unwrap(),
     );
@@ -360,14 +391,94 @@ async fn login_cws(headers: HeaderMap, body: Bytes) -> ApiResult<Json<serde_json
 }
 
 async fn login_sso_code_exchange(
+    State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _input: LoginSsoCodeExchangeRequest = parse_request_body(&headers, &body)?;
+    if !state.config.compatibility.mobile_sso_code_exchange {
+        return Err(AppError::BadRequest(
+            "Mobile SSO code exchange is disabled".to_string(),
+        ));
+    }
 
-    Err(AppError::BadRequest(
-        "SSO code exchange is not supported".to_string(),
-    ))
+    let input: LoginSsoCodeExchangeRequest = parse_request_body(&headers, &body)?;
+    let code = input
+        .login_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Missing login_code".to_string()))?;
+    let code_verifier = input
+        .code_verifier
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Missing code_verifier".to_string()))?;
+    let exchange_state = input
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Missing state".to_string()))?;
+
+    let payload = match exchange_code_with_sso_verification(
+        &state.redis,
+        code,
+        code_verifier,
+        exchange_state,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(ExchangeError::InvalidCode) => {
+            return Err(AppError::BadRequest(
+                "Invalid or already used exchange code".to_string(),
+            ));
+        }
+        Err(ExchangeError::CodeExpired) => {
+            return Err(AppError::BadRequest(
+                "Exchange code has expired".to_string(),
+            ));
+        }
+        Err(ExchangeError::SsoVerificationRequired) => {
+            return Err(AppError::BadRequest(
+                "Exchange code is missing SSO verification metadata".to_string(),
+            ));
+        }
+        Err(ExchangeError::StateMismatch) => {
+            return Err(AppError::BadRequest("SSO state mismatch".to_string()));
+        }
+        Err(ExchangeError::ChallengeMismatch) => {
+            return Err(AppError::BadRequest("SSO challenge mismatch".to_string()));
+        }
+        Err(ExchangeError::UnsupportedChallengeMethod) => {
+            return Err(AppError::BadRequest(
+                "Unsupported SSO challenge method".to_string(),
+            ));
+        }
+        Err(ExchangeError::Internal(msg)) => {
+            tracing::error!("v4 SSO code exchange failed: {}", msg);
+            return Err(AppError::Internal(
+                "Failed to process exchange code".to_string(),
+            ));
+        }
+    };
+
+    let token = create_token_with_policy(
+        payload.user_id,
+        &payload.email,
+        &payload.role,
+        payload.org_id,
+        &state.jwt_secret,
+        state.jwt_issuer.as_deref(),
+        state.jwt_audience.as_deref(),
+        state.jwt_expiry_hours,
+    )?;
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "csrf": ""
+    })))
 }
 
 async fn login_switch(headers: HeaderMap, body: Bytes) -> ApiResult<Json<serde_json::Value>> {
@@ -399,6 +510,26 @@ fn parse_request_body<T: DeserializeOwned>(headers: &HeaderMap, body: &Bytes) ->
             .or_else(|_| serde_urlencoded::from_bytes(body))
             .map_err(|_| AppError::BadRequest("Unsupported request body".to_string()))
     }
+}
+
+async fn enforce_password_login_allowed(state: &AppState, user_email: &str) -> ApiResult<()> {
+    let auth_config = crate::services::auth_config::get_password_rules(&state.db).await?;
+    if !auth_config.require_sso {
+        return Ok(());
+    }
+
+    let email_lc = user_email.trim().to_ascii_lowercase();
+    let allowed = auth_config
+        .sso_break_glass_emails
+        .iter()
+        .any(|email| email.trim().eq_ignore_ascii_case(&email_lc));
+    if allowed {
+        return Ok(());
+    }
+
+    Err(AppError::BadRequest(
+        "Password login is disabled because SSO is required".to_string(),
+    ))
 }
 
 async fn me(State(state): State<AppState>, auth: MmAuthUser) -> ApiResult<Json<mm::User>> {
@@ -596,13 +727,41 @@ async fn hydrate_direct_channel_display_name(
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct MyTeamChannelsQuery {
+    #[serde(default)]
+    last_delete_at: i64,
+    #[serde(default)]
+    include_deleted: bool,
+}
+
+/// Resolves a team identifier to a UUID.
+/// First tries to parse as UUID/mm-id, then falls back to looking up by team name.
+async fn resolve_team_id(state: &AppState, team_id_str: &str) -> ApiResult<Uuid> {
+    // First try to parse as UUID or Mattermost ID
+    if let Some(team_id) = parse_mm_or_uuid(team_id_str) {
+        return Ok(team_id);
+    }
+
+    // Fall back to looking up by team name
+    let team: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM teams WHERE name = $1")
+        .bind(team_id_str)
+        .fetch_optional(&state.db)
+        .await?;
+
+    match team {
+        Some((id,)) => Ok(id),
+        None => Err(AppError::NotFound("Team not found".to_string())),
+    }
+}
+
 async fn my_team_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
     Path(team_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<MyTeamChannelsQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
 
     tracing::debug!(
         user_id = %auth.user_id,
@@ -610,17 +769,53 @@ async fn my_team_channels(
         "Fetching channels for user"
     );
 
-    let mut channels: Vec<Channel> = sqlx::query_as(
-        r#"
-        SELECT c.* FROM channels c
-        JOIN channel_members cm ON c.id = cm.channel_id
-        WHERE c.team_id = $1 AND cm.user_id = $2
-        "#,
-    )
-    .bind(team_id)
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+    // Determine the filter condition for deleted channels based on query parameters:
+    // 1. If include_deleted is true: return all channels (including deleted ones)
+    // 2. If last_delete_at > 0: return non-deleted channels AND channels deleted since last_delete_at
+    //    This allows mobile clients to sync deleted channels for cache invalidation
+    // 3. Default: only return non-deleted channels
+    let mut channels: Vec<Channel> = if query.include_deleted {
+        // Return all channels including deleted ones
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE c.team_id = $1 AND cm.user_id = $2
+            "#,
+        )
+        .bind(team_id)
+        .bind(auth.user_id)
+        .fetch_all(&state.db)
+        .await?
+    } else if query.last_delete_at > 0 {
+        let ts = chrono::DateTime::from_timestamp_millis(query.last_delete_at).unwrap_or_default();
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE c.team_id = $1 AND cm.user_id = $2
+              AND (c.deleted_at IS NULL OR c.deleted_at >= $3)
+            "#,
+        )
+        .bind(team_id)
+        .bind(auth.user_id)
+        .bind(ts)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        // Default: only return non-deleted channels
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE c.team_id = $1 AND cm.user_id = $2 AND c.deleted_at IS NULL
+            "#,
+        )
+        .bind(team_id)
+        .bind(auth.user_id)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     tracing::debug!(
         user_id = %auth.user_id,
@@ -643,8 +838,7 @@ async fn get_team_channels_for_user(
     Path((user_id, team_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let user_id = resolve_user_id(&user_id, &auth)?;
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
     let mut channels: Vec<Channel> = sqlx::query_as(
         r#"
         SELECT c.* FROM channels c
@@ -665,20 +859,42 @@ async fn get_team_channels_for_user(
     Ok(Json(mm_channels))
 }
 
+#[derive(Deserialize)]
+struct MyChannelsQuery {
+    #[serde(default)]
+    since: i64,
+}
+
 async fn my_channels(
     State(state): State<AppState>,
     auth: MmAuthUser,
+    axum::extract::Query(query): axum::extract::Query<MyChannelsQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let mut channels: Vec<Channel> = sqlx::query_as(
-        r#"
-        SELECT c.* FROM channels c
-        JOIN channel_members cm ON c.id = cm.channel_id
-        WHERE cm.user_id = $1
-        "#,
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+    let mut channels: Vec<Channel> = if query.since > 0 {
+        let ts = chrono::DateTime::from_timestamp_millis(query.since).unwrap_or_default();
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE cm.user_id = $1 AND c.updated_at >= $2
+            "#,
+        )
+        .bind(auth.user_id)
+        .bind(ts)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON c.id = cm.channel_id
+            WHERE cm.user_id = $1
+            "#,
+        )
+        .bind(auth.user_id)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     for channel in &mut channels {
         hydrate_direct_channel_display_name(&state, auth.user_id, channel).await?;
@@ -718,14 +934,132 @@ async fn my_team_channel_members(
     auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    let members: Vec<ChannelMember> = sqlx::query_as(
+    #[derive(sqlx::FromRow)]
+    struct UserChannelMemberCompatRow {
+        channel_id: Uuid,
+        user_id: Uuid,
+        role: String,
+        notify_props: serde_json::Value,
+        last_viewed_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_update_at: chrono::DateTime<chrono::Utc>,
+        msg_count: i64,
+        mention_count: i64,
+        mention_count_root: i64,
+        urgent_mention_count: i64,
+        msg_count_root: i64,
+    }
+
+    fn map_user_channel_member_row(
+        row: UserChannelMemberCompatRow,
+        post_priority_enabled: bool,
+    ) -> mm::ChannelMember {
+        let scheme_admin =
+            row.role == "admin" || row.role == "team_admin" || row.role == "channel_admin";
+
+        mm::ChannelMember {
+            channel_id: encode_mm_id(row.channel_id),
+            user_id: encode_mm_id(row.user_id),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&row.role),
+            last_viewed_at: row
+                .last_viewed_at
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0),
+            msg_count: row.msg_count,
+            mention_count: row.mention_count,
+            mention_count_root: row.mention_count_root,
+            urgent_mention_count: if post_priority_enabled {
+                row.urgent_mention_count
+            } else {
+                0
+            },
+            msg_count_root: row.msg_count_root,
+            notify_props: normalize_notify_props(row.notify_props),
+            last_update_at: row.last_update_at.timestamp_millis(),
+            scheme_guest: false,
+            scheme_user: true,
+            scheme_admin,
+        }
+    }
+
+    let team_id = resolve_team_id(&state, &team_id).await?;
+    let rows: Vec<UserChannelMemberCompatRow> = sqlx::query_as(
         r#"
-        SELECT cm.*, c.name as username, c.display_name, NULL as avatar_url, NULL as presence
+        SELECT
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+            GREATEST(
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND p.root_post_id IS NULL
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            GREATEST(
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                )
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count_root
         FROM channel_members cm
         JOIN channels c ON cm.channel_id = c.id
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN channel_reads cr
+               ON cr.channel_id = cm.channel_id
+              AND cr.user_id = cm.user_id
+        LEFT JOIN posts p
+               ON p.channel_id = cm.channel_id
         WHERE c.team_id = $1 AND cm.user_id = $2
+        GROUP BY
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            cm.last_update_at,
+            cm.created_at,
+            u.username,
+            cr.last_read_message_id
+        ORDER BY cm.channel_id
         "#,
     )
     .bind(team_id)
@@ -733,21 +1067,9 @@ async fn my_team_channel_members(
     .fetch_all(&state.db)
     .await?;
 
-    let mm_members = members
+    let mm_members = rows
         .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
-            scheme_guest: false,
-            scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
-        })
+        .map(|row| map_user_channel_member_row(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))
@@ -765,8 +1087,7 @@ async fn my_team_channels_not_members(
     Path(team_id): Path<String>,
     Query(query): Query<NotMembersQuery>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
 
     let page = query.page.unwrap_or(0).max(0);
     let per_page = query.per_page.unwrap_or(60).clamp(1, 200);
@@ -799,34 +1120,293 @@ async fn my_team_channels_not_members(
 }
 
 async fn my_teams_unread(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Query(query): Query<TeamsUnreadQuery>,
+) -> ApiResult<Json<Vec<mm::TeamUnread>>> {
+    let exclude_team = parse_optional_team_query(&query.exclude_team)?;
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+    let unread = compute_team_unreads(
+        &state,
+        auth.user_id,
+        exclude_team,
+        None,
+        include_collapsed_threads,
+    )
+    .await?;
+    Ok(Json(unread))
 }
 
 async fn get_user_teams_unread(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
-    Path(_user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(vec![]))
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(user_id): Path<String>,
+    Query(query): Query<TeamsUnreadQuery>,
+) -> ApiResult<Json<Vec<mm::TeamUnread>>> {
+    let user_id = resolve_user_id(&user_id, &auth)?;
+    let exclude_team = parse_optional_team_query(&query.exclude_team)?;
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+    let unread = compute_team_unreads(
+        &state,
+        user_id,
+        exclude_team,
+        None,
+        include_collapsed_threads,
+    )
+    .await?;
+    Ok(Json(unread))
 }
 
 async fn get_user_team_unread(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path((user_id, team_id)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _user_id = parse_mm_or_uuid(&user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
-    let team_id = parse_mm_or_uuid(&team_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(serde_json::json!({
-        "team_id": encode_mm_id(team_id),
-        "msg_count": 0,
-        "mention_count": 0,
-    })))
+    Query(query): Query<TeamUnreadQuery>,
+) -> ApiResult<Json<mm::TeamUnread>> {
+    let user_id = resolve_user_id(&user_id, &auth)?;
+    let team_id = resolve_team_id(&state, &team_id).await?;
+    let include_collapsed_threads = query.include_collapsed_threads.unwrap_or(false);
+
+    let mut unread = compute_team_unreads(
+        &state,
+        user_id,
+        None,
+        Some(team_id),
+        include_collapsed_threads,
+    )
+    .await?;
+
+    let fallback = mm::TeamUnread {
+        team_id: encode_mm_id(team_id),
+        msg_count: 0,
+        mention_count: 0,
+        mention_count_root: 0,
+        msg_count_root: 0,
+        thread_count: 0,
+        thread_mention_count: 0,
+        thread_urgent_mention_count: 0,
+    };
+
+    Ok(Json(unread.pop().unwrap_or(fallback)))
+}
+
+#[derive(Deserialize, Default)]
+struct TeamsUnreadQuery {
+    #[serde(default)]
+    exclude_team: Option<String>,
+    #[serde(default)]
+    include_collapsed_threads: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct TeamUnreadQuery {
+    #[serde(default)]
+    include_collapsed_threads: Option<bool>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamUnreadChannelRow {
+    team_id: Uuid,
+    notify_props: serde_json::Value,
+    msg_count: i64,
+    mention_count: i64,
+    msg_count_root: i64,
+    mention_count_root: i64,
+    urgent_mention_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamUnreadThreadRow {
+    team_id: Uuid,
+    thread_count: i64,
+    thread_mention_count: i64,
+    thread_urgent_mention_count: i64,
+}
+
+fn parse_optional_team_query(exclude_team: &Option<String>) -> ApiResult<Option<Uuid>> {
+    let Some(raw_team) = exclude_team else {
+        return Ok(None);
+    };
+
+    if raw_team.is_empty() {
+        return Ok(None);
+    }
+
+    parse_mm_or_uuid(raw_team)
+        .ok_or_else(|| AppError::BadRequest("Invalid exclude_team".to_string()))
+        .map(Some)
+}
+
+async fn compute_team_unreads(
+    state: &AppState,
+    user_id: Uuid,
+    exclude_team: Option<Uuid>,
+    only_team: Option<Uuid>,
+    include_collapsed_threads: bool,
+) -> ApiResult<Vec<mm::TeamUnread>> {
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let mut rows: Vec<TeamUnreadChannelRow> = sqlx::query_as(
+        r#"
+        SELECT
+            c.team_id,
+            cm.notify_props,
+            COALESCE(un.msg_count, 0) AS msg_count,
+            COALESCE(un.mention_count, 0) AS mention_count,
+            COALESCE(un.msg_count_root, 0) AS msg_count_root,
+            COALESCE(un.mention_count_root, 0) AS mention_count_root,
+            COALESCE(un.urgent_mention_count, 0) AS urgent_mention_count
+        FROM channel_members cm
+        JOIN channels c ON c.id = cm.channel_id
+        LEFT JOIN channel_reads cr
+            ON cr.channel_id = cm.channel_id
+           AND cr.user_id = cm.user_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL AND p.seq > COALESCE(cr.last_read_message_id, 0)) AS msg_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                ) AS mention_count,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                ) AS msg_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND p.root_post_id IS NULL
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                ) AS mention_count_root,
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                      AND (p.message LIKE '%@' || $2 || '%' OR p.message LIKE '%@all%' OR p.message LIKE '%@channel%')
+                      AND p.message LIKE '%@here%'
+                ) AS urgent_mention_count
+            FROM posts p
+            WHERE p.channel_id = cm.channel_id
+        ) un ON TRUE
+        WHERE cm.user_id = $1
+          AND ($3::UUID IS NULL OR c.team_id <> $3)
+          AND ($4::UUID IS NULL OR c.team_id = $4)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&username)
+    .bind(exclude_team)
+    .bind(only_team)
+    .fetch_all(&state.db)
+    .await?;
+
+    if !state.config.unread.post_priority_enabled {
+        for row in &mut rows {
+            row.urgent_mention_count = 0;
+        }
+    }
+
+    let mut aggregated: HashMap<Uuid, mm::TeamUnread> = HashMap::new();
+    for row in rows {
+        let team_entry = aggregated
+            .entry(row.team_id)
+            .or_insert_with(|| mm::TeamUnread {
+                team_id: encode_mm_id(row.team_id),
+                msg_count: 0,
+                mention_count: 0,
+                mention_count_root: 0,
+                msg_count_root: 0,
+                thread_count: 0,
+                thread_mention_count: 0,
+                thread_urgent_mention_count: 0,
+            });
+
+        let mark_unread = row
+            .notify_props
+            .get("mark_unread")
+            .and_then(|value| value.as_str())
+            .unwrap_or("all");
+        if mark_unread != "mention" {
+            team_entry.msg_count += row.msg_count;
+            team_entry.msg_count_root += row.msg_count_root;
+        }
+
+        team_entry.mention_count += row.mention_count;
+        team_entry.mention_count_root += row.mention_count_root;
+    }
+
+    if include_collapsed_threads && state.config.unread.collapsed_threads_enabled {
+        let thread_rows: Vec<TeamUnreadThreadRow> = sqlx::query_as(
+            r#"
+            SELECT
+                c.team_id,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(tm.unread_replies_count, 0) > 0
+                       OR COALESCE(tm.mention_count, 0) > 0
+                )::BIGINT AS thread_count,
+                COALESCE(SUM(tm.mention_count), 0)::BIGINT AS thread_mention_count,
+                COALESCE(SUM((
+                    SELECT COUNT(*)::BIGINT
+                    FROM posts rp
+                    WHERE rp.root_post_id = tm.post_id
+                      AND rp.deleted_at IS NULL
+                      AND (tm.last_read_at IS NULL OR rp.created_at > tm.last_read_at)
+                      AND (
+                          rp.message LIKE '%@' || $4 || '%'
+                          OR rp.message LIKE '%@all%'
+                          OR rp.message LIKE '%@channel%'
+                      )
+                      AND rp.message LIKE '%@here%'
+                )), 0)::BIGINT AS thread_urgent_mention_count
+            FROM thread_memberships tm
+            JOIN posts p ON p.id = tm.post_id
+            JOIN channels c ON c.id = p.channel_id
+            WHERE tm.user_id = $1
+              AND tm.following = true
+              AND p.root_post_id IS NULL
+              AND p.deleted_at IS NULL
+              AND ($2::UUID IS NULL OR c.team_id <> $2)
+              AND ($3::UUID IS NULL OR c.team_id = $3)
+            GROUP BY c.team_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(exclude_team)
+        .bind(only_team)
+        .bind(&username)
+        .fetch_all(&state.db)
+        .await?;
+
+        for thread_row in thread_rows {
+            let entry = aggregated
+                .entry(thread_row.team_id)
+                .or_insert_with(|| mm::TeamUnread {
+                    team_id: encode_mm_id(thread_row.team_id),
+                    msg_count: 0,
+                    mention_count: 0,
+                    mention_count_root: 0,
+                    msg_count_root: 0,
+                    thread_count: 0,
+                    thread_mention_count: 0,
+                    thread_urgent_mention_count: 0,
+                });
+            entry.thread_count = thread_row.thread_count;
+            entry.thread_mention_count = thread_row.thread_mention_count;
+            entry.thread_urgent_mention_count = if state.config.unread.post_priority_enabled {
+                thread_row.thread_urgent_mention_count
+            } else {
+                0
+            };
+        }
+    }
+
+    let mut values: Vec<mm::TeamUnread> = aggregated.into_values().collect();
+    values.sort_by(|a, b| a.team_id.cmp(&b.team_id));
+    Ok(values)
 }
 
 fn normalize_notify_props(value: serde_json::Value) -> serde_json::Value {
@@ -848,6 +1428,7 @@ struct AttachDeviceRequest {
     device_id: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     platform: Option<String>,
     // Fields sent by mobile app but not used
@@ -940,10 +1521,12 @@ async fn attach_device(
             has_token = resolved_token.is_some(),
             token_preview = %resolved_token.as_deref().map(|token| &token[..20.min(token.len())]).unwrap_or(""),
             platform = %platform,
+            device_notification_disabled = ?input.device_notification_disabled,
+            mobile_version = ?input.mobile_version,
             "Extracted token from device_id"
         );
 
-        let _ = sqlx::query(
+        match sqlx::query(
             r#"
             INSERT INTO user_devices (user_id, device_id, token, platform)
             VALUES ($1, $2, $3, $4)
@@ -956,7 +1539,27 @@ async fn attach_device(
         .bind(resolved_token.as_deref())
         .bind(&platform)
         .execute(&state.db)
-        .await;
+        .await
+        {
+            Ok(result) => {
+                info!(
+                    user_id = %auth.user_id,
+                    device_id = %device_id_stored,
+                    rows_affected = result.rows_affected(),
+                    "attach_device stored device registration"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    user_id = %auth.user_id,
+                    device_id = %device_id_stored,
+                    platform = %platform,
+                    has_token = resolved_token.is_some(),
+                    error = %e,
+                    "attach_device failed to store device registration"
+                );
+            }
+        }
     }
 
     Ok(Json(serde_json::json!({"status": "OK"})))
@@ -964,7 +1567,8 @@ async fn attach_device(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_device_token;
+    use super::{parse_timezone_for_update, resolve_device_token};
+    use serde_json::json;
 
     #[test]
     fn resolve_device_token_uses_request_token_when_parsed_token_missing() {
@@ -980,6 +1584,44 @@ mod tests {
             resolve_device_token("parsed-token", Some("request-token")),
             Some("parsed-token".to_string())
         );
+    }
+
+    #[test]
+    fn parse_timezone_prefers_automatic_when_enabled() {
+        let timezone = json!({
+            "useAutomaticTimezone": "true",
+            "automaticTimezone": "America/New_York",
+            "manualTimezone": "Europe/Berlin"
+        });
+
+        assert_eq!(
+            parse_timezone_for_update(Some(&timezone)),
+            Some("America/New_York".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_timezone_uses_manual_when_automatic_disabled() {
+        let timezone = json!({
+            "useAutomaticTimezone": false,
+            "automaticTimezone": "America/New_York",
+            "manualTimezone": "Europe/Berlin"
+        });
+
+        assert_eq!(
+            parse_timezone_for_update(Some(&timezone)),
+            Some("Europe/Berlin".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_timezone_returns_none_for_empty_value() {
+        let timezone = json!({
+            "useAutomaticTimezone": "true",
+            "automaticTimezone": ""
+        });
+
+        assert_eq!(parse_timezone_for_update(Some(&timezone)), None);
     }
 }
 
@@ -1086,8 +1728,7 @@ async fn autocomplete_users(
         .fetch_all(&state.db)
         .await?
     } else if let Some(team_id) = query.in_team {
-        let team_id = parse_mm_or_uuid(&team_id)
-            .ok_or_else(|| AppError::BadRequest("Invalid in_team".to_string()))?;
+        let team_id = resolve_team_id(&state, &team_id).await?;
 
         let is_member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
@@ -1190,8 +1831,7 @@ async fn search_users(
         .fetch_all(&state.db)
         .await?
     } else if let Some(team_id) = input.team_id {
-        let team_id = parse_mm_or_uuid(&team_id)
-            .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+        let team_id = resolve_team_id(&state, &team_id).await?;
 
         let is_member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
@@ -1236,42 +1876,6 @@ async fn search_users(
     Ok(Json(mm_users))
 }
 
-async fn get_statuses_by_ids(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<Vec<mm::Status>>> {
-    let ids: Vec<String> = parse_body(&headers, &body, "Invalid status ids body")?;
-    let uuids: Vec<Uuid> = ids.iter().filter_map(|id| parse_mm_or_uuid(id)).collect();
-
-    if uuids.is_empty() {
-        return Ok(Json(vec![]));
-    }
-
-    let users: Vec<(Uuid, String, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT id, presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = ANY($1)",
-    )
-            .bind(&uuids)
-            .fetch_all(&state.db)
-            .await?;
-
-    let statuses = users
-        .into_iter()
-        .map(|(id, presence, manual, last_login)| mm::Status {
-            user_id: encode_mm_id(id),
-            status: if presence.is_empty() {
-                "offline".to_string()
-            } else {
-                presence
-            },
-            manual,
-            last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-        })
-        .collect();
-
-    Ok(Json(statuses))
-}
-
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum UsersByIdsRequest {
@@ -1298,11 +1902,12 @@ async fn get_users_by_ids(
         return Ok(Json(vec![]));
     }
 
-    let users: Vec<User> =
-        sqlx::query_as("SELECT * FROM users WHERE id = ANY($1) AND is_active = true")
-            .bind(&uuids)
-            .fetch_all(&state.db)
-            .await?;
+    let users: Vec<User> = sqlx::query_as(
+        "SELECT * FROM users WHERE id = ANY($1) AND (is_active = true OR deleted_at IS NOT NULL)",
+    )
+    .bind(&uuids)
+    .fetch_all(&state.db)
+    .await?;
 
     let mm_users: Vec<mm::User> = users.into_iter().map(|u| u.into()).collect();
     Ok(Json(mm_users))
@@ -1329,60 +1934,6 @@ fn parse_body<T: DeserializeOwned>(
     }
 }
 
-async fn get_status(
-    State(state): State<AppState>,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<mm::Status>> {
-    let user_id = parse_mm_or_uuid(&user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    Ok(Json(mm::Status {
-        user_id: encode_mm_id(user_id),
-        status: if presence.is_empty() {
-            "offline".to_string()
-        } else {
-            presence
-        },
-        manual,
-        last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-    }))
-}
-
-async fn get_my_status(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-) -> ApiResult<Json<mm::Status>> {
-    let (presence, manual, last_login): (String, bool, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT presence, COALESCE(presence_manual, false), last_login_at FROM users WHERE id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    Ok(Json(mm::Status {
-        user_id: encode_mm_id(auth.user_id),
-        status: if presence.is_empty() {
-            "offline".to_string()
-        } else {
-            presence
-        },
-        manual,
-        last_activity_at: last_login.map(|t| t.timestamp_millis()).unwrap_or(0),
-    }))
-}
-
-#[derive(Deserialize)]
-struct UpdateStatusRequest {
-    user_id: String,
-    status: String,
-}
-
 #[derive(Deserialize)]
 struct PatchMeRequest {
     nickname: Option<String>,
@@ -1390,42 +1941,35 @@ struct PatchMeRequest {
     last_name: Option<String>,
     position: Option<String>,
     #[serde(default)]
+    timezone: Option<serde_json::Value>,
+    #[serde(default)]
     notify_props: Option<serde_json::Value>,
 }
 
-async fn update_status(
-    State(state): State<AppState>,
-    auth: MmAuthUser,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<mm::Status>> {
-    let input: UpdateStatusRequest = parse_body(&headers, &body, "Invalid status update request")?;
+fn parse_timezone_for_update(timezone: Option<&serde_json::Value>) -> Option<String> {
+    let timezone = timezone?;
+    let obj = timezone.as_object()?;
 
-    let input_user_id = parse_mm_or_uuid(&input.user_id)
-        .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
-    if input_user_id != auth.user_id {
-        return Err(AppError::Forbidden(
-            "Cannot update other user's status".to_string(),
-        ));
-    }
+    let use_automatic = obj
+        .get("useAutomaticTimezone")
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_str().map(|raw| raw.eq_ignore_ascii_case("true")))
+        })
+        .unwrap_or(true);
 
-    let manual = crate::api::websocket_core::status_is_manual(&input.status);
-    crate::api::websocket_core::persist_presence_and_broadcast(
-        &state,
-        auth.user_id,
-        &input.status,
-        manual,
-    )
-    .await;
-
-    let status = mm::Status {
-        user_id: encode_mm_id(auth.user_id),
-        status: input.status.clone(),
-        manual,
-        last_activity_at: Utc::now().timestamp_millis(),
+    let selected = if use_automatic {
+        obj.get("automaticTimezone")
+    } else {
+        obj.get("manualTimezone")
     };
 
-    Ok(Json(status))
+    selected
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn patch_me(
@@ -1435,6 +1979,7 @@ async fn patch_me(
     body: Bytes,
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
+    let timezone = parse_timezone_for_update(input.timezone.as_ref());
 
     // Update any provided fields
     sqlx::query(
@@ -1445,8 +1990,9 @@ async fn patch_me(
             nickname = COALESCE($3, nickname),
             position = COALESCE($4, position),
             notify_props = COALESCE($5, notify_props),
+            timezone = COALESCE($6, timezone),
             updated_at = NOW()
-        WHERE id = $6
+        WHERE id = $7
         "#,
     )
     .bind(&input.first_name)
@@ -1454,6 +2000,7 @@ async fn patch_me(
     .bind(&input.nickname)
     .bind(&input.position)
     .bind(input.notify_props.as_ref())
+    .bind(timezone.as_deref())
     .bind(auth.user_id)
     .execute(&state.db)
     .await?;
@@ -1914,6 +2461,7 @@ async fn patch_user(
 ) -> ApiResult<Json<mm::User>> {
     let input: PatchMeRequest = parse_body(&headers, &body, "Invalid patch body")?;
     let user_id = resolve_user_id(&user_id, &auth)?;
+    let timezone = parse_timezone_for_update(input.timezone.as_ref());
 
     // Update user profile fields
     sqlx::query(
@@ -1923,14 +2471,16 @@ async fn patch_user(
             last_name = COALESCE($3, last_name),
             position = COALESCE($4, position),
             notify_props = COALESCE($5, notify_props),
+            timezone = COALESCE($6, timezone),
             updated_at = NOW()
-        WHERE id = $6"#,
+        WHERE id = $7"#,
     )
     .bind(input.nickname)
     .bind(input.first_name)
     .bind(input.last_name)
     .bind(input.position)
     .bind(input.notify_props)
+    .bind(timezone.as_deref())
     .bind(user_id)
     .execute(&state.db)
     .await?;
@@ -1953,7 +2503,7 @@ async fn update_user_roles(
     Path(user_id): Path<String>,
     Json(input): Json<UserRolesRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -1986,7 +2536,7 @@ async fn update_user_active(
 ) -> ApiResult<Json<serde_json::Value>> {
     let user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?;
-    if user_id != auth.user_id && auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.can_access_owned(user_id, &permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
@@ -2060,7 +2610,7 @@ async fn demote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2077,7 +2627,7 @@ async fn promote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2094,7 +2644,7 @@ async fn convert_user_to_bot(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if auth.role != "system_admin" && auth.role != "org_admin" {
+    if !auth.has_permission(&permissions::USER_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2131,7 +2681,11 @@ async fn update_user_password(
     }
 
     if let Some(current) = input.current_password.as_deref() {
-        if !verify_password(current, &user.password_hash)? {
+        let password_hash = user
+            .password_hash
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("No existing password to change".to_string()))?;
+        if !verify_password(current, password_hash)? {
             return Err(AppError::BadRequest("Invalid current password".to_string()));
         }
     }
@@ -2185,15 +2739,70 @@ async fn get_user_audits(
     Ok(Json(vec![]))
 }
 
+#[derive(Debug, Deserialize)]
+struct VerifyEmailRequest {
+    token: String,
+}
+
 async fn verify_member_email() -> ApiResult<Json<serde_json::Value>> {
     Ok(status_ok())
 }
 
-async fn verify_email() -> ApiResult<Json<serde_json::Value>> {
+async fn verify_email(
+    State(state): State<AppState>,
+    Json(input): Json<VerifyEmailRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::services::email_verification::verify_token(&state.db, &input.token, "registration")
+        .await?;
+
     Ok(status_ok())
 }
 
-async fn send_email_verification() -> ApiResult<Json<serde_json::Value>> {
+#[derive(Debug, Deserialize)]
+struct SendVerificationRequest {
+    email: String,
+}
+
+async fn send_email_verification(
+    State(state): State<AppState>,
+    Json(input): Json<SendVerificationRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Find user by email
+    let user: Option<User> = sqlx::query_as(
+        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(&input.email)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if let Some(user) = user {
+        if !user.email_verified {
+            // Fetch site_url from server_config
+            let site_url: Option<String> = sqlx::query_scalar(
+                "SELECT site->>'site_url' FROM server_config WHERE id = 'default'",
+            )
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|url: String| if url.is_empty() { None } else { Some(url) });
+
+            if let Some(site_url) = site_url {
+                let verification_base_url = format!("{}/verify-email", site_url);
+                // Send but ignore errors to prevent email enumeration
+                let _ = crate::services::email_verification::send_verification_email(
+                    &state.db,
+                    user.id,
+                    &user.username,
+                    &user.email,
+                    &verification_base_url,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Always return success to prevent email enumeration
     Ok(status_ok())
 }
 
@@ -2276,28 +2885,140 @@ async fn get_user_channel_members(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::ChannelMember>>> {
-    let user_id = resolve_user_id(&user_id, &auth)?;
-    let members: Vec<ChannelMember> =
-        sqlx::query_as("SELECT * FROM channel_members WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(&state.db)
-            .await?;
+    #[derive(sqlx::FromRow)]
+    struct UserChannelMemberCompatRow {
+        channel_id: Uuid,
+        user_id: Uuid,
+        role: String,
+        notify_props: serde_json::Value,
+        last_viewed_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_update_at: chrono::DateTime<chrono::Utc>,
+        msg_count: i64,
+        mention_count: i64,
+        mention_count_root: i64,
+        urgent_mention_count: i64,
+        msg_count_root: i64,
+    }
 
-    let mm_members = members
-        .into_iter()
-        .map(|m| mm::ChannelMember {
-            channel_id: encode_mm_id(m.channel_id),
-            user_id: encode_mm_id(m.user_id),
-            roles: crate::mattermost_compat::mappers::map_channel_role(&m.role),
-            last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
-            notify_props: normalize_notify_props(m.notify_props),
-            last_update_at: 0,
+    fn map_user_channel_member_row(
+        row: UserChannelMemberCompatRow,
+        post_priority_enabled: bool,
+    ) -> mm::ChannelMember {
+        let scheme_admin =
+            row.role == "admin" || row.role == "team_admin" || row.role == "channel_admin";
+
+        mm::ChannelMember {
+            channel_id: encode_mm_id(row.channel_id),
+            user_id: encode_mm_id(row.user_id),
+            roles: crate::mattermost_compat::mappers::map_channel_role(&row.role),
+            last_viewed_at: row
+                .last_viewed_at
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0),
+            msg_count: row.msg_count,
+            mention_count: row.mention_count,
+            mention_count_root: row.mention_count_root,
+            urgent_mention_count: if post_priority_enabled {
+                row.urgent_mention_count
+            } else {
+                0
+            },
+            msg_count_root: row.msg_count_root,
+            notify_props: normalize_notify_props(row.notify_props),
+            last_update_at: row.last_update_at.timestamp_millis(),
             scheme_guest: false,
             scheme_user: true,
-            scheme_admin: m.role == "admin" || m.role == "team_admin" || m.role == "channel_admin",
-        })
+            scheme_admin,
+        }
+    }
+
+    let user_id = resolve_user_id(&user_id, &auth)?;
+    let rows: Vec<UserChannelMemberCompatRow> = sqlx::query_as(
+        r#"
+        SELECT
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            COALESCE(cm.last_update_at, cm.created_at) AS last_update_at,
+            GREATEST(
+                COUNT(*) FILTER (WHERE p.deleted_at IS NULL)
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND p.root_post_id IS NULL
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+            )::BIGINT AS mention_count_root,
+            COUNT(*) FILTER (
+                WHERE p.deleted_at IS NULL
+                  AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                  AND (
+                      p.message LIKE '%@' || u.username || '%'
+                      OR p.message LIKE '%@all%'
+                      OR p.message LIKE '%@channel%'
+                  )
+                  AND p.message LIKE '%@here%'
+            )::BIGINT AS urgent_mention_count,
+            GREATEST(
+                COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                )
+                - COUNT(*) FILTER (
+                    WHERE p.deleted_at IS NULL
+                      AND p.root_post_id IS NULL
+                      AND p.seq > COALESCE(cr.last_read_message_id, 0)
+                ),
+                0
+            )::BIGINT AS msg_count_root
+        FROM channel_members cm
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN channel_reads cr
+               ON cr.channel_id = cm.channel_id
+              AND cr.user_id = cm.user_id
+        LEFT JOIN posts p
+               ON p.channel_id = cm.channel_id
+        WHERE cm.user_id = $1
+        GROUP BY
+            cm.channel_id,
+            cm.user_id,
+            cm.role,
+            cm.notify_props,
+            cm.last_viewed_at,
+            cm.last_update_at,
+            cm.created_at,
+            u.username,
+            cr.last_read_message_id
+        ORDER BY cm.channel_id
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mm_members = rows
+        .into_iter()
+        .map(|row| map_user_channel_member_row(row, state.config.unread.post_priority_enabled))
         .collect();
 
     Ok(Json(mm_members))
@@ -2325,44 +3046,6 @@ async fn reset_failed_attempts(
     Ok(status_ok())
 }
 
-async fn update_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid custom status")?;
-    Ok(status_ok())
-}
-
-async fn clear_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    Ok(status_ok())
-}
-
-async fn get_recent_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    Ok(Json(vec![]))
-}
-
-async fn delete_recent_custom_status(
-    auth: MmAuthUser,
-    Path(user_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _ = resolve_user_id(&user_id, &auth)?;
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid custom status")?;
-    Ok(status_ok())
-}
-
 /// GET /api/v4/users/{user_id}/oauth/apps/authorized
 async fn get_authorized_oauth_apps(
     State(_state): State<AppState>,
@@ -2373,15 +3056,112 @@ async fn get_authorized_oauth_apps(
 }
 
 async fn get_user_groups(
-    State(_state): State<AppState>,
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(user_id): Path<String>,
+    Query(query): Query<GroupAssociationQuery>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _user_uuid = if user_id == "me" {
-        uuid::Uuid::new_v4()
+    let user_uuid = if user_id == "me" {
+        auth.user_id
     } else {
         parse_mm_or_uuid(&user_id)
             .ok_or_else(|| AppError::BadRequest("Invalid user_id".to_string()))?
     };
-    Ok(Json(vec![]))
+
+    if user_uuid != auth.user_id && !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to view other user's groups".to_string(),
+        ));
+    }
+
+    let has_system_group_read = auth.has_permission(&permissions::SYSTEM_MANAGE)
+        || auth.has_permission(&permissions::ADMIN_FULL);
+    let filter_allow_reference =
+        query.filter_allow_reference.unwrap_or(false) || !has_system_group_read;
+    let search_term = query.q.unwrap_or_default().to_ascii_lowercase();
+
+    let rows: Vec<UserGroupRow> = sqlx::query_as(
+        r#"
+        SELECT
+            g.id,
+            g.name,
+            g.display_name,
+            g.description,
+            g.source,
+            g.remote_id,
+            g.allow_reference,
+            g.created_at,
+            g.updated_at,
+            g.deleted_at,
+            EXISTS(
+                SELECT 1
+                FROM group_syncables gs
+                WHERE gs.group_id = g.id
+                  AND gs.delete_at IS NULL
+            ) AS has_syncables,
+            (
+                SELECT COUNT(*)
+                FROM group_members gm2
+                WHERE gm2.group_id = g.id
+            ) AS member_count
+        FROM groups g
+        JOIN group_members gm ON gm.group_id = g.id
+        WHERE gm.user_id = $1
+          AND g.deleted_at IS NULL
+          AND ($2 = FALSE OR g.allow_reference = TRUE)
+          AND (
+                $3 = ''
+                OR LOWER(COALESCE(g.name, '')) LIKE $4
+                OR LOWER(g.display_name) LIKE $4
+          )
+        ORDER BY g.display_name ASC
+        "#,
+    )
+    .bind(user_uuid)
+    .bind(filter_allow_reference)
+    .bind(&search_term)
+    .bind(format!("%{}%", search_term))
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.iter().map(user_group_json).collect()))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GroupAssociationQuery {
+    q: Option<String>,
+    filter_allow_reference: Option<bool>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct UserGroupRow {
+    id: Uuid,
+    name: Option<String>,
+    display_name: String,
+    description: String,
+    source: String,
+    remote_id: Option<String>,
+    allow_reference: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    has_syncables: bool,
+    member_count: i64,
+}
+
+fn user_group_json(row: &UserGroupRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": encode_mm_id(row.id),
+        "name": row.name,
+        "display_name": row.display_name,
+        "description": row.description,
+        "source": row.source,
+        "remote_id": row.remote_id,
+        "allow_reference": row.allow_reference,
+        "create_at": row.created_at.timestamp_millis(),
+        "update_at": row.updated_at.timestamp_millis(),
+        "delete_at": row.deleted_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+        "has_syncables": row.has_syncables,
+        "member_count": row.member_count,
+    })
 }

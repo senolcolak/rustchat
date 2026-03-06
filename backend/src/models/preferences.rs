@@ -45,6 +45,33 @@ pub struct UserPreferences {
     // Keywords
     pub mention_keywords: Option<Vec<String>>,
 
+    // Display settings (S7)
+    pub collapsed_reply_threads: Option<bool>,
+    pub use_military_time: Option<bool>,
+    pub teammate_name_display: Option<String>,
+    pub availability_status_visible: Option<bool>,
+    pub show_last_active_time: Option<bool>,
+    pub timezone: Option<String>,
+    pub link_previews_enabled: Option<bool>,
+    pub image_previews_enabled: Option<bool>,
+    pub click_to_reply: Option<bool>,
+    pub channel_display_mode: Option<String>,
+    pub quick_reactions_enabled: Option<bool>,
+    pub emoji_picker_enabled: Option<bool>,
+    pub language: Option<String>,
+
+    // Sidebar settings (S6)
+    pub group_unread_channels: Option<String>,
+    pub limit_visible_dms_gms: Option<String>,
+
+    // Advanced settings (S5)
+    pub send_on_ctrl_enter: Option<bool>,
+    pub enable_post_formatting: Option<bool>,
+    pub enable_join_leave_messages: Option<bool>,
+    pub enable_performance_debugging: Option<bool>,
+    pub unread_scroll_position: Option<String>,
+    pub sync_drafts: Option<bool>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -81,6 +108,33 @@ pub struct UpdatePreferences {
 
     // Keywords
     pub mention_keywords: Option<Vec<String>>,
+
+    // Display settings (S7)
+    pub collapsed_reply_threads: Option<bool>,
+    pub use_military_time: Option<bool>,
+    pub teammate_name_display: Option<String>,
+    pub availability_status_visible: Option<bool>,
+    pub show_last_active_time: Option<bool>,
+    pub timezone: Option<String>,
+    pub link_previews_enabled: Option<bool>,
+    pub image_previews_enabled: Option<bool>,
+    pub click_to_reply: Option<bool>,
+    pub channel_display_mode: Option<String>,
+    pub quick_reactions_enabled: Option<bool>,
+    pub emoji_picker_enabled: Option<bool>,
+    pub language: Option<String>,
+
+    // Sidebar settings (S6)
+    pub group_unread_channels: Option<String>,
+    pub limit_visible_dms_gms: Option<String>,
+
+    // Advanced settings (S5)
+    pub send_on_ctrl_enter: Option<bool>,
+    pub enable_post_formatting: Option<bool>,
+    pub enable_join_leave_messages: Option<bool>,
+    pub enable_performance_debugging: Option<bool>,
+    pub unread_scroll_position: Option<String>,
+    pub sync_drafts: Option<bool>,
 }
 
 /// Status preset

@@ -320,14 +320,10 @@ export const useMessageStore = defineStore('messages', () => {
         const channelStore = useChannelStore()
         const authStore = useAuthStore()
 
-        // Increment unread count if not current channel
+        // Unread message counts are authoritative from websocket unread events.
+        // Keep only local mention hinting for now.
         if (channelStore.currentChannelId !== message.channelId) {
             const unreadStore = useUnreadStore()
-            unreadStore.handleUnreadUpdate({
-                channel_id: message.channelId,
-                team_id: channelStore.channels.find(c => c.id === message.channelId)?.team_id || '',
-                unread_count: (unreadStore.channelUnreads[message.channelId] || 0) + 1
-            })
 
             // Check for mention
             const currentUser = authStore.user

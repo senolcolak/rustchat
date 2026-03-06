@@ -16,6 +16,6 @@ RUN cargo build --release --bin push-proxy
 # We use debian:bookworm-slim for the runtime image
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 wget && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/push-proxy /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/push-proxy"]

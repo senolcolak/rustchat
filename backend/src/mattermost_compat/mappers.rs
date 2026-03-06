@@ -19,16 +19,43 @@ fn post_type_from_props(props: &serde_json::Value) -> String {
 
 impl From<User> for mm::User {
     fn from(user: User) -> Self {
+        let is_deleted = user.deleted_at.is_some();
+        let tz = user
+            .timezone
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("UTC");
+
         mm::User {
             id: encode_mm_id(user.id),
             create_at: user.created_at.timestamp_millis(),
             update_at: user.updated_at.timestamp_millis(),
-            delete_at: 0,
-            username: user.username,
-            first_name: user.first_name.unwrap_or_default(),
-            last_name: user.last_name.unwrap_or_default(),
-            nickname: user.nickname.or(user.display_name).unwrap_or_default(),
-            email: user.email,
+            delete_at: user.deleted_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+            username: if is_deleted {
+                "Deleted user".to_string()
+            } else {
+                user.username
+            },
+            first_name: if is_deleted {
+                String::new()
+            } else {
+                user.first_name.unwrap_or_default()
+            },
+            last_name: if is_deleted {
+                String::new()
+            } else {
+                user.last_name.unwrap_or_default()
+            },
+            nickname: if is_deleted {
+                "Deleted user".to_string()
+            } else {
+                user.nickname.or(user.display_name).unwrap_or_default()
+            },
+            email: if is_deleted {
+                "deleted-user@local".to_string()
+            } else {
+                user.email
+            },
             email_verified: true,
             auth_service: "".to_string(),
             roles: map_system_role(&user.role),
@@ -39,7 +66,11 @@ impl From<User> for mm::User {
             last_picture_update: 0,
             failed_attempts: 0,
             mfa_active: false,
-            timezone: json!({ "automaticTimezone": "UTC", "manualTimezone": "UTC", "useAutomaticTimezone": "true" }),
+            timezone: json!({
+                "automaticTimezone": tz,
+                "manualTimezone": tz,
+                "useAutomaticTimezone": "true"
+            }),
         }
     }
 }
@@ -83,7 +114,7 @@ impl From<Team> for mm::Team {
             },
             company_name: "".to_string(),
             allowed_domains: "".to_string(),
-            invite_id: "".to_string(),
+            invite_id: team.invite_id,
             allow_open_invite: team.allow_open_invite,
         }
     }
@@ -256,10 +287,13 @@ impl From<ChannelMember> for mm::ChannelMember {
             user_id: encode_mm_id(m.user_id),
             roles: map_channel_role(&m.role),
             last_viewed_at: m.last_viewed_at.map(|t| t.timestamp_millis()).unwrap_or(0),
-            msg_count: 0,
-            mention_count: 0,
+            msg_count: m.msg_count,
+            mention_count: m.mention_count,
+            mention_count_root: m.mention_count_root,
+            urgent_mention_count: m.urgent_mention_count,
+            msg_count_root: m.msg_count_root,
             notify_props: m.notify_props.clone(),
-            last_update_at: m.created_at.timestamp_millis(),
+            last_update_at: m.last_update_at.unwrap_or(m.created_at).timestamp_millis(),
             scheme_guest: false,
             scheme_user: true,
             scheme_admin: m.role == "admin" || m.role == "channel_admin",
@@ -312,7 +346,7 @@ mod tests {
             org_id: None,
             username: "testuser".to_string(),
             email: "test@example.com".to_string(),
-            password_hash: "hash".to_string(),
+            password_hash: Some("hash".to_string()),
             display_name: Some("Test User".to_string()),
             avatar_url: None,
             first_name: Some("Test".to_string()),
@@ -328,7 +362,13 @@ mod tests {
             status_expires_at: None,
             custom_status: None,
             notify_props: serde_json::json!({}),
+            timezone: Some("UTC".to_string()),
             last_login_at: None,
+            email_verified: true,
+            email_verified_at: Some(now),
+            deleted_at: None,
+            deleted_by: None,
+            delete_reason: None,
             created_at: now,
             updated_at: now,
         };

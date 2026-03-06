@@ -111,6 +111,35 @@ export const useAdminStore = defineStore('admin', () => {
         }
     }
 
+    async function deleteUser(id: string, data: { confirm: string; reason?: string }) {
+        try {
+            const response = await adminApi.deleteUser(id, data);
+            const user = users.value.find(u => u.id === id);
+            if (user) {
+                user.is_active = false;
+                user.deleted_at = new Date().toISOString();
+                user.delete_reason = data.reason ?? null;
+            }
+            return response.data;
+        } catch (e: any) {
+            error.value = e.response?.data?.error?.message || e.response?.data?.message || 'Failed to delete user';
+            throw e;
+        }
+    }
+
+    async function wipeUser(id: string) {
+        try {
+            const response = await adminApi.wipeUser(id);
+            // Remove user from the list after successful wipe
+            users.value = users.value.filter(u => u.id !== id);
+            usersTotal.value--;
+            return response.data;
+        } catch (e: any) {
+            error.value = e.response?.data?.error?.message || e.response?.data?.message || 'Failed to wipe user';
+            throw e;
+        }
+    }
+
     async function fetchAuditLogs(params?: Parameters<typeof adminApi.listAuditLogs>[0]) {
         loading.value = true;
         try {
@@ -160,6 +189,8 @@ export const useAdminStore = defineStore('admin', () => {
         updateUser,
         deactivateUser,
         reactivateUser,
+        deleteUser,
+        wipeUser,
         fetchAuditLogs,
         fetchStats,
         fetchHealth,

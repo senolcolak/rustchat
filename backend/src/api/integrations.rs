@@ -10,15 +10,18 @@ use uuid::Uuid;
 
 use super::AppState;
 use crate::api::v4::calls_plugin::state::{CallState, Participant};
+use crate::auth::policy::permissions;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::id::encode_mm_id;
+use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 use crate::models::{
     Bot, BotToken, CommandResponse, CreateBot, CreateIncomingWebhook, CreateOutgoingWebhook,
     CreateSlashCommand, ExecuteCommand, IncomingWebhook, OutgoingWebhook, OutgoingWebhookPayload,
     SlashCommand, WebhookPayload,
 };
 use chrono::Utc;
+use std::time::Duration;
 
 /// Generate a secure random token
 fn generate_token() -> String {
@@ -160,7 +163,7 @@ async fn delete_incoming_webhook(
         .await?
         .ok_or_else(|| AppError::NotFound("Webhook not found".to_string()))?;
 
-    if webhook.creator_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(webhook.creator_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Cannot delete this webhook".to_string(),
         ));
@@ -283,7 +286,7 @@ async fn delete_outgoing_webhook(
         .await?
         .ok_or_else(|| AppError::NotFound("Webhook not found".to_string()))?;
 
-    if webhook.creator_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(webhook.creator_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Cannot delete this webhook".to_string(),
         ));
@@ -374,7 +377,7 @@ async fn delete_slash_command(
         .await?
         .ok_or_else(|| AppError::NotFound("Command not found".to_string()))?;
 
-    if command.creator_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(command.creator_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden(
             "Cannot delete this command".to_string(),
         ));
@@ -1035,12 +1038,25 @@ pub async fn execute_command_internal(
             trigger_word: trigger.to_string(),
         };
 
-        let res = client
-            .post(&cmd.url)
-            .json(&payload_out)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Command execution failed: {}", e)))?;
+        let retry_config = RetryConfig {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(150),
+            max_delay: Duration::from_secs(2),
+            backoff_multiplier: 2.0,
+            retry_if: RetryCondition::Default,
+        };
+
+        let res = send_reqwest_with_retry(
+            client.post(&cmd.url).json(&payload_out),
+            &retry_config,
+            |e| AppError::Internal(format!("Command execution failed: {}", e)),
+            || {
+                AppError::Internal(
+                    "Command execution failed: request could not be cloned for retry".to_string(),
+                )
+            },
+        )
+        .await?;
 
         if res.status().is_success() {
             let resp_body: CommandResponse =
@@ -1080,7 +1096,7 @@ pub async fn execute_command_internal(
 // ============ Bots ============
 
 async fn list_bots(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<Bot>>> {
-    let bots: Vec<Bot> = if auth.role == "system_admin" {
+    let bots: Vec<Bot> = if auth.has_permission(&permissions::ADMIN_FULL) {
         sqlx::query_as("SELECT * FROM bots ORDER BY created_at DESC")
             .fetch_all(&state.db)
             .await?
@@ -1160,7 +1176,7 @@ async fn delete_bot(
         .await?
         .ok_or_else(|| AppError::NotFound("Bot not found".to_string()))?;
 
-    if bot.owner_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(bot.owner_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot delete this bot".to_string()));
     }
 
@@ -1183,7 +1199,7 @@ async fn list_bot_tokens(
         .await?
         .ok_or_else(|| AppError::NotFound("Bot not found".to_string()))?;
 
-    if bot.owner_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(bot.owner_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot access this bot".to_string()));
     }
 
@@ -1213,7 +1229,7 @@ async fn create_bot_token(
         .await?
         .ok_or_else(|| AppError::NotFound("Bot not found".to_string()))?;
 
-    if bot.owner_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(bot.owner_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot access this bot".to_string()));
     }
 
@@ -1246,7 +1262,7 @@ async fn revoke_bot_token(
         .await?
         .ok_or_else(|| AppError::NotFound("Bot not found".to_string()))?;
 
-    if bot.owner_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(bot.owner_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot access this bot".to_string()));
     }
 

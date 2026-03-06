@@ -396,6 +396,16 @@ async fn send_fcm_push(
                 }),
             ))
         }
+        Err(fcm::FcmError::Api(ref s)) if s.contains("SENDER_ID_MISMATCH") => {
+            warn!("FCM token Sender ID mismatch - token was registered with a different Firebase project");
+            Err((
+                StatusCode::GONE,
+                Json(PushResponse {
+                    success: false,
+                    message: "Token Sender ID mismatch - token needs to be refreshed".to_string(),
+                }),
+            ))
+        }
         Err(fcm::FcmError::Api(ref s)) if s.contains("INVALID_ARGUMENT") => {
             warn!("FCM token is invalid");
             Err((

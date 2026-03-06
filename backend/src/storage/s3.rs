@@ -143,6 +143,16 @@ impl S3Client {
         }
     }
 
+    /// Lightweight readiness probe for S3 dependency.
+    pub async fn health_check(&self) -> bool {
+        self.client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .is_ok()
+    }
+
     /// Download a file from S3
     pub async fn download(&self, key: &str) -> Result<Vec<u8>, AppError> {
         self.download_optional(key).await?.ok_or_else(|| {

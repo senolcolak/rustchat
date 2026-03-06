@@ -11,7 +11,7 @@ use tracing::info;
 use uuid::Uuid;
 use webrtc::ice::udp_mux::{UDPMux, UDPMuxDefault, UDPMuxParams};
 
-use super::{VoiceEvent, SFU};
+use super::{VoiceEvent, SFU, VOICE_EVENT_CHANNEL_CAPACITY};
 use crate::config::CallsConfig;
 use tokio::sync::mpsc;
 
@@ -22,17 +22,14 @@ pub struct SFUManager {
     /// Calls configuration
     config: CallsConfig,
     /// Voice events channel
-    voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
+    voice_event_tx: mpsc::Sender<VoiceEvent>,
     /// Shared UDP mux for ICE (single UDP port across all SFUs).
     shared_udp_mux: Arc<RwLock<Option<Arc<dyn UDPMux + Send + Sync>>>>,
 }
 
 impl SFUManager {
     /// Create a new SFU manager
-    pub fn new(
-        config: CallsConfig,
-        voice_event_tx: mpsc::UnboundedSender<VoiceEvent>,
-    ) -> Arc<Self> {
+    pub fn new(config: CallsConfig, voice_event_tx: mpsc::Sender<VoiceEvent>) -> Arc<Self> {
         Arc::new(Self {
             sfus: Arc::new(RwLock::new(HashMap::new())),
             config,
@@ -150,7 +147,7 @@ impl SFUManager {
 
 impl Default for SFUManager {
     fn default() -> Self {
-        let (tx, _) = mpsc::unbounded_channel();
+        let (tx, _) = mpsc::channel(VOICE_EVENT_CHANNEL_CAPACITY);
         // Create with empty config - this is mainly for testing
         Self {
             sfus: Arc::new(RwLock::new(HashMap::new())),

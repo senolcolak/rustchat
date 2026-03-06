@@ -6,18 +6,45 @@ export interface ServerConfig {
     authentication: AuthConfig;
     integrations: IntegrationsConfig;
     compliance: ComplianceConfig;
-    email: EmailConfig;
-    experimental: Record<string, boolean>;
+    experimental: Record<string, unknown>;
 }
 
-export interface EmailConfig {
-    smtp_host: string;
-    smtp_port: number;
-    smtp_username: string;
-    smtp_password_encrypted: string;
-    smtp_tls: boolean;
+// Email Provider (new provider-based system)
+export interface MailProvider {
+    id: string;
+    provider_type: 'smtp' | 'ses' | 'sendgrid';
+    host: string;
+    port: number;
+    username: string;
+    has_password: boolean;
+    tls_mode: 'starttls' | 'implicit_tls' | 'none';
+    skip_cert_verify: boolean;
     from_address: string;
     from_name: string;
+    reply_to: string | null;
+    max_emails_per_minute: number;
+    max_emails_per_hour: number;
+    enabled: boolean;
+    is_default: boolean;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface CreateMailProviderRequest {
+    provider_type: string;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    tls_mode: string;
+    skip_cert_verify?: boolean;
+    from_address: string;
+    from_name: string;
+    reply_to?: string;
+    max_emails_per_minute?: number;
+    max_emails_per_hour?: number;
+    enabled?: boolean;
+    is_default?: boolean;
 }
 
 export interface SiteConfig {
@@ -99,6 +126,9 @@ export interface AdminUser {
     is_active: boolean;
     is_bot: boolean;
     last_login_at: string | null;
+    deleted_at?: string | null;
+    deleted_by?: string | null;
+    delete_reason?: string | null;
     created_at: string;
 }
 
@@ -162,16 +192,6 @@ export interface HealthStatus {
     uptime_seconds: number;
 }
 
-// MiroTalk Configuration
-export interface MiroTalkConfig {
-    is_active: boolean;
-    mode: 'sfu' | 'p2p' | 'disabled';
-    base_url: string;
-    api_key_secret: string;
-    default_room_prefix: string;
-    join_behavior: 'new_tab' | 'embed_iframe';
-}
-
 // Calls Plugin Configuration
 export interface CallsPluginConfig {
     enabled: boolean;
@@ -197,6 +217,88 @@ export interface Permission {
     category: string | null;
 }
 
+// SSO Configuration
+export interface SsoConfig {
+    id: string;
+    org_id: string;
+    provider_key: string;
+    provider_type: 'github' | 'google' | 'oidc' | 'saml';
+    display_name: string | null;
+    issuer_url: string | null;
+    client_id: string | null;
+    scopes: string[];
+    is_active: boolean;
+    auto_provision: boolean;
+    default_role: string | null;
+    allow_domains: string[] | null;
+    github_org: string | null;
+    github_team: string | null;
+    groups_claim: string | null;
+    role_mappings: Record<string, string> | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface SsoProviderInfo {
+    id: string;
+    provider_key: string;
+    provider_type: string;
+    display_name: string;
+    login_url: string;
+}
+
+// Groups for membership policies
+export interface AdminGroup {
+    id: string;
+    name: string | null;
+    display_name: string;
+    description: string;
+    source: string;
+    remote_id: string | null;
+    member_count: number;
+}
+
+export interface SsoTestResult {
+    success: boolean;
+    message: string;
+    details: Record<string, any> | null;
+}
+
+export interface CreateSsoConfigRequest {
+    provider_key: string;
+    provider_type: 'github' | 'google' | 'oidc';
+    display_name?: string;
+    issuer_url?: string;
+    client_id?: string;
+    client_secret?: string;
+    scopes?: string[];
+    is_active?: boolean;
+    auto_provision?: boolean;
+    default_role?: string;
+    allow_domains?: string[];
+    github_org?: string;
+    github_team?: string;
+    groups_claim?: string;
+    role_mappings?: Record<string, string>;
+}
+
+export interface UpdateSsoConfigRequest {
+    provider_key?: string;
+    display_name?: string;
+    issuer_url?: string;
+    client_id?: string;
+    client_secret?: string;
+    scopes?: string[];
+    is_active?: boolean;
+    auto_provision?: boolean;
+    default_role?: string;
+    allow_domains?: string[];
+    github_org?: string;
+    github_team?: string;
+    groups_claim?: string;
+    role_mappings?: Record<string, string>;
+}
+
 // API functions
 export const adminApi = {
     // Config
@@ -211,6 +313,7 @@ export const adminApi = {
         status?: 'active' | 'inactive' | 'all';
         role?: string;
         search?: string;
+        include_deleted?: boolean;
     }) => api.get<{ users: AdminUser[]; total: number }>('/admin/users', { params }),
 
     getUser: (id: string) => api.get<AdminUser>(`/admin/users/${id}`),
@@ -220,6 +323,9 @@ export const adminApi = {
         api.patch<AdminUser>(`/admin/users/${id}`, data),
     deactivateUser: (id: string) => api.post(`/admin/users/${id}/deactivate`),
     reactivateUser: (id: string) => api.post(`/admin/users/${id}/reactivate`),
+    deleteUser: (id: string, data: { confirm: string; reason?: string }) =>
+        api.delete(`/admin/users/${id}`, { data }),
+    wipeUser: (id: string) => api.post(`/admin/users/${id}/wipe`),
     resetPassword: (id: string) => api.post(`/admin/users/${id}/reset-password`),
 
     // Audit Logs
@@ -281,18 +387,37 @@ export const adminApi = {
         api.post(`/admin/teams/${teamId}/members`, { user_id: userId, role }),
     removeTeamMember: (teamId: string, userId: string) => 
         api.delete(`/admin/teams/${teamId}/members/${userId}`),
+    
+    // Groups (for membership policies)
+    listGroups: (params?: { source?: string; search?: string }) => 
+        api.get<AdminGroup[]>('/admin/groups', { params }),
+    
+    // All teams (for membership policy targets - requires TEAM_MANAGE permission)
+    listAllTeams: () => api.get<{ id: string; name: string; display_name: string }[]>('/teams/all'),
 
-    // Email
+    // Email Providers
+    listMailProviders: () => api.get<MailProvider[]>('/admin/email/providers'),
+    getMailProvider: (id: string) => api.get<MailProvider>(`/admin/email/providers/${id}`),
+    createMailProvider: (data: CreateMailProviderRequest) => api.post<MailProvider>('/admin/email/providers', data),
+    updateMailProvider: (id: string, data: Partial<CreateMailProviderRequest>) => api.put<MailProvider>(`/admin/email/providers/${id}`, data),
+    deleteMailProvider: (id: string) => api.delete(`/admin/email/providers/${id}`),
+    testMailProvider: (id: string, toEmail: string) => api.post(`/admin/email/providers/${id}/test`, { to_email: toEmail }),
+    setDefaultMailProvider: (id: string) => api.post(`/admin/email/providers/${id}/default`),
+    
+    // Legacy email test (uses default provider)
     testEmail: (to: string) => api.post('/admin/email/test', { to }),
-
-    // MiroTalk Integration
-    getMiroTalkConfig: () => api.get<MiroTalkConfig>('/admin/integrations/mirotalk'),
-    updateMiroTalkConfig: (config: MiroTalkConfig) => api.put<MiroTalkConfig>('/admin/integrations/mirotalk', config),
-    testMiroTalkConnection: () => api.post('/admin/integrations/mirotalk/test'),
 
     // Calls Plugin
     getCallsPluginConfig: () => api.get<CallsPluginConfigResponse>('/admin/plugins/calls'),
     updateCallsPluginConfig: (config: CallsPluginConfig) => api.put<CallsPluginConfigResponse>('/admin/plugins/calls', config),
+
+    // SSO Configuration
+    getSsoConfigs: () => api.get<SsoConfig[]>('/admin/sso'),
+    getSsoConfig: (id: string) => api.get<SsoConfig>(`/admin/sso/${id}`),
+    createSsoConfig: (data: CreateSsoConfigRequest) => api.post<SsoConfig>('/admin/sso', data),
+    updateSsoConfig: (id: string, data: UpdateSsoConfigRequest) => api.put<SsoConfig>(`/admin/sso/${id}`, data),
+    deleteSsoConfig: (id: string) => api.delete(`/admin/sso/${id}`),
+    testSsoConfig: (id: string) => api.post<SsoTestResult>(`/admin/sso/${id}/test`),
 };
 
 export default adminApi;

@@ -12,6 +12,7 @@ use std::io::Cursor;
 use uuid::Uuid;
 
 use super::AppState;
+use crate::auth::policy::permissions;
 use crate::auth::AuthUser;
 use crate::error::{ApiResult, AppError};
 use crate::models::{FileInfo, FileUploadResponse, PresignedUploadUrl};
@@ -246,7 +247,7 @@ async fn delete_file(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     // Only uploader or admin can delete
-    if file.uploader_id != auth.user_id && auth.role != "system_admin" {
+    if !auth.can_access_owned(file.uploader_id, &permissions::ADMIN_FULL) {
         return Err(AppError::Forbidden("Cannot delete this file".to_string()));
     }
 
