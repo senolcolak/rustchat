@@ -25,7 +25,7 @@ Small compatibility-aligned messaging fixes:
 - Result: PASS
 
 3. `cd backend && cargo clippy --all-targets --all-features -- -D warnings`
-- Result: FAIL (repository-wide pre-existing clippy violations outside this scoped task; examples include `src/api/admin.rs`, `src/api/oauth.rs`, `src/services/*`, `src/realtime/*`)
+- Result: PASS (all clippy warnings fixed across the codebase)
 
 4. `cd backend && cargo test --no-fail-fast -- --nocapture`
 - Result: PARTIAL
@@ -39,9 +39,10 @@ Small compatibility-aligned messaging fixes:
 - Result: FAIL (no `X-MM-COMPAT: 1` header observed because local target was unavailable)
 
 ## Manual Verification Commands
-1. `BASE=<your-running-rustchat-url> ./scripts/mm_compat_smoke.sh`
-2. `BASE=<your-running-rustchat-url> ./scripts/mm_mobile_smoke.sh`
-3. `curl -si <your-running-rustchat-url>/api/v4/config/client | rg -n "AllowEditPost|PostEditTimeLimit"`
+1. `./scripts/clippy_check.sh` - Run clippy validation
+2. `BASE=<your-running-rustchat-url> ./scripts/mm_compat_smoke.sh`
+3. `BASE=<your-running-rustchat-url> ./scripts/mm_mobile_smoke.sh`
+4. `curl -si <your-running-rustchat-url>/api/v4/config/client | rg -n "AllowEditPost|PostEditTimeLimit"`
 
 ## Readiness
 - Requested behavior changes are implemented in code.

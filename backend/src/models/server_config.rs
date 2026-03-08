@@ -289,6 +289,7 @@ pub struct ComplianceConfig {
 /// DTO for updating a specific config category
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConfigUpdate {
     Site(SiteConfig),
     Auth(AuthConfig),

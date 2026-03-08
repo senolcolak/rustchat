@@ -2802,18 +2802,9 @@ async fn reconcile_after_participant_left(
         None => return 0,
     };
 
-    if call.host_id == departed_user_id {
-        if let Some(new_host_id) = select_next_host(&call.participants) {
-            state
-                .call_state_manager
-                .set_host(call.call_id, new_host_id)
-                .await;
-            broadcast_host_changed_event(state, channel_id, new_host_id).await;
-            if let Some(updated_call) = state.call_state_manager.get_call(call_id).await {
-                call = updated_call;
-            }
-        }
-    } else if !call.participants.is_empty() && !call.participants.contains_key(&call.host_id) {
+    let should_select_new_host = call.host_id == departed_user_id
+        || (!call.participants.is_empty() && !call.participants.contains_key(&call.host_id));
+    if should_select_new_host {
         if let Some(new_host_id) = select_next_host(&call.participants) {
             state
                 .call_state_manager
@@ -2935,10 +2926,8 @@ async fn handle_ws_join_call(
     if let Some(existing) = call_manager.get_participant(call.call_id, user_id).await {
         if existing.session_id == conn_uuid {
             should_add_participant = false;
-        } else {
-            if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
-                let _ = sfu.remove_participant(existing.session_id).await;
-            }
+        } else if let Some(sfu) = state.sfu_manager.get_sfu(call.call_id).await {
+            let _ = sfu.remove_participant(existing.session_id).await;
         }
     }
 

@@ -825,78 +825,6 @@ async fn ping(
     Ok(Json(body))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        can_receive_notifications_response, classify_test_notification_result, PushDiagnostics,
-        TestNotificationOutcome,
-    };
-
-    #[test]
-    fn classify_test_notification_result_detects_no_devices() {
-        assert_eq!(
-            classify_test_notification_result(0, 0),
-            TestNotificationOutcome::NoDevices
-        );
-    }
-
-    #[test]
-    fn classify_test_notification_result_detects_delivery_unavailable() {
-        assert_eq!(
-            classify_test_notification_result(2, 0),
-            TestNotificationOutcome::DeliveryUnavailable
-        );
-    }
-
-    #[test]
-    fn classify_test_notification_result_detects_success() {
-        assert_eq!(
-            classify_test_notification_result(2, 1),
-            TestNotificationOutcome::Sent
-        );
-    }
-
-    #[test]
-    fn can_receive_notifications_response_omits_field_without_device_id() {
-        let diagnostics = PushDiagnostics {
-            has_push_proxy_url: false,
-            has_fcm_db_config: false,
-            has_fcm_env_config: false,
-        };
-        assert_eq!(can_receive_notifications_response(None, diagnostics), None);
-        assert_eq!(
-            can_receive_notifications_response(Some(""), diagnostics),
-            None
-        );
-    }
-
-    #[test]
-    fn can_receive_notifications_response_reports_not_available_when_unconfigured() {
-        let diagnostics = PushDiagnostics {
-            has_push_proxy_url: false,
-            has_fcm_db_config: false,
-            has_fcm_env_config: false,
-        };
-        assert_eq!(
-            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
-            Some("false".to_string())
-        );
-    }
-
-    #[test]
-    fn can_receive_notifications_response_reports_verified_when_push_is_configured() {
-        let diagnostics = PushDiagnostics {
-            has_push_proxy_url: true,
-            has_fcm_db_config: false,
-            has_fcm_env_config: false,
-        };
-        assert_eq!(
-            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
-            Some("true".to_string())
-        );
-    }
-}
-
 async fn client_perf(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -1082,4 +1010,76 @@ async fn check_integrity(
     _auth: crate::api::v4::extractors::MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(serde_json::json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        can_receive_notifications_response, classify_test_notification_result, PushDiagnostics,
+        TestNotificationOutcome,
+    };
+
+    #[test]
+    fn classify_test_notification_result_detects_no_devices() {
+        assert_eq!(
+            classify_test_notification_result(0, 0),
+            TestNotificationOutcome::NoDevices
+        );
+    }
+
+    #[test]
+    fn classify_test_notification_result_detects_delivery_unavailable() {
+        assert_eq!(
+            classify_test_notification_result(2, 0),
+            TestNotificationOutcome::DeliveryUnavailable
+        );
+    }
+
+    #[test]
+    fn classify_test_notification_result_detects_success() {
+        assert_eq!(
+            classify_test_notification_result(2, 1),
+            TestNotificationOutcome::Sent
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_omits_field_without_device_id() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: false,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(can_receive_notifications_response(None, diagnostics), None);
+        assert_eq!(
+            can_receive_notifications_response(Some(""), diagnostics),
+            None
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_reports_not_available_when_unconfigured() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: false,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(
+            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
+            Some("false".to_string())
+        );
+    }
+
+    #[test]
+    fn can_receive_notifications_response_reports_verified_when_push_is_configured() {
+        let diagnostics = PushDiagnostics {
+            has_push_proxy_url: true,
+            has_fcm_db_config: false,
+            has_fcm_env_config: false,
+        };
+        assert_eq!(
+            can_receive_notifications_response(Some("android_rn-v2:test"), diagnostics),
+            Some("true".to_string())
+        );
+    }
 }

@@ -923,7 +923,7 @@ async fn set_post_unread(
 
     // CRT unsupported + reply follows Mattermost behavior:
     // unread root/urgent counters for the channel are intentionally zeroed.
-    let set_unread_count_root = !(is_reply && !crt_supported_request);
+    let set_unread_count_root = !is_reply || crt_supported_request;
     if !set_unread_count_root {
         stats.unread_msg_count_root = 0;
         stats.mention_count_root = 0;
@@ -1381,6 +1381,7 @@ async fn list_scheduled_posts(
     let team_id = parse_mm_or_uuid(&team_id_str)
         .ok_or_else(|| AppError::Validation("Invalid team_id".to_string()))?;
 
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(Uuid, Uuid, Uuid, Option<Uuid>, String, serde_json::Value, Vec<Uuid>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         r#"
         SELECT id, user_id, channel_id, root_id, message, props, file_ids, scheduled_at, created_at, updated_at
@@ -1575,6 +1576,7 @@ async fn delete_scheduled_post(
         .ok_or_else(|| AppError::Validation("Invalid scheduled_post_id".to_string()))?;
 
     // Get the scheduled post details before deleting
+    #[allow(clippy::type_complexity)]
     let row: Option<(Uuid, Uuid, String, String, serde_json::Value, Vec<Uuid>, i64, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         r#"
         DELETE FROM scheduled_posts
