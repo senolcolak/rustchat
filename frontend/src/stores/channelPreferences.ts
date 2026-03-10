@@ -39,7 +39,10 @@ export const useChannelPreferencesStore = defineStore('channelPreferences', () =
             favoriteChannels.value.clear()
             mutedChannels.value.clear()
 
-            prefs.forEach((pref: Preference) => {
+            // Defensive: ensure prefs is an array
+            const prefsArray = Array.isArray(prefs) ? prefs : []
+            
+            prefsArray.forEach((pref: Preference) => {
                 if (pref.category === 'favorite_channel' && pref.value === 'true') {
                     favoriteChannels.value.add(pref.name)
                 }

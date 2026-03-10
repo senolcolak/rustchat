@@ -30,11 +30,6 @@ pub struct UpdateStatusRequest {
     pub dnd_end_time: Option<i64>,
 }
 
-/// Bulk status request
-#[derive(Debug, Clone, Deserialize)]
-pub struct BulkStatusRequest {
-    pub user_ids: Vec<String>,
-}
 
 /// Build users routes
 pub fn router() -> Router<AppState> {
@@ -50,6 +45,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/{id}/status", get(get_user_status))
         .route("/status/ids", axum::routing::post(get_statuses_by_ids))
+        // Thread routes (Mattermost-compatible)
+        .route("/{user_id}/teams/{team_id}/threads/{thread_id}/read/{timestamp}", axum::routing::put(mark_thread_as_read))
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,12 +380,32 @@ async fn delete_my_status(
 
 /// Get statuses for multiple users
 /// POST /api/v1/users/status/ids
+/// Accepts both: ["id1", "id2"] and {"user_ids": ["id1", "id2"]}
 async fn get_statuses_by_ids(
     State(state): State<AppState>,
-    Json(body): Json<BulkStatusRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let user_ids: Vec<Uuid> = body
-        .user_ids
+    // Extract user_ids from either array format or object format
+    let user_ids: Vec<String> = if let Some(arr) = body.as_array() {
+        // Direct array format: ["id1", "id2"]
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    } else if let Some(obj) = body.as_object() {
+        // Object format: {"user_ids": ["id1", "id2"]}
+        obj.get("user_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let user_ids: Vec<Uuid> = user_ids
         .iter()
         .filter_map(|id| Uuid::parse_str(id).ok())
         .collect();
@@ -408,11 +425,64 @@ async fn get_statuses_by_ids(
     .fetch_all(&state.db)
     .await?;
 
-    // Build response map
-    let mut result = serde_json::Map::new();
-    for (user_id, status) in statuses {
-        result.insert(user_id.to_string(), serde_json::json!(status));
+    // Build response map - return format expected by frontend
+    // Frontend expects: [{"user_id": "...", "status": "...", ...}]
+    let result: Vec<serde_json::Value> = statuses
+        .into_iter()
+        .map(|(user_id, status)| {
+            serde_json::json!({
+                "user_id": user_id.to_string(),
+                "status": status,
+                "manual": false,
+                "last_activity_at": 0
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!(result)))
+}
+
+
+/// Mark a thread as read
+/// PUT /users/{user_id}/teams/{team_id}/threads/{thread_id}/read/{timestamp}
+async fn mark_thread_as_read(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((user_id, _team_id, thread_id, timestamp)): Path<(String, Uuid, Uuid, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Handle "me" as current user
+    let target_user_id = if user_id == "me" {
+        auth.user_id
+    } else {
+        user_id.parse::<Uuid>()
+            .map_err(|_| AppError::BadRequest("Invalid user_id".to_string()))?
+    };
+
+    // Users can only mark their own threads as read
+    if target_user_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Cannot mark thread as read for other users".to_string(),
+        ));
     }
 
-    Ok(Json(serde_json::Value::Object(result)))
+    let read_at = chrono::DateTime::from_timestamp_millis(timestamp)
+        .unwrap_or_else(chrono::Utc::now);
+
+    // Upsert thread membership with read time
+    sqlx::query(r#"
+        INSERT INTO thread_memberships (user_id, post_id, last_read_at, unread_replies_count, mention_count)
+        VALUES ($1, $2, $3, 0, 0)
+        ON CONFLICT (user_id, post_id) DO UPDATE SET
+            last_read_at = $3,
+            unread_replies_count = 0,
+            mention_count = 0,
+            updated_at = NOW()
+    "#)
+    .bind(target_user_id)
+    .bind(thread_id)
+    .bind(read_at)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
 }

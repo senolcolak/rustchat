@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -27,6 +27,10 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/members", get(list_members).post(add_member))
         .route("/{id}/members/{user_id}", delete(remove_member))
         .route("/{id}/read", post(mark_channel_as_read))
+        // Mattermost-compatible endpoints that frontend expects
+        .route("/{id}/members/{user_id}/read", post(mark_channel_member_as_read))
+        .route("/{id}/members/{user_id}/notify_props", put(update_notify_props))
+        .route("/{id}/stats", get(get_channel_stats))
 }
 
 /// Get unread counts for all channels the user is a member of
@@ -619,4 +623,162 @@ async fn remove_member(
         .await?;
 
     Ok(Json(serde_json::json!({"status": "removed"})))
+}
+
+/// Mark a channel as read for a specific user (Mattermost-compatible endpoint)
+/// POST /channels/{id}/members/{user_id}/read
+async fn mark_channel_member_as_read(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, user_id)): Path<(Uuid, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Handle "me" as current user
+    let target_user_id = if user_id == "me" {
+        auth.user_id
+    } else {
+        user_id.parse::<Uuid>()
+            .map_err(|_| AppError::BadRequest("Invalid user_id".to_string()))?
+    };
+
+    // Users can only mark their own channels as read
+    if target_user_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Cannot mark channel as read for other users".to_string(),
+        ));
+    }
+
+    // Verify membership
+    let _membership: ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    // Update last_viewed_at to mark all messages as read
+    sqlx::query(
+        "UPDATE channel_members SET last_viewed_at = NOW(), manually_unread = false, last_update_at = NOW() WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await?;
+
+    // Also update channel_reads table
+    sqlx::query(
+        r#"
+        INSERT INTO channel_reads (user_id, channel_id, last_read_message_id, last_read_at)
+        VALUES ($1, $2, (SELECT MAX(seq) FROM posts WHERE channel_id = $2), NOW())
+        ON CONFLICT (user_id, channel_id)
+        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id, last_read_at = NOW()
+        "#,
+    )
+    .bind(auth.user_id)
+    .bind(channel_id)
+    .execute(&state.db)
+    .await?;
+
+    // Broadcast channel viewed event
+    let broadcast = WsEnvelope::event(
+        EventType::ChannelViewed,
+        serde_json::json!({
+            "channel_id": channel_id.to_string(),
+        }),
+        Some(channel_id),
+    )
+    .with_broadcast(WsBroadcast {
+        channel_id: None,
+        team_id: None,
+        user_id: Some(auth.user_id),
+        exclude_user_id: None,
+    });
+    state.ws_hub.broadcast(broadcast).await;
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// Update channel member notification properties
+/// PUT /channels/{id}/members/{user_id}/notify_props
+async fn update_notify_props(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, user_id)): Path<(Uuid, String)>,
+    Json(input): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Handle "me" as current user
+    let target_user_id = if user_id == "me" {
+        auth.user_id
+    } else {
+        user_id.parse::<Uuid>()
+            .map_err(|_| AppError::BadRequest("Invalid user_id".to_string()))?
+    };
+
+    // Users can only update their own notify props
+    if target_user_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Cannot update notification properties for other users".to_string(),
+        ));
+    }
+
+    // Verify membership
+    let _membership: ChannelMember =
+        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+            .bind(channel_id)
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Not a member of this channel".to_string()))?;
+
+    sqlx::query(
+        "UPDATE channel_members SET notify_props = $1 WHERE channel_id = $2 AND user_id = $3",
+    )
+    .bind(&input)
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
+}
+
+/// Channel stats response
+#[derive(Debug, serde::Serialize)]
+struct ChannelStats {
+    channel_id: String,
+    member_count: i64,
+}
+
+/// Get channel statistics
+/// GET /channels/{id}/stats
+async fn get_channel_stats(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<Uuid>,
+) -> ApiResult<Json<ChannelStats>> {
+    // Verify membership
+    let is_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)",
+    )
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if !is_member {
+        return Err(AppError::Forbidden(
+            "Not a member of this channel".to_string(),
+        ));
+    }
+
+    let member_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_members WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    Ok(Json(ChannelStats {
+        channel_id: channel_id.to_string(),
+        member_count,
+    }))
 }
