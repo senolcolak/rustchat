@@ -151,19 +151,21 @@ impl ApnsClient {
     /// Get a valid JWT token (refreshing if necessary)
     fn get_auth_token(&mut self) -> Result<String, ApnsError> {
         let now = chrono::Utc::now();
-        
+
         // Refresh token if it expires within 5 minutes
         if now + chrono::Duration::minutes(5) > self.token_expires_at {
             // Note: In production, you'd want to handle this asynchronously
             // For now, we'll just return an error indicating token refresh is needed
-            return Err(ApnsError::Jwt("Token expired, client needs refresh".to_string()));
+            return Err(ApnsError::Jwt(
+                "Token expired, client needs refresh".to_string(),
+            ));
         }
-        
+
         Ok(self.auth_token.clone())
     }
 
     /// Send a VoIP push notification
-    /// 
+    ///
     /// # Important
     /// This must complete within milliseconds or iOS will terminate the app.
     pub async fn send_voip_push(&self, payload: ApnsVoipPayload) -> Result<(), ApnsError> {
@@ -199,7 +201,8 @@ impl ApnsClient {
         });
 
         // Send the request with JWT authentication
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("authorization", format!("bearer {}", self.auth_token))
             .header("apns-topic", &payload.topic)
@@ -210,7 +213,7 @@ impl ApnsClient {
             .await?;
 
         let status = response.status();
-        
+
         if status.is_success() {
             info!(
                 token_prefix = %&payload.device_token[..20.min(payload.device_token.len())],
@@ -219,13 +222,14 @@ impl ApnsClient {
             Ok(())
         } else {
             let body = response.text().await.unwrap_or_default();
-            
-            // Check for invalid token (410 Gone)
-            if status.as_u16() == 410 {
+
+            // Invalid token / topic-token mismatch cases from APNS.
+            if status.as_u16() == 410 || (status.as_u16() == 400 && is_invalid_token_reason(&body))
+            {
                 warn!(status = %status, "APNS token is no longer valid");
                 return Err(ApnsError::InvalidToken);
             }
-            
+
             warn!(status = %status, body = %body, "APNS error");
             Err(ApnsError::Apns(format!("HTTP {}: {}", status, body)))
         }
@@ -267,7 +271,8 @@ impl ApnsClient {
             apns_payload["is_crt_enabled"] = serde_json::Value::Bool(is_crt_enabled);
         }
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("authorization", format!("bearer {}", self.auth_token))
             .header("apns-topic", &payload.topic)
@@ -286,7 +291,8 @@ impl ApnsClient {
             Ok(())
         } else {
             let body = response.text().await.unwrap_or_default();
-            if status.as_u16() == 410 {
+            if status.as_u16() == 410 || (status.as_u16() == 400 && is_invalid_token_reason(&body))
+            {
                 warn!(status = %status, "APNS token is no longer valid");
                 return Err(ApnsError::InvalidToken);
             }
@@ -297,10 +303,19 @@ impl ApnsClient {
     }
 }
 
+fn is_invalid_token_reason(body: &str) -> bool {
+    let body_lc = body.to_lowercase();
+    body_lc.contains("baddevicetoken")
+        || body_lc.contains("devicetokennotfortopic")
+        || body_lc.contains("unregistered")
+}
+
 /// Generate JWT token for APNS authentication
-async fn generate_jwt_token(config: &ApnsConfig) -> Result<(String, chrono::DateTime<chrono::Utc>), ApnsError> {
-    use jsonwebtoken::{encode, Algorithm, Header, EncodingKey};
-    
+async fn generate_jwt_token(
+    config: &ApnsConfig,
+) -> Result<(String, chrono::DateTime<chrono::Utc>), ApnsError> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
     // Read the private key
     let key_content = tokio::fs::read_to_string(&config.key_path)
         .await
@@ -361,10 +376,7 @@ mod tests {
 
     #[test]
     fn test_build_alert_topic() {
-        assert_eq!(
-            build_alert_topic("com.rustchat.app"),
-            "com.rustchat.app"
-        );
+        assert_eq!(build_alert_topic("com.rustchat.app"), "com.rustchat.app");
         assert_eq!(
             build_alert_topic("com.rustchat.app.voip"),
             "com.rustchat.app"

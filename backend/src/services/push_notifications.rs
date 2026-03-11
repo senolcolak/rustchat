@@ -287,8 +287,16 @@ async fn send_via_push_proxy(
         let body = response.text().await.unwrap_or_default();
         let status_code = status.as_u16();
 
-        // Check for invalid token errors (410 = unregistered, 400 with INVALID_ARGUMENT = bad token)
-        if status_code == 410 || (status_code == 400 && body.contains("INVALID_ARGUMENT")) {
+        // Check for invalid token errors from FCM/APNS via proxy.
+        // We treat these as permanent token failures so callers can remove stale devices.
+        let body_lc = body.to_lowercase();
+        if status_code == 410
+            || (status_code == 400 && body.contains("INVALID_ARGUMENT"))
+            || body_lc.contains("invalid token")
+            || body_lc.contains("baddevicetoken")
+            || body_lc.contains("devicetokennotfortopic")
+            || body_lc.contains("token unregistered")
+        {
             warn!(status = %status_code, body = %body, "FCM returned invalid token error");
             return Err(PushNotificationError::InvalidToken);
         }
@@ -417,9 +425,10 @@ pub async fn send_push_to_user(
                     user_id = %user_id,
                     device_platform = %device.platform,
                     token_prefix = %&device.token[..20.min(device.token.len())],
-                    "Push notifications not configured; stopping send loop and returning sent_count=0"
+                    sent_count = sent_count,
+                    "Push notifications not configured; stopping send loop and returning partial result"
                 );
-                return Ok(0);
+                return Ok(sent_count);
             }
             Err(PushNotificationError::InvalidToken) => {
                 // Token is invalid - delete it from database

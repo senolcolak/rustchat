@@ -10,9 +10,9 @@
 //! - `GOOGLE_APPLICATION_CREDENTIALS` - Path to service account JSON key
 //!
 //! ### APNS (iOS VoIP)
-//! - `APNS_CERT_PATH` - Path to VoIP certificate (.p12 or .pem)
-//! - `APNS_KEY_PATH` - Path to private key (optional, if separate from cert)
-//! - `APNS_CERT_PASSWORD` - Certificate password (optional)
+//! - `APNS_KEY_PATH` - Path to APNS auth key (.p8)
+//! - `APNS_KEY_ID` - Key ID from Apple Developer
+//! - `APNS_TEAM_ID` - Team ID from Apple Developer
 //! - `APNS_BUNDLE_ID` - iOS bundle identifier (e.g., com.rustchat.app)
 //! - `APNS_USE_PRODUCTION` - Use production APNS server (default: false for development)
 //!
@@ -23,12 +23,7 @@
 mod apns;
 mod fcm;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -103,7 +98,10 @@ struct AppState {
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "push_proxy=info,tower_http=info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "push_proxy=info,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -111,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize FCM client (Android)
     let fcm_client = init_fcm_client().await?;
-    
+
     // Initialize APNS client (iOS VoIP)
     let apns_client = init_apns_client().await?;
 
@@ -132,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
-    
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     info!("Listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
@@ -243,9 +241,9 @@ async fn send_notification(
     Json(payload): Json<PushRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<PushResponse>)> {
     let platform = payload.platform.to_lowercase();
-    let is_call = payload.data.sub_type.as_deref() == Some("calls") 
-        || payload.notification_type == "call";
-    
+    let is_call =
+        payload.data.sub_type.as_deref() == Some("calls") || payload.notification_type == "call";
+
     info!(
         platform = %platform,
         is_call = is_call,
@@ -349,14 +347,20 @@ async fn send_voip_push(
     };
 
     // Generate a call UUID if not provided
-    let call_uuid = payload.data.call_uuid.clone()
+    let call_uuid = payload
+        .data
+        .call_uuid
+        .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let voip_payload = apns::ApnsVoipPayload {
         topic: apns::build_voip_topic(&apns_client.config.bundle_id),
         device_token: payload.token.clone(),
         call_uuid,
-        caller_name: payload.data.sender_name.clone()
+        caller_name: payload
+            .data
+            .sender_name
+            .clone()
             .unwrap_or_else(|| payload.title.clone()),
         channel_id: payload.data.channel_id.clone(),
         server_url: payload.data.server_url.clone().unwrap_or_default(),
@@ -398,7 +402,7 @@ async fn send_fcm_push(
     payload: &PushRequest,
 ) -> Result<StatusCode, (StatusCode, Json<PushResponse>)> {
     info!("Starting FCM push send");
-    
+
     let fcm_client = match &state.fcm_client {
         Some(client) => client,
         None => {
@@ -412,7 +416,7 @@ async fn send_fcm_push(
             ));
         }
     };
-    
+
     info!("FCM client is available, building payload");
 
     // Convert to FCM payload format
@@ -433,7 +437,7 @@ async fn send_fcm_push(
             call_uuid: payload.data.call_uuid.clone(),
         },
     };
-    
+
     info!("FCM payload built, sending to FCM client");
 
     match fcm_client.send(fcm_payload).await {
