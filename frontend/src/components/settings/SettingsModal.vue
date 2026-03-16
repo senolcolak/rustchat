@@ -139,7 +139,7 @@ function handleLogout() {
                 Log out
               </button>
             </div>
-          </nav>
+          </div>
 
           <!-- Content -->
           <div class="flex-1 min-w-0 overflow-y-auto p-4 sm:p-6 bg-bg-surface-1">
