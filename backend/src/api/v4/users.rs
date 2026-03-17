@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use super::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::extractors::PolymorphicAuth;
 use crate::auth::policy::permissions;
 use crate::auth::{create_token_with_policy, hash_password, verify_password};
 use crate::error::{ApiResult, AppError};
@@ -532,7 +533,15 @@ async fn enforce_password_login_allowed(state: &AppState, user_email: &str) -> A
     ))
 }
 
-async fn me(State(state): State<AppState>, auth: MmAuthUser) -> ApiResult<Json<mm::User>> {
+/// GET /users/me - Get authenticated user (supports both JWT and API key auth)
+///
+/// This endpoint supports polymorphic authentication:
+/// - JWT token (for human users via browser/mobile)
+/// - API key (for agents, services, and CI systems)
+async fn me(
+    State(state): State<AppState>,
+    auth: PolymorphicAuth,
+) -> ApiResult<Json<mm::User>> {
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(auth.user_id)
         .fetch_one(&state.db)

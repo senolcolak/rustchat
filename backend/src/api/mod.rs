@@ -21,7 +21,8 @@ mod site;
 mod teams;
 mod unreads;
 mod users;
-mod v4;
+// Public for integration tests - contains submodules needed for test harness
+pub mod v4;
 mod websocket_core;
 mod ws;
 

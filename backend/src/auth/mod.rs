@@ -3,12 +3,14 @@
 //! Provides JWT tokens, password hashing, API key auth, and auth middleware.
 
 pub mod api_key;
+pub mod extractors;
 pub mod jwt;
 pub mod middleware;
 pub mod password;
 pub mod policy;
 
 pub use api_key::*;
+pub use extractors::*;
 pub use jwt::*;
 pub use middleware::*;
 pub use password::*;
