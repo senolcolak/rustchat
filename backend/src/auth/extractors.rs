@@ -11,7 +11,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::api_key::validate_api_key;
+use super::api_key::{extract_prefix, validate_api_key};
 use super::jwt::validate_token_with_policy;
 use crate::api::AppState;
 use crate::auth::middleware::{ensure_user_access_active, FromRef};
@@ -73,26 +73,34 @@ where
             .strip_prefix("Bearer ")
             .ok_or_else(|| AppError::Unauthorized("Invalid authorization format".to_string()))?;
 
-        // Query all non-human entities with API keys from database
-        let entities: Vec<(Uuid, String, EntityType, Option<Uuid>, String, String)> = sqlx::query_as(
+        // Extract the 16-character prefix for O(1) indexed lookup
+        let prefix = extract_prefix(api_key)
+            .map_err(|e| AppError::Unauthorized(format!("Invalid API key format: {}", e)))?;
+
+        // Query by prefix (O(1) with unique index) instead of scanning all entities
+        let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> = sqlx::query_as(
             r#"
             SELECT id, email, entity_type, org_id, role, api_key_hash
             FROM users
-            WHERE api_key_hash IS NOT NULL
+            WHERE api_key_prefix = $1
                 AND entity_type IN ('agent', 'service', 'ci')
                 AND is_active = true
                 AND deleted_at IS NULL
             "#,
         )
-        .fetch_all(&app_state.db)
+        .bind(&prefix)
+        .fetch_optional(&app_state.db)
         .await?;
 
-        // Try to validate the API key against each stored hash
-        for (user_id, email, entity_type, org_id, role, hash) in entities {
-            // Use constant-time comparison via bcrypt
+        // Validate the full API key against the hash
+        if let Some((user_id, email, entity_type, org_id, role, hash)) = entity {
             match validate_api_key(api_key, &hash).await {
                 Ok(true) => {
-                    // Found a match!
+                    tracing::debug!(
+                        user_id = %user_id,
+                        entity_type = ?entity_type,
+                        "API key authenticated successfully via prefix lookup"
+                    );
                     return Ok(ApiKeyAuth {
                         user_id,
                         email,
@@ -102,22 +110,22 @@ where
                     });
                 }
                 Ok(false) => {
-                    // No match, continue to next entity
-                    continue;
+                    tracing::warn!(
+                        user_id = %user_id,
+                        "API key prefix matched but full key validation failed"
+                    );
                 }
                 Err(e) => {
-                    // Hash validation failed (e.g., malformed hash)
                     tracing::warn!(
                         user_id = %user_id,
                         error = %e,
                         "Failed to validate API key hash"
                     );
-                    continue;
                 }
             }
         }
 
-        // No matching API key found
+        // No matching API key found or validation failed
         Err(AppError::Unauthorized("Invalid API key".to_string()))
     }
 }
@@ -206,21 +214,25 @@ where
             }
 
             // JWT failed, try API key
-            let entities: Vec<(Uuid, String, EntityType, Option<Uuid>, String, String)> =
+            let prefix = extract_prefix(token)
+                .map_err(|_| AppError::Unauthorized("Invalid API key format".to_string()))?;
+
+            let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> =
                 sqlx::query_as(
                     r#"
                 SELECT id, email, entity_type, org_id, role, api_key_hash
                 FROM users
-                WHERE api_key_hash IS NOT NULL
+                WHERE api_key_prefix = $1
                     AND entity_type IN ('agent', 'service', 'ci')
                     AND is_active = true
                     AND deleted_at IS NULL
                 "#,
                 )
-                .fetch_all(&app_state.db)
+                .bind(&prefix)
+                .fetch_optional(&app_state.db)
                 .await?;
 
-            for (user_id, email, _entity_type, org_id, role, hash) in entities {
+            if let Some((user_id, email, _entity_type, org_id, role, hash)) = entity {
                 if let Ok(true) = validate_api_key(token, &hash).await {
                     return Ok(PolymorphicAuth {
                         user_id,
