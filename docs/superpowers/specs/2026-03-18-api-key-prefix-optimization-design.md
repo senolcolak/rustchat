@@ -91,8 +91,9 @@ CREATE UNIQUE INDEX idx_users_api_key_prefix
   ON users(api_key_prefix)
   WHERE api_key_prefix IS NOT NULL;
 
--- Back up existing API key hashes before clearing
--- This allows rollback if needed
+-- Back up existing API key hashes before clearing (for manual emergency recovery only)
+-- Note: TEMP table exists only during this migration transaction
+-- For actual rollback: restore from pre-deployment database backup
 CREATE TEMP TABLE api_key_backup AS
 SELECT id, api_key_hash
 FROM users
@@ -115,7 +116,7 @@ COMMENT ON COLUMN users.api_key_prefix IS 'First 16 chars of API key (rck_XXXXXX
 - **UNIQUE index:** Guarantees no collisions, enables O(1) lookups via B-tree
 - **Partial index:** Only indexes non-NULL values, reduces index size and maintenance overhead
 - **Breaking change:** Clears existing api_key_hash to force regeneration with new format
-- **Temp backup table:** Created for rollback safety (exists only during migration transaction)
+- **Temp backup table:** For within-transaction rollback only (not persisted); production rollback requires database backup restoration
 
 **Rollback migration:**
 ```sql
@@ -126,8 +127,8 @@ DROP INDEX IF EXISTS idx_users_api_key_prefix;
 ALTER TABLE users DROP COLUMN IF EXISTS api_key_prefix;
 
 -- Note: Rollback does NOT restore old api_key_hash values
--- Agents must regenerate keys even after rollback
--- For emergency recovery, restore from database backup taken pre-deployment
+-- Agents must regenerate keys after rollback
+-- For emergency recovery: restore from pre-deployment database backup (see deployment checklist)
 ```
 
 ### Authentication Flow
@@ -367,7 +368,11 @@ if let Some(prefix) = extract_prefix(token) {
         )
         .bind(&prefix)
         .fetch_optional(&app_state.db)
-        .await?;
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Database error during API key lookup (polymorphic)");
+            AppError::Internal("Authentication error".to_string())
+        })?;
 
     if let Some((user_id, email, _entity_type, org_id, role, hash)) = entity {
         if let Ok(true) = validate_api_key(token, &hash).await {
@@ -382,6 +387,11 @@ if let Some(prefix) = extract_prefix(token) {
     }
 }
 ```
+
+**Key design decisions:**
+- Consistent error handling with ApiKeyAuth (wrap database errors with logging)
+- Same security approach: log errors without leaking sensitive information
+- Minimal code duplication: reuses extract_prefix and validate_api_key
 
 **Testing requirements:**
 - Test: valid prefixed key authenticates successfully
