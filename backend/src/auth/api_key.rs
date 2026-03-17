@@ -36,6 +36,7 @@
 
 use anyhow::{Context, Result};
 use rand::Rng;
+use crate::error::AppError;
 
 /// Generate a new API key as a 32-byte random hex string (64 characters)
 ///
@@ -71,14 +72,19 @@ pub fn generate_api_key() -> String {
 ///
 /// # Returns
 /// * `Ok(String)` - The 16-character prefix
-/// * `Err` - If key format is invalid
-pub fn extract_prefix(key: &str) -> Result<String, String> {
+/// * `Err(AppError)` - If key format is invalid
+pub fn extract_prefix(key: &str) -> Result<String, AppError> {
     if key.len() != 68 {
-        return Err(format!("Invalid key length: expected 68, got {}", key.len()));
+        return Err(AppError::Validation(format!(
+            "Invalid key length: expected 68, got {}",
+            key.len()
+        )));
     }
 
     if !key.starts_with("rck_") {
-        return Err("Invalid key format: must start with rck_".to_string());
+        return Err(AppError::Validation(
+            "Invalid key format: must start with rck_".to_string(),
+        ));
     }
 
     let prefix = &key[..16];
