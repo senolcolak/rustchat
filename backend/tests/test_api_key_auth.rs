@@ -417,3 +417,18 @@ async fn test_api_key_auth_legacy_key_rejected() {
     // Should fail with 401 - Invalid API key format
     println!("Test placeholder - verify legacy key rejection");
 }
+
+#[tokio::test]
+#[ignore] // Performance test - run manually
+async fn test_api_key_auth_performance_with_1000_entities() {
+    // This test verifies O(1) performance at scale
+    // Goal: Auth latency < 50ms avg with 1000 entities
+
+    // TODO: Implement when test database available
+    // 1. Create 1000 test entities
+    // 2. Measure auth latency for 100 random requests
+    // 3. Assert avg latency < 50ms
+    // 4. Assert P95 latency < 100ms
+
+    println!("Performance test placeholder - implement when test database available");
+}
