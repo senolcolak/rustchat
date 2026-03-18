@@ -3,6 +3,7 @@
 
 // Stores
 export { useMessageStore } from './stores/messageStore'
+export { useThreadStore, type ThreadState } from './stores/threadStore'
 
 // Services
 export { messageService } from './services/messageService'
