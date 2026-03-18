@@ -1,5 +1,11 @@
 # SPEC: WebSocket Auth Expiry Enforcement (2026-03-13)
 
+> **Status: ✅ IMPLEMENTED** (2026-03-17)
+> 
+> - Both `/api/v4/websocket` and `/ws` endpoints enforce token expiry
+> - Frontend detects auth expiry and triggers logout flow
+> - Close code 1008 (POLICY_VIOLATION) sent on auth expiry
+
 ## Problem Statement
 
 Current behavior allows an already-established WebSocket connection to keep receiving realtime events after the JWT access token has expired.  
