@@ -78,8 +78,9 @@ where
             .map_err(|e| AppError::Unauthorized(format!("Invalid API key format: {}", e)))?;
 
         // Query by prefix (O(1) with unique index) instead of scanning all entities
-        let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> = sqlx::query_as(
-            r#"
+        let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> =
+            sqlx::query_as(
+                r#"
             SELECT id, email, entity_type, org_id, role, api_key_hash
             FROM users
             WHERE api_key_prefix = $1
@@ -87,10 +88,10 @@ where
                 AND is_active = true
                 AND deleted_at IS NULL
             "#,
-        )
-        .bind(&prefix)
-        .fetch_optional(&app_state.db)
-        .await?;
+            )
+            .bind(&prefix)
+            .fetch_optional(&app_state.db)
+            .await?;
 
         // Validate the full API key against the hash
         if let Some((user_id, email, entity_type, org_id, role, hash)) = entity {

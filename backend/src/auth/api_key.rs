@@ -34,9 +34,9 @@
 //! }
 //! ```
 
+use crate::error::AppError;
 use anyhow::{Context, Result};
 use rand::Rng;
-use crate::error::AppError;
 
 /// Generate a new API key with "rck_" prefix plus 64 hex characters
 ///
@@ -61,9 +61,9 @@ use crate::error::AppError;
 /// ```
 pub fn generate_api_key() -> String {
     let mut rng = rand::thread_rng();
-    let bytes: [u8; 32] = rng.gen();  // 32 bytes = 256 bits
-    let hex_key = hex::encode(bytes);  // 32 bytes → 64 hex chars
-    format!("rck_{}", hex_key)  // "rck_" + 64 hex = 68 total chars
+    let bytes: [u8; 32] = rng.gen(); // 32 bytes = 256 bits
+    let hex_key = hex::encode(bytes); // 32 bytes → 64 hex chars
+    format!("rck_{}", hex_key) // "rck_" + 64 hex = 68 total chars
 }
 
 /// Extract the first 16 characters as the API key prefix

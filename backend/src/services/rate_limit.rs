@@ -47,19 +47,19 @@ impl RateLimitConfig {
     pub fn for_tier(tier: RateLimitTier) -> Self {
         match tier {
             RateLimitTier::HumanStandard => Self {
-                limit: 1000,      // 1k requests
+                limit: 1000,       // 1k requests
                 window_secs: 3600, // per hour
             },
             RateLimitTier::AgentHigh => Self {
-                limit: 10000,     // 10k requests
+                limit: 10000,      // 10k requests
                 window_secs: 3600, // per hour
             },
             RateLimitTier::ServiceUnlimited => Self {
-                limit: u64::MAX,  // effectively unlimited
+                limit: u64::MAX, // effectively unlimited
                 window_secs: 3600,
             },
             RateLimitTier::CIStandard => Self {
-                limit: 5000,      // 5k requests
+                limit: 5000,       // 5k requests
                 window_secs: 3600, // per hour
             },
         }
@@ -219,9 +219,11 @@ impl RateLimitService {
 
         let key = self.build_key(entity_id, tier);
 
-        let mut conn = self.redis.get().await.map_err(|e| {
-            AppError::Internal(format!("Redis connection error: {}", e))
-        })?;
+        let mut conn = self
+            .redis
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
         // Get current count and TTL
         let count: Option<u64> = conn.get(&key).await?;
@@ -256,9 +258,11 @@ impl RateLimitService {
         tier: RateLimitTier,
     ) -> ApiResult<()> {
         let key = self.build_key(entity_id, tier);
-        let mut conn = self.redis.get().await.map_err(|e| {
-            AppError::Internal(format!("Redis connection error: {}", e))
-        })?;
+        let mut conn = self
+            .redis
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
         conn.del::<_, ()>(&key).await?;
 
         debug!(

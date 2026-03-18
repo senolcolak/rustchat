@@ -39,10 +39,7 @@ mod entity_tests {
             serde_json::to_string(&EntityType::Service).unwrap(),
             r#""service""#
         );
-        assert_eq!(
-            serde_json::to_string(&EntityType::CI).unwrap(),
-            r#""ci""#
-        );
+        assert_eq!(serde_json::to_string(&EntityType::CI).unwrap(), r#""ci""#);
     }
 
     #[test]

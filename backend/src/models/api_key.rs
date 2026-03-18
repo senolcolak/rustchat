@@ -63,9 +63,7 @@ impl ApiKey {
 
     /// Check if this API key has expired
     pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|exp| exp < Utc::now())
-            .unwrap_or(false)
+        self.expires_at.map(|exp| exp < Utc::now()).unwrap_or(false)
     }
 
     /// Check if this API key is valid (active and not expired)

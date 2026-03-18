@@ -538,10 +538,7 @@ async fn enforce_password_login_allowed(state: &AppState, user_email: &str) -> A
 /// This endpoint supports polymorphic authentication:
 /// - JWT token (for human users via browser/mobile)
 /// - API key (for agents, services, and CI systems)
-async fn me(
-    State(state): State<AppState>,
-    auth: PolymorphicAuth,
-) -> ApiResult<Json<mm::User>> {
+async fn me(State(state): State<AppState>, auth: PolymorphicAuth) -> ApiResult<Json<mm::User>> {
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(auth.user_id)
         .fetch_one(&state.db)

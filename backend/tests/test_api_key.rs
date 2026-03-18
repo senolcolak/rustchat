@@ -28,7 +28,11 @@ async fn test_generate_api_key_format() {
     let key = generate_api_key();
 
     // Should be exactly 68 characters (rck_ + 64 hex)
-    assert_eq!(key.len(), 68, "API key should be 68 characters (rck_ + 64 hex)");
+    assert_eq!(
+        key.len(),
+        68,
+        "API key should be 68 characters (rck_ + 64 hex)"
+    );
 
     // Should start with rck_
     assert!(key.starts_with("rck_"), "API key should start with rck_");

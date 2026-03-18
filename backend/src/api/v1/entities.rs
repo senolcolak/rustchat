@@ -220,7 +220,8 @@ async fn register_entity(
                                     attempt
                                 );
                                 return Err(AppError::Internal(
-                                    "Failed to generate unique API key after multiple attempts".to_string()
+                                    "Failed to generate unique API key after multiple attempts"
+                                        .to_string(),
                                 ));
                             }
 
@@ -310,13 +311,12 @@ fn validate_email(email: &str) -> ApiResult<()> {
 
 /// Check for duplicate username or email
 async fn check_duplicates(db: &PgPool, username: &str, email: &str) -> ApiResult<()> {
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT username FROM users WHERE username = $1 OR email = $2 LIMIT 1",
-    )
-    .bind(username)
-    .bind(email)
-    .fetch_optional(db)
-    .await?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT username FROM users WHERE username = $1 OR email = $2 LIMIT 1")
+            .bind(username)
+            .bind(email)
+            .fetch_optional(db)
+            .await?;
 
     if let Some((existing_username,)) = existing {
         if existing_username == username {
@@ -357,6 +357,7 @@ mod tests {
         // Invalid emails
         assert!(validate_email("").is_err()); // Empty
         assert!(validate_email("notemail").is_err()); // No @
-        assert!(validate_email(&format!("{}@domain.com", "a".repeat(250))).is_err()); // Too long
+        assert!(validate_email(&format!("{}@domain.com", "a".repeat(250))).is_err());
+        // Too long
     }
 }

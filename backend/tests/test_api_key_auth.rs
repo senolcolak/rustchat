@@ -203,12 +203,7 @@ async fn test_api_key_auth_fails_with_missing_header(pool: PgPool) -> anyhow::Re
         .with_state(state);
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/test")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
         .await
         .unwrap();
 

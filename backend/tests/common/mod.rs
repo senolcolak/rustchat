@@ -386,14 +386,14 @@ pub async fn create_test_state(pool: PgPool) -> anyhow::Result<rustchat::api::Ap
             SFUManager::new(config.calls.clone(), voice_tx)
         },
         call_state_manager: {
-            use rustchat::api::v4::calls_plugin::state::{CallStateManager, CallStateBackend};
+            use rustchat::api::v4::calls_plugin::state::{CallStateBackend, CallStateManager};
             std::sync::Arc::new(CallStateManager::with_backend(
                 Some(redis_pool.clone()),
                 CallStateBackend::parse(&config.calls.state_backend),
             ))
         },
         circuit_breakers: std::sync::Arc::new(
-            rustchat::middleware::reliability::ServiceCircuitBreakers::new()
+            rustchat::middleware::reliability::ServiceCircuitBreakers::new(),
         ),
         reconciliation_tx: None,
     })

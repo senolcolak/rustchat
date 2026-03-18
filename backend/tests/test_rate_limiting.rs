@@ -267,10 +267,7 @@ async fn test_rate_limit_reset() {
         .get_rate_limit_status(&entity_id, RateLimitTier::HumanStandard)
         .await
         .unwrap();
-    assert_eq!(
-        status_after.current_count, 0,
-        "Count should be reset to 0"
-    );
+    assert_eq!(status_after.current_count, 0, "Count should be reset to 0");
     assert_eq!(
         status_after.remaining, 1000,
         "Remaining should be back to limit"
@@ -301,7 +298,10 @@ async fn test_rate_limit_status_for_unlimited() {
         u64::MAX,
         "Unlimited tier shows MAX remaining"
     );
-    assert!(status.reset_at.is_none(), "Unlimited tier has no reset time");
+    assert!(
+        status.reset_at.is_none(),
+        "Unlimited tier has no reset time"
+    );
 }
 
 #[tokio::test]
@@ -384,9 +384,8 @@ async fn test_rate_limit_exceeded_error() {
     }
 
     // Verify the error variant exists by checking type
-    let _error_check: Result<(), AppError> = Err(AppError::RateLimitExceeded(
-        "Test error".to_string(),
-    ));
+    let _error_check: Result<(), AppError> =
+        Err(AppError::RateLimitExceeded("Test error".to_string()));
 }
 
 #[tokio::test]
