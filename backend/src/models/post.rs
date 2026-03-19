@@ -96,6 +96,7 @@ pub struct PostResponse {
     // User info from JOIN
     pub username: Option<String>,
     pub avatar_url: Option<String>,
+    #[serde(skip)] // Email is sensitive PII - do not expose in API responses
     pub email: Option<String>,
     // reply_count: Option<i64> - Removed, using direct field
     #[sqlx(skip)]

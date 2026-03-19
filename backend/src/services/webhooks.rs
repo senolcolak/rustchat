@@ -8,8 +8,90 @@ use crate::error::{ApiResult, AppError};
 use crate::middleware::reliability::{send_reqwest_with_retry, RetryCondition, RetryConfig};
 use crate::models::{IncomingWebhook, OutgoingWebhook, OutgoingWebhookPayload, WebhookPayload};
 use crate::services::posts;
+use std::net::IpAddr;
 use std::time::Duration;
 use uuid::Uuid;
+
+/// Validates that a URL is safe for webhook callbacks (no SSRF to internal networks)
+pub fn is_valid_callback_url(url: &str) -> bool {
+    let Ok(parsed) = url.parse::<reqwest::Url>() else {
+        return false;
+    };
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return false,
+    }
+
+    // Check host is present
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+
+    // Block localhost and loopback
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return false;
+    }
+
+    // Check if host is an IP address
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        // Block private IP ranges
+        match ip {
+            IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                // 10.0.0.0/8
+                if octets[0] == 10 {
+                    return false;
+                }
+                // 172.16.0.0/12
+                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+                    return false;
+                }
+                // 192.168.0.0/16
+                if octets[0] == 192 && octets[1] == 168 {
+                    return false;
+                }
+                // 127.0.0.0/8 (loopback)
+                if octets[0] == 127 {
+                    return false;
+                }
+                // 169.254.0.0/16 (link-local/APIPA - includes cloud metadata)
+                if octets[0] == 169 && octets[1] == 254 {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                let segments = v6.segments();
+                // ::1 (loopback)
+                if segments == [0, 0, 0, 0, 0, 0, 0, 1] {
+                    return false;
+                }
+                // fe80::/10 (link-local)
+                if segments[0] & 0xffc0 == 0xfe80 {
+                    return false;
+                }
+                // fc00::/7 (unique local addresses)
+                if segments[0] & 0xfe00 == 0xfc00 {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Block cloud metadata endpoints by hostname
+    let host_lower = host.to_lowercase();
+    if host_lower == "169.254.169.254"
+        || host_lower.ends_with(".internal")
+        || host_lower == "metadata.google.internal"
+        || host_lower == "instance-data.ec2.internal"
+        || host_lower == "metadata.azure.internal"
+    {
+        return false;
+    }
+
+    true
+}
 
 /// Execute an incoming webhook - creates a post in the target channel
 pub async fn execute_incoming_webhook(
@@ -110,8 +192,12 @@ pub async fn check_outgoing_triggers(
                 trigger_word: trigger_word.clone(),
             };
 
-            // Spawn async task to call each callback URL
+            // Spawn async task to call each callback URL (filter out SSRF-risky URLs)
             for url in &hook.callback_urls {
+                if !is_valid_callback_url(url) {
+                    tracing::warn!("Skipping outgoing webhook to invalid URL: {}", url);
+                    continue;
+                }
                 let url = url.clone();
                 let payload = payload.clone();
                 let content_type = hook

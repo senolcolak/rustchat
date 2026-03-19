@@ -2506,7 +2506,8 @@ async fn update_user_roles(
     Path(user_id): Path<String>,
     Json(input): Json<UserRolesRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.has_permission(&permissions::USER_MANAGE) {
+    // Only system admins can grant system_admin role - prevents org_admin self-escalation
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2630,7 +2631,8 @@ async fn promote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.has_permission(&permissions::USER_MANAGE) {
+    // Only system admins can promote to system_admin - prevents org_admin self-escalation
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
