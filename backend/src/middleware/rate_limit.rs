@@ -16,95 +16,93 @@
 //! - ServiceUnlimited: no limit
 //! - CIStandard: 5k req/hr
 //!
-//! ### 2. IP-Based Rate Limiting (Delegated to Reverse Proxy)
-//! Unauthenticated endpoints (login, registration, password reset) are rate limited
-//! by IP address. This is **delegated to the reverse proxy layer** (nginx, Cloudflare, etc.)
-//! for better performance and DDoS protection.
+//! ### 2. IP-Based Rate Limiting (Application Layer)
+//! Unauthenticated endpoints (login, registration, password reset, WebSocket) are
+//! rate limited by IP address using the RateLimitService (Redis-backed sliding window).
 //!
-//! The middleware functions below are stubs that pass through requests, relying on
-//! upstream infrastructure for IP rate limiting. In production:
-//! - nginx limit_req module
-//! - Cloudflare rate limiting rules
-//! - AWS WAF rate-based rules
-//!
-//! This approach is preferred because:
-//! - Reverse proxies handle rate limiting before requests reach the application
-//! - Better protection against layer 7 DDoS attacks
-//! - Lower latency (no Redis roundtrip per request)
-//! - Centralized rate limit configuration
+//! When `TRUST_PROXY=true`, the client IP is read from the first value in the
+//! `X-Forwarded-For` header (set by nginx/Cloudflare). Otherwise the socket address
+//! is used directly.
 
 use crate::error::AppError;
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
+    http::HeaderMap,
     middleware::Next,
     response::Response,
 };
+use std::net::SocketAddr;
+
+/// Extract the originating client IP.
+/// When the `TRUST_PROXY` environment variable is `"true"`, reads the first
+/// value from `X-Forwarded-For` (the client IP). Otherwise uses the socket address.
+fn extract_client_ip(addr: &SocketAddr, headers: &HeaderMap) -> String {
+    let trust_proxy = std::env::var("TRUST_PROXY")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if trust_proxy {
+        if let Some(xff) = headers.get("x-forwarded-for") {
+            if let Ok(s) = xff.to_str() {
+                if let Some(ip) = s.split(',').next() {
+                    return ip.trim().to_string();
+                }
+            }
+        }
+    }
+
+    addr.ip().to_string()
+}
 
 /// Rate limit middleware for registration endpoints
-///
-/// **Note:** IP-based rate limiting is delegated to reverse proxy (nginx/Cloudflare).
-/// This middleware passes requests through without additional rate limiting.
-///
-/// Recommended reverse proxy configuration:
-/// - nginx: `limit_req zone=registration burst=5 nodelay;`
-/// - Cloudflare: 5 requests per minute per IP
 pub async fn register_ip_rate_limit(
-    State(_state): State<crate::api::AppState>,
+    State(state): State<crate::api::AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // IP rate limiting delegated to reverse proxy
+    let ip = extract_client_ip(&addr, &headers);
+    state.rate_limit.check_register_ip(&ip).await?;
     Ok(next.run(request).await)
 }
 
 /// Rate limit middleware for auth endpoints
-///
-/// **Note:** IP-based rate limiting is delegated to reverse proxy (nginx/Cloudflare).
-/// This middleware passes requests through without additional rate limiting.
-///
-/// Recommended reverse proxy configuration:
-/// - nginx: `limit_req zone=auth burst=10 nodelay;`
-/// - Cloudflare: 10 requests per minute per IP
 pub async fn auth_ip_rate_limit(
-    State(_state): State<crate::api::AppState>,
+    State(state): State<crate::api::AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // IP rate limiting delegated to reverse proxy
+    let ip = extract_client_ip(&addr, &headers);
+    state.rate_limit.check_auth_ip(&ip).await?;
     Ok(next.run(request).await)
 }
 
 /// Rate limit middleware for password reset endpoints
-///
-/// **Note:** IP-based rate limiting is delegated to reverse proxy (nginx/Cloudflare).
-/// This middleware passes requests through without additional rate limiting.
-///
-/// Recommended reverse proxy configuration:
-/// - nginx: `limit_req zone=password_reset burst=3 nodelay;`
-/// - Cloudflare: 3 requests per minute per IP
 pub async fn password_reset_ip_rate_limit(
-    State(_state): State<crate::api::AppState>,
+    State(state): State<crate::api::AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // IP rate limiting delegated to reverse proxy
+    let ip = extract_client_ip(&addr, &headers);
+    state.rate_limit.check_password_reset_ip(&ip).await?;
     Ok(next.run(request).await)
 }
 
 /// Rate limit middleware for WebSocket endpoints
-///
-/// **Note:** IP-based rate limiting is delegated to reverse proxy (nginx/Cloudflare).
-/// This middleware passes requests through without additional rate limiting.
-///
-/// Recommended reverse proxy configuration:
-/// - nginx: `limit_req zone=websocket burst=20 nodelay;`
-/// - Cloudflare: 20 requests per minute per IP
 pub async fn websocket_ip_rate_limit(
-    State(_state): State<crate::api::AppState>,
+    State(state): State<crate::api::AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // IP rate limiting delegated to reverse proxy
+    let ip = extract_client_ip(&addr, &headers);
+    state.rate_limit.check_websocket_ip(&ip).await?;
     Ok(next.run(request).await)
 }
 
