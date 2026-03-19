@@ -270,10 +270,33 @@ async fn remove_reaction_internal(
 
 pub(super) async fn get_reactions(
     State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(post_id): Path<String>,
 ) -> ApiResult<Json<Vec<mm::Reaction>>> {
     let post_id = parse_mm_or_uuid(&post_id)
         .ok_or_else(|| AppError::BadRequest("Invalid post_id".to_string()))?;
+
+    // Verify the caller is a member of the channel that owns this post.
+    let is_member: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM posts p
+            JOIN channel_members cm ON cm.channel_id = p.channel_id
+            WHERE p.id = $1 AND cm.user_id = $2
+        )
+        "#,
+    )
+    .bind(post_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if !is_member {
+        return Err(AppError::Forbidden(
+            "You are not a member of the channel containing this post".to_string(),
+        ));
+    }
+
     let reactions: Vec<(Uuid, Uuid, String, DateTime<Utc>, Uuid)> = sqlx::query_as(
         r#"
         SELECT r.user_id, r.post_id, r.emoji_name, r.created_at, p.channel_id

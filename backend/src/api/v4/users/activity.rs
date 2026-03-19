@@ -8,9 +8,10 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::{MmAuthUser, resolve_user_id};
+use super::MmAuthUser;
 use crate::api::AppState;
-use crate::error::ApiResult;
+use crate::error::{ApiResult, AppError};
+use crate::mattermost_compat::id::parse_mm_or_uuid;
 use crate::models::{ActivityFeedResponse, ActivityQuery, MarkReadRequest};
 use crate::services::activity;
 
@@ -30,6 +31,23 @@ fn default_limit() -> i64 {
     50
 }
 
+/// Resolves the target user ID, enforcing that callers can only access their own activity feed.
+/// Unlike the shared resolve_user_id, this intentionally does NOT grant admin bypass — activity
+/// feeds contain personal notification data that admins have no legitimate reason to read.
+fn resolve_activity_user_id(user_id_str: &str, auth: &MmAuthUser) -> ApiResult<uuid::Uuid> {
+    if user_id_str == "me" {
+        return Ok(auth.user_id);
+    }
+    let user_id = parse_mm_or_uuid(user_id_str)
+        .ok_or_else(|| AppError::BadRequest("Invalid user ID".to_string()))?;
+    if user_id != auth.user_id {
+        return Err(AppError::Forbidden(
+            "Cannot access another user's activity feed".to_string(),
+        ));
+    }
+    Ok(user_id)
+}
+
 /// Build the activity router - called from users.rs router function
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -45,7 +63,7 @@ async fn get_activity_feed(
     Query(params): Query<GetActivityParams>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<ActivityFeedResponse>> {
-    let target_id = resolve_user_id(&user_id, &auth)?;
+    let target_id = resolve_activity_user_id(&user_id, &auth)?;
 
     let query = ActivityQuery {
         cursor: params.cursor,
@@ -65,7 +83,7 @@ async fn mark_read(
     auth: MmAuthUser,
     Json(payload): Json<MarkReadRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let target_id = resolve_user_id(&user_id, &auth)?;
+    let target_id = resolve_activity_user_id(&user_id, &auth)?;
     let updated = activity::mark_activities_read(&state, target_id, payload.activity_ids).await?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
@@ -76,7 +94,7 @@ async fn mark_all_read(
     Path(user_id): Path<String>,
     auth: MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let target_id = resolve_user_id(&user_id, &auth)?;
+    let target_id = resolve_activity_user_id(&user_id, &auth)?;
     let updated = activity::mark_all_read(&state, target_id).await?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
