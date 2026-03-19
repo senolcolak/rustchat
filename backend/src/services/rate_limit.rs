@@ -71,6 +71,39 @@ impl RateLimitConfig {
     }
 }
 
+/// Rate limit config for IP/key-based limits (admin-configurable, hot-reloadable)
+#[derive(Debug, Clone, Copy)]
+pub struct IpRateLimitConfig {
+    /// Max requests allowed per window
+    pub limit: u64,
+    /// Window duration in seconds
+    pub window_secs: u64,
+    /// If false, this limit is skipped entirely
+    pub enabled: bool,
+}
+
+/// Full set of hot-reloadable IP rate limit configs, populated from the `rate_limits` DB table
+#[derive(Debug, Clone)]
+pub struct RateLimitLimits {
+    pub auth_ip: IpRateLimitConfig,
+    pub auth_user: IpRateLimitConfig,
+    pub register_ip: IpRateLimitConfig,
+    pub password_reset_ip: IpRateLimitConfig,
+    pub websocket_ip: IpRateLimitConfig,
+}
+
+impl Default for RateLimitLimits {
+    fn default() -> Self {
+        Self {
+            auth_ip:            IpRateLimitConfig { limit: 20, window_secs: 60, enabled: true },
+            auth_user:          IpRateLimitConfig { limit: 10, window_secs: 60, enabled: true },
+            register_ip:        IpRateLimitConfig { limit: 10, window_secs: 60, enabled: true },
+            password_reset_ip:  IpRateLimitConfig { limit:  5, window_secs: 60, enabled: true },
+            websocket_ip:       IpRateLimitConfig { limit: 30, window_secs: 60, enabled: true },
+        }
+    }
+}
+
 /// Rate limiting service
 ///
 /// Provides atomic rate limit checks using Redis Lua scripts.
