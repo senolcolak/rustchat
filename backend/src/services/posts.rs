@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::services::activity;
 use crate::error::{ApiResult, AppError};
 use crate::models::{ChannelMember, CreatePost, FileUploadResponse, Post, PostResponse};
 use crate::realtime::{EventType, WsBroadcast, WsEnvelope};
@@ -90,6 +91,56 @@ pub async fn create_post(
         .bind(r_id)
         .execute(&state.db)
         .await?;
+
+        // Create reply/thread_reply activity for the parent post author
+        let parent_info: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT user_id, root_post_id FROM posts WHERE id = $1"
+        )
+        .bind(r_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some((parent_user_id, parent_root_id)) = parent_info {
+            if parent_user_id != user_id {
+                let team_id_for_reply: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT team_id FROM channels WHERE id = $1"
+                )
+                .bind(channel_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(team_id) = team_id_for_reply {
+                    if parent_root_id.is_some() {
+                        // Parent is itself a reply, this is a thread reply
+                        let _ = activity::create_thread_reply_activity(
+                            state,
+                            parent_user_id,
+                            user_id,
+                            channel_id,
+                            team_id,
+                            post.id,
+                            r_id,
+                            &input.message,
+                        ).await;
+                    } else {
+                        // Parent is a root post, this is a direct reply
+                        let _ = activity::create_reply_activity(
+                            state,
+                            parent_user_id,
+                            user_id,
+                            channel_id,
+                            team_id,
+                            post.id,
+                            &input.message,
+                        ).await;
+                    }
+                }
+            }
+        }
     }
 
     // Fetch user details
@@ -252,6 +303,41 @@ pub async fn create_post(
             .ok();
 
         response.props = serde_json::Value::Object(props);
+
+        // Create mention activities for mentioned users
+        // Get team_id for the channel
+        let team_id_opt: Option<Uuid> = sqlx::query_scalar(
+            "SELECT team_id FROM channels WHERE id = $1"
+        )
+        .bind(channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(team_id) = team_id_opt {
+            for username in &mentions {
+                if let Ok(Some(mentioned_user_id)) = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM users WHERE username = $1"
+                )
+                .bind(username)
+                .fetch_optional(&state.db)
+                .await
+                {
+                    if mentioned_user_id != user_id {
+                        let _ = activity::create_mention_activity(
+                            state,
+                            mentioned_user_id,
+                            user_id,
+                            channel_id,
+                            team_id,
+                            post.id,
+                            &response.message,
+                        ).await;
+                    }
+                }
+            }
+        }
     }
 
     // Send push notifications for mentions and DMs
