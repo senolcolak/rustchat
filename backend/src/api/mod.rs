@@ -78,6 +78,7 @@ use crate::config::Config;
 use crate::middleware::reliability::ServiceCircuitBreakers;
 use crate::middleware::security_headers::{cors_compatible_config, SecurityHeadersLayer};
 use crate::realtime::{ConnectionStore, WsHub};
+use crate::services::rate_limit::RateLimitService;
 use crate::storage::S3Client;
 use tokio::sync::mpsc;
 
@@ -145,6 +146,7 @@ pub struct AppState {
     pub sfu_manager: Arc<SFUManager>,
     pub call_state_manager: Arc<CallStateManager>,
     pub circuit_breakers: Arc<ServiceCircuitBreakers>,
+    pub rate_limit: Arc<RateLimitService>,
     pub reconciliation_tx: Option<
         async_channel::Sender<crate::services::membership_reconciliation::ReconciliationTask>,
     >,
@@ -159,6 +161,7 @@ pub fn router(
     ws_hub: Arc<WsHub>,
     s3_client: S3Client,
     config: Config,
+    rate_limit: Arc<RateLimitService>,
 ) -> Router {
     let (voice_event_tx, voice_event_rx) = mpsc::channel(VOICE_EVENT_CHANNEL_CAPACITY);
     let sfu_manager = SFUManager::new(config.calls.clone(), voice_event_tx);
@@ -185,6 +188,7 @@ pub fn router(
         sfu_manager: sfu_manager.clone(),
         call_state_manager: call_state_manager.clone(),
         circuit_breakers: Arc::new(ServiceCircuitBreakers::new()),
+        rate_limit: Arc::new(RateLimitService::new(redis.clone(), db.clone())),
         reconciliation_tx: None,
     });
 
@@ -215,6 +219,7 @@ pub fn router(
         sfu_manager,
         call_state_manager,
         circuit_breakers: Arc::new(ServiceCircuitBreakers::new()),
+        rate_limit,
         reconciliation_tx: Some(reconciliation_tx),
     };
 
