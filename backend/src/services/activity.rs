@@ -5,6 +5,7 @@ use crate::error::{ApiResult, AppError};
 use crate::models::{Activity, ActivityFeedResponse, ActivityQuery, ActivityResponse, ActivityType};
 use crate::realtime::{EventType, WsBroadcast, WsEnvelope};
 use chrono::{DateTime, Utc};
+use sqlx::Row;
 use uuid::Uuid;
 
 /// Helper to truncate message text
@@ -12,7 +13,7 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     if text.chars().count() <= max_len {
         text.to_string()
     } else {
-        let truncated: String = text.chars().take(max_len).collect();
+        let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
         format!("{}...", truncated)
     }
 }
@@ -49,13 +50,6 @@ pub async fn create_activity(
     message_text: Option<String>,
     reaction: Option<String>,
 ) -> ApiResult<Activity> {
-    // Don't create activities that notify users of their own actions
-    if user_id == actor_id {
-        return Err(AppError::BadRequest(
-            "Cannot create self-activity".to_string(),
-        ));
-    }
-
     let activity: Activity = sqlx::query_as(
         r#"
         INSERT INTO activities
@@ -136,7 +130,7 @@ pub async fn get_activities(
         JOIN channels c ON a.channel_id = c.id
         JOIN teams t ON a.team_id = t.id
         WHERE a.user_id = $1
-          AND ($2::uuid IS NULL OR a.created_at < (SELECT created_at FROM activities WHERE id = $2))
+          AND ($2::uuid IS NULL OR (a.created_at, a.id) < (SELECT created_at, id FROM activities WHERE id = $2))
           AND ($3::text[] IS NULL OR a.type::text = ANY($3))
           AND (NOT $4 OR a.read = FALSE)
         ORDER BY a.created_at DESC
@@ -152,7 +146,6 @@ pub async fn get_activities(
         .fetch_all(&state.db)
         .await?;
 
-    use sqlx::Row;
     let mut rows: Vec<ActivityRow> = rows_raw
         .into_iter()
         .map(|row| ActivityRow {
@@ -184,11 +177,12 @@ pub async fn get_activities(
         None
     };
 
-    // Get unread count (separate query, independent of pagination)
+    // Get unread count (separate query, independent of pagination, scoped to type filter)
     let unread_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM activities WHERE user_id = $1 AND read = FALSE",
+        "SELECT COUNT(*) FROM activities WHERE user_id = $1 AND read = FALSE AND ($2::text[] IS NULL OR type::text = ANY($2))"
     )
     .bind(user_id)
+    .bind(type_filters.as_deref())
     .fetch_one(&state.db)
     .await?;
 
@@ -242,6 +236,22 @@ pub async fn mark_activities_read(
     .bind(&activity_ids)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() > 0 {
+        let broadcast = WsEnvelope::event(
+            EventType::ActivityRead,
+            serde_json::json!({ "activity_ids": activity_ids }),
+            None,
+        )
+        .with_broadcast(WsBroadcast {
+            user_id: Some(user_id),
+            channel_id: None,
+            team_id: None,
+            exclude_user_id: None,
+        });
+        state.ws_hub.broadcast(broadcast).await;
+    }
+
     Ok(result.rows_affected() as usize)
 }
 
@@ -253,6 +263,22 @@ pub async fn mark_all_read(state: &AppState, user_id: Uuid) -> ApiResult<usize> 
     .bind(user_id)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() > 0 {
+        let broadcast = WsEnvelope::event(
+            EventType::ActivityRead,
+            serde_json::json!({ "all_read": true }),
+            None,
+        )
+        .with_broadcast(WsBroadcast {
+            user_id: Some(user_id),
+            channel_id: None,
+            team_id: None,
+            exclude_user_id: None,
+        });
+        state.ws_hub.broadcast(broadcast).await;
+    }
+
     Ok(result.rows_affected() as usize)
 }
 
