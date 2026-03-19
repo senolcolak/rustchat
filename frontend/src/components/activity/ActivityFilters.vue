@@ -28,6 +28,7 @@ const filters: FilterOption[] = [
   { label: 'All', value: null },
   { label: 'Mentions', value: ActivityType.MENTION },
   { label: 'Replies', value: ActivityType.REPLY },
+  { label: 'Threads', value: ActivityType.THREAD_REPLY },
   { label: 'Reactions', value: ActivityType.REACTION },
   { label: 'DMs', value: ActivityType.DM }
 ]

@@ -14,7 +14,12 @@ function parseActivityType(raw: string): ActivityType {
     dm: ActivityType.DM,
     thread_reply: ActivityType.THREAD_REPLY
   }
-  return map[raw] ?? ActivityType.MENTION
+  const type = map[raw]
+  if (type === undefined) {
+    console.warn(`[ActivitySocket] Unknown activity type: ${raw}, defaulting to MENTION`)
+    return ActivityType.MENTION
+  }
+  return type
 }
 
 export function handleActivityCreated(data: Record<string, unknown>): void {
@@ -33,7 +38,7 @@ export function handleActivityCreated(data: Record<string, unknown>): void {
     message: data.message_text as string | undefined,
     reaction: data.reaction as string | undefined,
     read: false,
-    createdAt: new Date()
+    createdAt: data.created_at ? new Date(data.created_at as string) : new Date()
   }
 
   activityService.handleNewActivity(activity)
@@ -42,8 +47,5 @@ export function handleActivityCreated(data: Record<string, unknown>): void {
 export function handleActivityRead(_data: Record<string, unknown>): void {
   // Multi-device sync: another session marked activities as read
   // Reload to sync state
-  const store = (activityService as unknown as { store: { isOpen: boolean } })['store']
-  if (store.isOpen) {
-    activityService.loadActivities(true)
-  }
+  activityService.syncIfOpen()
 }

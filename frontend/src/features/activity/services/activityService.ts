@@ -114,6 +114,12 @@ class ActivityService {
     this.store.closeFeed()
   }
 
+  syncIfOpen(): void {
+    if (this.store.isOpen) {
+      void this.loadActivities(true)
+    }
+  }
+
   handleNewActivity(activity: Activity): void {
     this.store.addActivity(activity)
   }
