@@ -25,6 +25,7 @@ use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{channel::Channel, Team, TeamMember, User};
 use crate::services::oauth_token_exchange::{exchange_code_with_sso_verification, ExchangeError};
 
+mod activity;
 mod preferences;
 mod sidebar_categories;
 
@@ -221,6 +222,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             put(update_category_order),
         )
         .route("/users/{user_id}/groups", get(get_user_groups))
+        .merge(activity::routes())
 }
 
 #[derive(Deserialize)]
