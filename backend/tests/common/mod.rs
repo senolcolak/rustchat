@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
-use rustchat::{api, config::Config, realtime::WsHub, storage::S3Client};
+use rustchat::{api, config::Config, realtime::WsHub, services::rate_limit::RateLimitService, storage::S3Client};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use uuid::Uuid;
 
 // Ensure tracing is initialized only once
@@ -77,6 +78,7 @@ pub async fn spawn_app_with_config(config: Config) -> TestApp {
     // Initialize Redis using explicit test URL first, then known local fallbacks.
     let redis_pool = configure_redis_with_fallback(&collect_test_redis_urls()).await;
 
+    let rate_limit = Arc::new(RateLimitService::new(redis_pool.clone(), db_pool.clone()));
     let app = api::router(
         db_pool.clone(),
         redis_pool.clone(),
@@ -85,6 +87,7 @@ pub async fn spawn_app_with_config(config: Config) -> TestApp {
         ws_hub,
         s3_client,
         config,
+        rate_limit,
     );
 
     let server = axum::serve(
@@ -349,6 +352,8 @@ pub async fn create_test_state(pool: PgPool) -> anyhow::Result<rustchat::api::Ap
     let jwt_secret = Uuid::new_v4().to_string();
     let jwt_expiry_hours = 1;
 
+    let rate_limit_svc = Arc::new(RateLimitService::new(redis_pool.clone(), pool.clone()));
+
     // Build a temporary router to get properly initialized managers
     // This is cleaner than trying to construct them directly
     let _temp_router = rustchat::api::router(
@@ -359,6 +364,7 @@ pub async fn create_test_state(pool: PgPool) -> anyhow::Result<rustchat::api::Ap
         ws_hub.clone(),
         s3_client.clone(),
         config.clone(),
+        rate_limit_svc.clone(),
     );
 
     // Extract state from the router
@@ -395,6 +401,7 @@ pub async fn create_test_state(pool: PgPool) -> anyhow::Result<rustchat::api::Ap
         circuit_breakers: std::sync::Arc::new(
             rustchat::middleware::reliability::ServiceCircuitBreakers::new(),
         ),
+        rate_limit: rate_limit_svc,
         reconciliation_tx: None,
     })
 }

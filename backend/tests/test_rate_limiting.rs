@@ -385,7 +385,7 @@ async fn test_rate_limit_exceeded_error() {
 
     // Verify the error variant exists by checking type
     let _error_check: Result<(), AppError> =
-        Err(AppError::RateLimitExceeded("Test error".to_string()));
+        Err(AppError::RateLimitExceeded { message: "Test error".to_string(), retry_after_secs: 60 });
 }
 
 #[tokio::test]
