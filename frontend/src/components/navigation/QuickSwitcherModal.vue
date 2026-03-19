@@ -126,7 +126,10 @@ function handleKeydown(e: KeyboardEvent) {
       break
     case 'Enter':
       e.preventDefault()
-      if (items[selectedIndex.value]) selectItem(items[selectedIndex.value])
+      if (items[selectedIndex.value]) {
+        const item = items[selectedIndex.value]
+        if (item) selectItem(item)
+      }
       break
     case 'Escape':
       e.preventDefault()

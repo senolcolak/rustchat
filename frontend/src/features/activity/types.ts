@@ -2,12 +2,14 @@
  * Activity Feed Types
  */
 
-export enum ActivityType {
-  MENTION = 'mention',
-  REPLY = 'reply',
-  REACTION = 'reaction',
-  DM = 'dm',
-  THREAD_REPLY = 'thread_reply'
+export type ActivityType = 'mention' | 'reply' | 'reaction' | 'dm' | 'thread_reply'
+
+export const ActivityType = {
+  MENTION: 'mention' as const,
+  REPLY: 'reply' as const,
+  REACTION: 'reaction' as const,
+  DM: 'dm' as const,
+  THREAD_REPLY: 'thread_reply' as const,
 }
 
 export interface Activity {
