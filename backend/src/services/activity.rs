@@ -71,22 +71,73 @@ pub async fn create_activity(
     .fetch_one(&state.db)
     .await?;
 
-    // Broadcast to the affected user via WebSocket
-    let broadcast = WsEnvelope::event(
-        EventType::ActivityCreated,
-        serde_json::json!({
-            "activity_id": activity.id,
-            "user_id": activity.user_id,
-            "type": activity.r#type
-        }),
-        None,
+    // Fetch full ActivityResponse for broadcast (includes joined actor/channel/team data)
+    let activity_response: Option<ActivityResponse> = sqlx::query(
+        r#"
+        SELECT
+            a.id,
+            a.type as "activity_type: ActivityType",
+            a.actor_id,
+            u.username as actor_username,
+            u.avatar_url as actor_avatar_url,
+            a.channel_id,
+            c.name as channel_name,
+            a.team_id,
+            t.name as team_name,
+            a.post_id,
+            a.root_id,
+            a.message_text,
+            a.reaction,
+            a.read,
+            a.created_at
+        FROM activities a
+        JOIN users u ON a.actor_id = u.id
+        JOIN channels c ON a.channel_id = c.id
+        JOIN teams t ON a.team_id = t.id
+        WHERE a.id = $1
+        "#,
     )
-    .with_broadcast(WsBroadcast {
-        user_id: Some(user_id),
-        channel_id: None,
-        team_id: None,
-        exclude_user_id: None,
+    .bind(activity.id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|row: sqlx::postgres::PgRow| ActivityResponse {
+        id: row.get("id"),
+        r#type: row.get("activity_type"),
+        actor_id: row.get("actor_id"),
+        actor_username: row.get("actor_username"),
+        actor_avatar_url: row.get("actor_avatar_url"),
+        channel_id: row.get("channel_id"),
+        channel_name: row.get("channel_name"),
+        team_id: row.get("team_id"),
+        team_name: row.get("team_name"),
+        post_id: row.get("post_id"),
+        root_id: row.get("root_id"),
+        message_text: row.get("message_text"),
+        reaction: row.get("reaction"),
+        read: row.get("read"),
+        created_at: row.get("created_at"),
     });
+
+    let broadcast_data = activity_response
+        .as_ref()
+        .map(|r| serde_json::to_value(r).unwrap_or_default())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "activity_id": activity.id,
+                "user_id": activity.user_id,
+                "type": activity.r#type
+            })
+        });
+
+    let broadcast = WsEnvelope::event(EventType::ActivityCreated, broadcast_data, None)
+        .with_broadcast(WsBroadcast {
+            user_id: Some(user_id),
+            channel_id: None,
+            team_id: None,
+            exclude_user_id: None,
+        });
 
     state.ws_hub.broadcast(broadcast).await;
 
