@@ -325,15 +325,27 @@ pub async fn create_post(
                 .await
                 {
                     if mentioned_user_id != user_id {
-                        let _ = activity::create_mention_activity(
-                            state,
-                            mentioned_user_id,
-                            user_id,
-                            channel_id,
-                            team_id,
-                            post.id,
-                            &response.message,
-                        ).await;
+                        // Only notify if the mentioned user is actually a member of the channel
+                        let is_member: bool = sqlx::query_scalar(
+                            "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)"
+                        )
+                        .bind(channel_id)
+                        .bind(mentioned_user_id)
+                        .fetch_one(&state.db)
+                        .await
+                        .unwrap_or(false);
+
+                        if is_member {
+                            let _ = activity::create_mention_activity(
+                                state,
+                                mentioned_user_id,
+                                user_id,
+                                channel_id,
+                                team_id,
+                                post.id,
+                                &response.message,
+                            ).await;
+                        }
                     }
                 }
             }
