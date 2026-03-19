@@ -35,7 +35,7 @@ pub struct Activity {
 }
 
 /// Activity response with joined user/channel info for API
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActivityResponse {
     pub id: Uuid,
     pub r#type: ActivityType,
