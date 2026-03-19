@@ -83,6 +83,30 @@ pub(super) async fn add_reaction(
         .fetch_one(&state.db)
         .await?;
 
+    // Create reaction activity for the post author
+    let post_info: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT p.user_id, c.team_id FROM posts p JOIN channels c ON p.channel_id = c.id WHERE p.id = $1"
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((post_user_id, team_id)) = post_info {
+        if post_user_id != auth.user_id {
+            let _ = crate::services::activity::create_reaction_activity(
+                &state,
+                post_user_id,
+                auth.user_id,
+                channel_id,
+                team_id,
+                post_id,
+                &emoji_name,
+            ).await;
+        }
+    }
+
     let mm_reaction = mm::Reaction {
         user_id: encode_mm_id(reaction.user_id),
         post_id: encode_mm_id(reaction.post_id),
