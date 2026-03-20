@@ -191,7 +191,7 @@ async fn restore_team(
 
 async fn get_team_by_name(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(name): Path<String>,
 ) -> ApiResult<Json<mm::Team>> {
     let team: Team = sqlx::query_as("SELECT * FROM teams WHERE name = $1")
@@ -199,6 +199,7 @@ async fn get_team_by_name(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+    ensure_team_member(&state, team.id, auth.user_id).await?;
     Ok(Json(team.into()))
 }
 
@@ -759,7 +760,7 @@ async fn get_team_deleted_channels(
         SELECT c.* FROM channels c
         WHERE c.team_id = $1 AND c.is_archived = true
           AND (
-            c.type != 'P'
+            c.type != 'private'
             OR EXISTS (
                 SELECT 1 FROM channel_members cm
                 WHERE cm.channel_id = c.id AND cm.user_id = $2
@@ -895,6 +896,7 @@ async fn get_team_member_me(
 }
 
 async fn invite_users_to_team(
+    _auth: MmAuthUser,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -903,6 +905,7 @@ async fn invite_users_to_team(
 }
 
 async fn invite_guests_to_team(
+    _auth: MmAuthUser,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -911,6 +914,7 @@ async fn invite_guests_to_team(
 }
 
 async fn invite_users_to_team_by_email(
+    _auth: MmAuthUser,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -919,6 +923,7 @@ async fn invite_users_to_team_by_email(
 }
 
 async fn import_team(
+    _auth: MmAuthUser,
     Path(team_id): Path<String>,
     headers: axum::http::HeaderMap,
     body: Bytes,
@@ -942,7 +947,10 @@ async fn get_team_by_invite(
     Ok(Json(team.into()))
 }
 
-async fn get_team_scheme(Path(team_id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+async fn get_team_scheme(
+    _auth: MmAuthUser,
+    Path(team_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
     Ok(Json(serde_json::json!({
@@ -952,6 +960,7 @@ async fn get_team_scheme(Path(team_id): Path<String>) -> ApiResult<Json<serde_js
 }
 
 async fn update_team_scheme(
+    _auth: MmAuthUser,
     Path(team_id): Path<String>,
     Json(_input): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -961,6 +970,7 @@ async fn update_team_scheme(
 }
 
 async fn get_team_members_minus_group_members(
+    _auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
     let _team_id = parse_mm_or_uuid(&team_id)
@@ -1155,16 +1165,23 @@ async fn search_channels(
 
 async fn search_teams(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Json(input): Json<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<mm::Team>>> {
     let term = input.get("term").map(|s| s.as_str()).unwrap_or_default();
 
-    let teams: Vec<Team> =
-        sqlx::query_as("SELECT * FROM teams WHERE name ILIKE $1 OR display_name ILIKE $1")
-            .bind(format!("%{}%", term))
-            .fetch_all(&state.db)
-            .await?;
+    let teams: Vec<Team> = sqlx::query_as(
+        r#"
+        SELECT t.* FROM teams t
+        JOIN team_members tm ON t.id = tm.team_id
+        WHERE tm.user_id = $1
+          AND (t.name ILIKE $2 OR t.display_name ILIKE $2)
+        "#,
+    )
+    .bind(auth.user_id)
+    .bind(format!("%{}%", term))
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(teams.into_iter().map(|t| t.into()).collect()))
 }
