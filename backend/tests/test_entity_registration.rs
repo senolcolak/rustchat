@@ -3,6 +3,8 @@
 //! These tests verify the /api/v1/entities/register endpoint functionality.
 //! Note: Tests will fail without a running database - this is expected for local development.
 
+#![allow(dead_code, unused_imports)]
+
 use serde_json::json;
 use uuid::Uuid;
 
