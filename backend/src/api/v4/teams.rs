@@ -963,13 +963,110 @@ async fn get_team_member_me(
     }))
 }
 
+#[derive(Deserialize)]
+struct InviteUsersRequest {
+    user_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TeamInviteResponse {
+    user_id: String,
+    team_id: String,
+    token: String,
+    expires_at: i64,
+}
+
+fn generate_invite_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..32)
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
+
 async fn invite_users_to_team(
-    _auth: MmAuthUser,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid invite body")?;
-    Ok(status_ok())
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(team_id): Path<String>,
+    Json(input): Json<InviteUsersRequest>,
+) -> ApiResult<Json<Vec<TeamInviteResponse>>> {
+    let team_id = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_member(&state, team_id, auth.user_id).await?;
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+    let mut responses = Vec::new();
+
+    for user_id_str in &input.user_ids {
+        let user_id = match Uuid::parse_str(user_id_str) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        // Verify the user exists
+        let user_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+        if !user_exists {
+            continue;
+        }
+
+        // Skip if already a team member
+        let already_member: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2)",
+        )
+        .bind(team_id)
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+        if already_member {
+            continue;
+        }
+
+        // Check for existing active invitation
+        let existing: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT token, expires_at FROM team_invitations \
+             WHERE team_id = $1 AND user_id = $2 AND used = false AND expires_at > NOW()",
+        )
+        .bind(team_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (token, inv_expires_at) = if let Some((t, ea)) = existing {
+            (t, ea)
+        } else {
+            let token = generate_invite_token();
+            sqlx::query(
+                "INSERT INTO team_invitations \
+                 (team_id, user_id, invited_by, token, invitation_type, expires_at) \
+                 VALUES ($1, $2, $3, $4, 'member', $5) \
+                 ON CONFLICT (team_id, user_id) WHERE used = false \
+                 DO UPDATE SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at, updated_at = NOW()",
+            )
+            .bind(team_id)
+            .bind(user_id)
+            .bind(auth.user_id)
+            .bind(&token)
+            .bind(expires_at)
+            .execute(&state.db)
+            .await?;
+            (token, expires_at)
+        };
+
+        responses.push(TeamInviteResponse {
+            user_id: encode_mm_id(user_id),
+            team_id: encode_mm_id(team_id),
+            token,
+            expires_at: inv_expires_at.timestamp(),
+        });
+    }
+
+    Ok(Json(responses))
 }
 
 async fn invite_guests_to_team(
