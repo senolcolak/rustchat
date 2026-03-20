@@ -39,6 +39,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use deadpool_redis::redis::AsyncCommands;
 
 /// Rate limit middleware for registration endpoints
 ///
@@ -141,26 +142,55 @@ pub struct RateLimitResult {
     pub reset_at: u64,
 }
 
-/// Legacy rate limit check function (stub)
+/// Per-account rate limit check using a Redis sliding window.
 ///
-/// **Note:** This is a stub that always returns allowed=true.
-/// Real rate limiting is handled by:
-/// - Entity-level: RateLimitService checks in auth extractors
-/// - IP-level: Reverse proxy rate limiting
-///
-/// This function is kept for backward compatibility with existing code
-/// in src/api/auth.rs and src/api/v4/users.rs
+/// Used by login handlers to throttle individual accounts independently of
+/// IP-based limits enforced at the reverse proxy layer.
 pub async fn check_rate_limit(
-    _redis: &deadpool_redis::Pool,
+    redis: &deadpool_redis::Pool,
     config: &RateLimitConfig,
-    _key: &str,
+    key: &str,
 ) -> Result<RateLimitResult, AppError> {
-    // Stub: always allow
-    // Real rate limiting is handled by RateLimitService (entity-level)
-    // and reverse proxy (IP-level)
+    let now = chrono::Utc::now().timestamp();
+    let window_start = now - config.window_secs as i64;
+    let redis_key = format!("ratelimit:{}", key);
+
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+
+    // Remove entries outside the sliding window
+    let _: () = conn
+        .zrembyscore(&redis_key, 0i64, window_start)
+        .await
+        .map_err(AppError::Redis)?;
+
+    // Count remaining entries in the window
+    let current_count: u64 = conn.zcard(&redis_key).await.map_err(AppError::Redis)?;
+
+    if current_count >= config.max_requests {
+        let reset_at = (now as u64) + config.window_secs;
+        return Ok(RateLimitResult {
+            allowed: false,
+            remaining: 0,
+            reset_at,
+        });
+    }
+
+    // Record this attempt and set TTL
+    let _: () = conn
+        .zadd(&redis_key, now, now)
+        .await
+        .map_err(AppError::Redis)?;
+    let _: () = conn
+        .expire(&redis_key, config.window_secs as i64)
+        .await
+        .map_err(AppError::Redis)?;
+
     Ok(RateLimitResult {
         allowed: true,
-        remaining: config.max_requests,
-        reset_at: 0,
+        remaining: config.max_requests - current_count - 1,
+        reset_at: (now as u64) + config.window_secs,
     })
 }

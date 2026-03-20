@@ -7,7 +7,10 @@
 
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts},
+    http::{
+        header::{HeaderName, AUTHORIZATION},
+        request::Parts,
+    },
 };
 use uuid::Uuid;
 
@@ -17,6 +20,7 @@ use crate::api::AppState;
 use crate::auth::middleware::{ensure_user_access_active, FromRef};
 use crate::error::AppError;
 use crate::models::entity::EntityType;
+use crate::services::rate_limit::RateLimitService;
 
 /// Authenticated non-human entity (agent, service, or CI) extracted from API key
 ///
@@ -102,6 +106,11 @@ where
                         entity_type = ?entity_type,
                         "API key authenticated successfully via prefix lookup"
                     );
+                    // Enforce per-entity rate limiting based on tier
+                    let tier = entity_type.default_rate_limit();
+                    RateLimitService::new(app_state.redis.clone())
+                        .check_rate_limit(&user_id, tier)
+                        .await?;
                     return Ok(ApiKeyAuth {
                         user_id,
                         email,
@@ -183,65 +192,104 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
-        // Extract Authorization header
-        let auth_header = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| AppError::Unauthorized("Missing authorization header".to_string()))?;
-
-        // Try Bearer token (could be JWT or API key)
-        if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            // First try JWT - it's faster if it succeeds
-            if let Ok(token_data) = validate_token_with_policy(
-                token,
-                &app_state.jwt_secret,
-                app_state.jwt_issuer.as_deref(),
-                app_state.jwt_audience.as_deref(),
-            ) {
-                // Validate user is active
-                if ensure_user_access_active(&app_state, token_data.claims.sub)
-                    .await
-                    .is_ok()
-                {
-                    return Ok(PolymorphicAuth {
-                        user_id: token_data.claims.sub,
-                        email: token_data.claims.email,
-                        role: token_data.claims.role,
-                        org_id: token_data.claims.org_id,
-                        is_api_key: false,
-                    });
-                }
+        // Extract token using the same multi-format logic as MmAuthUser:
+        // Bearer <token>, Token <token>, lowercase `token` header, MMAUTHTOKEN cookie.
+        // Only the Bearer path also attempts API key auth.
+        let (token, is_bearer) = if let Some(auth_header) = parts.headers.get(AUTHORIZATION) {
+            let auth_str = auth_header
+                .to_str()
+                .map_err(|_| AppError::Unauthorized("Invalid authorization header".to_string()))?;
+            if let Some(stripped) = auth_str.strip_prefix("Bearer ") {
+                (stripped.trim().to_string(), true)
+            } else if let Some(stripped) = auth_str.strip_prefix("Token ") {
+                (stripped.trim().to_string(), false)
+            } else {
+                (auth_str.trim().to_string(), false)
             }
+        } else if let Some(token_header) =
+            parts.headers.get(HeaderName::from_static("token"))
+        {
+            let t = token_header
+                .to_str()
+                .map_err(|_| AppError::Unauthorized("Invalid token header".to_string()))?
+                .trim()
+                .to_string();
+            (t, false)
+        } else if let Some(cookie_header) =
+            parts.headers.get(HeaderName::from_static("cookie"))
+        {
+            let cookie_str = cookie_header
+                .to_str()
+                .map_err(|_| AppError::Unauthorized("Invalid cookie header".to_string()))?;
+            let t = cookie_str
+                .split(';')
+                .map(|s| s.trim())
+                .find_map(|c| c.strip_prefix("MMAUTHTOKEN="))
+                .ok_or_else(|| {
+                    AppError::Unauthorized("Missing authorization header".to_string())
+                })?
+                .to_string();
+            (t, false)
+        } else {
+            return Err(AppError::Unauthorized(
+                "Missing authorization header".to_string(),
+            ));
+        };
 
-            // JWT failed, try API key
-            let prefix = extract_prefix(token)
-                .map_err(|_| AppError::Unauthorized("Invalid API key format".to_string()))?;
+        // Try JWT first (works for all token formats)
+        if let Ok(token_data) = validate_token_with_policy(
+            &token,
+            &app_state.jwt_secret,
+            app_state.jwt_issuer.as_deref(),
+            app_state.jwt_audience.as_deref(),
+        ) {
+            if ensure_user_access_active(&app_state, token_data.claims.sub)
+                .await
+                .is_ok()
+            {
+                return Ok(PolymorphicAuth {
+                    user_id: token_data.claims.sub,
+                    email: token_data.claims.email,
+                    role: token_data.claims.role,
+                    org_id: token_data.claims.org_id,
+                    is_api_key: false,
+                });
+            }
+        }
 
-            let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> =
-                sqlx::query_as(
-                    r#"
-                SELECT id, email, entity_type, org_id, role, api_key_hash
-                FROM users
-                WHERE api_key_prefix = $1
-                    AND entity_type IN ('agent', 'service', 'ci')
-                    AND is_active = true
-                    AND deleted_at IS NULL
-                "#,
-                )
-                .bind(&prefix)
-                .fetch_optional(&app_state.db)
-                .await?;
+        // API keys are only sent as Bearer tokens
+        if is_bearer {
+            if let Ok(prefix) = extract_prefix(&token) {
+                let entity: Option<(Uuid, String, EntityType, Option<Uuid>, String, String)> =
+                    sqlx::query_as(
+                        r#"
+                    SELECT id, email, entity_type, org_id, role, api_key_hash
+                    FROM users
+                    WHERE api_key_prefix = $1
+                        AND entity_type IN ('agent', 'service', 'ci')
+                        AND is_active = true
+                        AND deleted_at IS NULL
+                    "#,
+                    )
+                    .bind(&prefix)
+                    .fetch_optional(&app_state.db)
+                    .await?;
 
-            if let Some((user_id, email, _entity_type, org_id, role, hash)) = entity {
-                if let Ok(true) = validate_api_key(token, &hash).await {
-                    return Ok(PolymorphicAuth {
-                        user_id,
-                        email,
-                        role,
-                        org_id,
-                        is_api_key: true,
-                    });
+                if let Some((user_id, email, entity_type, org_id, role, hash)) = entity {
+                    if let Ok(true) = validate_api_key(&token, &hash).await {
+                        // Enforce per-entity rate limiting
+                        let tier = entity_type.default_rate_limit();
+                        RateLimitService::new(app_state.redis.clone())
+                            .check_rate_limit(&user_id, tier)
+                            .await?;
+                        return Ok(PolymorphicAuth {
+                            user_id,
+                            email,
+                            role,
+                            org_id,
+                            is_api_key: true,
+                        });
+                    }
                 }
             }
         }
