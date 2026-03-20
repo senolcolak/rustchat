@@ -6,7 +6,6 @@
 #[cfg(test)]
 mod entity_tests {
     use rustchat::models::entity::{EntityType, RateLimitTier};
-    use serde_json;
 
     #[test]
     fn test_entity_type_variants() {
