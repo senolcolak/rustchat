@@ -102,7 +102,10 @@ impl From<Team> for mm::Team {
             id: encode_mm_id(team.id),
             create_at: team.created_at.timestamp_millis(),
             update_at: team.updated_at.timestamp_millis(),
-            delete_at: 0,
+            delete_at: team
+                .deleted_at
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(0),
             display_name: team.display_name.unwrap_or_else(|| team.name.clone()),
             name: team.name,
             description: team.description.unwrap_or_default(),

@@ -181,12 +181,30 @@ async fn update_team_privacy(
 }
 
 async fn restore_team(
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
+) -> ApiResult<Json<mm::Team>> {
+    let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(status_ok())
+    ensure_team_admin_or_system_manage(&state, team_id, &auth).await?;
+    // Verify team exists and is archived (deleted_at IS NOT NULL)
+    let team: Team = sqlx::query_as("SELECT * FROM teams WHERE id = $1")
+        .bind(team_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+    if team.deleted_at.is_none() {
+        return Err(crate::error::AppError::BadRequest(
+            "Team is not archived".to_string(),
+        ));
+    }
+    let restored: Team =
+        sqlx::query_as("UPDATE teams SET deleted_at = NULL WHERE id = $1 RETURNING *")
+            .bind(team_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(Json(restored.into()))
 }
 
 async fn get_team_by_name(
