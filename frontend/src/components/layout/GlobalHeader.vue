@@ -1,27 +1,36 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
-import { Bell, Search, HelpCircle, LogOut, Smile, Shield, User, Check, Menu, ChevronDown, ChevronUp } from 'lucide-vue-next';
+import { Bell, Search, HelpCircle, LogOut, Smile, Shield, User, Check, Menu, ChevronDown, ChevronUp, ClipboardList } from 'lucide-vue-next';
 import { useAuthStore } from '../../stores/auth';
 import { useUIStore } from '../../stores/ui';
 import SearchModal from '../modals/SearchModal.vue';
+import QuickSwitcherModal from '../navigation/QuickSwitcherModal.vue';
+import { useQuickSwitcher } from '../../composables/useQuickSwitcher';
+import type { QuickSwitcherItem } from '../../composables/useQuickSwitcher';
 import SetStatusModal from '../modals/SetStatusModal.vue';
 import RcAvatar from '../ui/RcAvatar.vue';
 import NotificationsDropdown from './NotificationsDropdown.vue';
+import ActivityFeed from '../activity/ActivityFeed.vue';
 import { useConfigStore } from '../../stores/config';
 import { usePresenceStore } from '../../features/presence';
 import { useUnreadStore } from '../../stores/unreads';
 import { useBreakpoints } from '../../composables/useBreakpoints';
+import { activityService } from '../../features/activity/services/activityService';
+import { useActivityStore } from '../../features/activity/stores/activityStore';
 
 const auth = useAuthStore();
 const ui = useUIStore();
 const configStore = useConfigStore();
 const presenceStore = usePresenceStore();
 const unreadStore = useUnreadStore();
+const activityStore = useActivityStore();
+const activityUnreadCount = computed(() => activityStore.unreadCount);
 const router = useRouter();
 const { isMobile } = useBreakpoints();
 
 const showSearch = ref(false);
+const quickSwitcher = useQuickSwitcher();
 const showUserMenu = ref(false);
 const showSetStatus = ref(false);
 const showNotifications = ref(false);
@@ -40,9 +49,14 @@ if (auth.user) {
 function handleKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault();
-    showSearch.value = true;
+    quickSwitcher.toggle();
   }
   if (e.key === 'Escape') {
+    if (quickSwitcher.isOpen.value) {
+      e.stopPropagation();
+      quickSwitcher.close();
+      return;
+    }
     showSearch.value = false;
     showUserMenu.value = false;
     showDndSubmenu.value = false;
@@ -137,6 +151,16 @@ const dndDurations = [
 const siteInitial = computed(() => {
   return configStore.siteConfig.site_name?.charAt(0).toUpperCase() || 'R';
 });
+
+function openActivityFeed() {
+  activityService.openFeed();
+}
+
+function handleQuickSwitcherSelect(item: QuickSwitcherItem) {
+  quickSwitcher.addRecentItem(item.id);
+  router.push(item.to);
+  quickSwitcher.close();
+}
 </script>
 
 <template>
@@ -234,11 +258,28 @@ const siteInitial = computed(() => {
         />
         
         <!-- Click outside backdrop -->
-        <div 
-          v-if="showNotifications" 
-          class="fixed inset-0 z-40" 
+        <div
+          v-if="showNotifications"
+          class="fixed inset-0 z-40"
           @click="showNotifications = false"
         />
+      </div>
+
+      <!-- Activity Feed button -->
+      <div class="relative">
+        <button
+          class="p-1.5 rounded hover:bg-bg-surface-2 transition-colors relative"
+          title="Activity Feed"
+          @click="openActivityFeed"
+        >
+          <ClipboardList class="w-5 h-5" />
+          <span
+            v-if="activityUnreadCount > 0"
+            class="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-0.5"
+          >
+            {{ activityUnreadCount > 99 ? '99+' : activityUnreadCount }}
+          </span>
+        </button>
       </div>
 
       <!-- User Menu -->
@@ -402,8 +443,20 @@ const siteInitial = computed(() => {
 
     <!-- Search Modal -->
     <SearchModal :show="showSearch" @close="showSearch = false" />
-    
+
+    <!-- Quick Switcher Modal -->
+    <QuickSwitcherModal
+      :is-open="quickSwitcher.isOpen.value"
+      :items="quickSwitcher.allItems.value"
+      :recent-items="quickSwitcher.recentItems.value"
+      @select="handleQuickSwitcherSelect"
+      @close="quickSwitcher.close()"
+    />
+
     <!-- Set Status Modal -->
     <SetStatusModal :show="showSetStatus" @close="showSetStatus = false" />
   </header>
+
+  <!-- Activity Feed Panel -->
+  <ActivityFeed />
 </template>

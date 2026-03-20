@@ -96,6 +96,7 @@ pub struct PostResponse {
     // User info from JOIN
     pub username: Option<String>,
     pub avatar_url: Option<String>,
+    #[serde(skip)] // Email is sensitive PII - do not expose in API responses
     pub email: Option<String>,
     // reply_count: Option<i64> - Removed, using direct field
     #[sqlx(skip)]
@@ -108,4 +109,15 @@ pub struct PostResponse {
     pub client_msg_id: Option<String>,
     #[sqlx(default)]
     pub seq: i64,
+}
+
+/// Response for thread endpoint
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadResponse {
+    /// Order of post IDs (parent first, then replies chronologically)
+    pub order: Vec<String>,
+    /// Map of post ID to post data
+    pub posts: std::collections::HashMap<String, PostResponse>,
+    /// Cursor for pagination (null if no more replies)
+    pub next_cursor: Option<String>,
 }

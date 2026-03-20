@@ -38,6 +38,35 @@ use view::{view_channel, view_channel_for_user};
 
 const KEYCLOAK_GROUP_SOURCE: &str = "plugin_keycloak";
 
+/// Verify that the caller is either a system admin or a channel admin.
+/// Returns the membership row on success so callers can avoid a second query.
+async fn ensure_channel_admin_or_system_manage(
+    state: &AppState,
+    channel_id: Uuid,
+    auth: &MmAuthUser,
+) -> ApiResult<()> {
+    if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Ok(());
+    }
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM channel_members WHERE channel_id = $1 AND user_id = $2",
+    )
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    match role.as_deref() {
+        Some("admin") | Some("channel_admin") | Some("team_admin") => Ok(()),
+        Some(_) => Err(AppError::Forbidden(
+            "Channel admin privileges required".to_string(),
+        )),
+        None => Err(AppError::Forbidden(
+            "Not a member of this channel".to_string(),
+        )),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/channels/{channel_id}/posts", get(get_posts))
@@ -1237,16 +1266,7 @@ async fn update_channel(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Verify membership
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     let input: UpdateChannelRequest = parse_body(&headers, &body, "Invalid channel update")?;
 
@@ -1283,16 +1303,8 @@ async fn delete_channel(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Verify membership (should be admin but simplified for now)
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only channel admins or system admins may delete a channel
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     // Soft delete the channel
     sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE id = $1")
@@ -1469,16 +1481,29 @@ async fn add_channel_member(
     let user_id = parse_mm_or_uuid(&input.user_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
 
-    // Verify caller is member of the channel
-    let _caller_member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Get channel to check type and verify caller can add members
+    let channel: Option<Channel> = sqlx::query_as("SELECT * FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let channel = channel.ok_or_else(|| AppError::NotFound("Channel not found".to_string()))?;
+
+    // For private channels, only channel admins or system admins may add members.
+    // Public channels allow any member to add others.
+    if channel.channel_type == crate::models::channel::ChannelType::Private {
+        ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
+    } else {
+        // For public/direct/group channels, verify caller is a member
+        let _caller_member: crate::models::ChannelMember =
+            sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
+                .bind(channel_id)
+                .bind(auth.user_id)
+                .fetch_optional(&state.db)
+                .await?
+                .ok_or_else(|| {
+                    crate::error::AppError::Forbidden("Not a member of this channel".to_string())
+                })?;
+    }
 
     // Add the user
     sqlx::query(
@@ -1546,17 +1571,9 @@ async fn remove_channel_member(
     let user_id = parse_mm_or_uuid(&path.user_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
 
-    // Verify caller is member of the channel (or is the user being removed)
+    // Users may remove themselves; to remove others, channel or system admin is required
     if auth.user_id != user_id {
-        let _caller_member: crate::models::ChannelMember =
-            sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-                .bind(channel_id)
-                .bind(auth.user_id)
-                .fetch_optional(&state.db)
-                .await?
-                .ok_or_else(|| {
-                    crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-                })?;
+        ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
     }
 
     let team_id: Option<Uuid> = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
@@ -1681,15 +1698,8 @@ async fn update_channel_member_roles(
     let user_id = parse_mm_or_uuid(&path.user_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
 
-    let _caller_member: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only channel admins or system admins may change member roles
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     let role = if input.roles.contains("channel_admin") {
         "channel_admin"
@@ -1782,7 +1792,8 @@ async fn get_posts(
                    u.username, u.avatar_url, u.email
             FROM posts p
             LEFT JOIN users u ON p.user_id = u.id
-            WHERE p.channel_id = $1 
+            WHERE p.channel_id = $1
+              AND p.deleted_at IS NULL
               AND (p.created_at >= $2 OR p.edited_at >= $2)
             ORDER BY p.created_at ASC
             LIMIT $3
@@ -1949,23 +1960,47 @@ async fn get_posts(
 
 async fn search_channels_compat(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Json(input): Json<HashMap<String, String>>,
 ) -> ApiResult<Json<Vec<mm::Channel>>> {
     let term = input.get("term").cloned().unwrap_or_default();
-    let team_id_str = input.get("team_id").cloned();
+    let team_id = input
+        .get("team_id")
+        .and_then(|s| parse_mm_or_uuid(s));
 
-    let mut sql = "SELECT * FROM channels WHERE name ILIKE $1".to_string();
-    if let Some(tid_str) = team_id_str {
-        if let Some(tid) = parse_mm_or_uuid(&tid_str) {
-            sql.push_str(&format!(" AND team_id = '{}'", tid));
-        }
-    }
-
-    let channels: Vec<Channel> = sqlx::query_as(&sql)
+    // Restrict results to channels the caller is a member of, scoped to team if provided.
+    // System admins see all channels without the membership restriction.
+    let channels: Vec<Channel> = if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        sqlx::query_as(
+            r#"
+            SELECT * FROM channels
+            WHERE name ILIKE $1
+              AND ($2::uuid IS NULL OR team_id = $2)
+            ORDER BY name
+            LIMIT 100
+            "#,
+        )
         .bind(format!("%{}%", term))
+        .bind(team_id)
         .fetch_all(&state.db)
-        .await?;
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT c.* FROM channels c
+            JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = $2
+            WHERE c.name ILIKE $1
+              AND ($3::uuid IS NULL OR c.team_id = $3)
+            ORDER BY c.name
+            LIMIT 100
+            "#,
+        )
+        .bind(format!("%{}%", term))
+        .bind(auth.user_id)
+        .bind(team_id)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     Ok(Json(channels.into_iter().map(|c| c.into()).collect()))
 }
@@ -1992,16 +2027,7 @@ async fn patch_channel(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Verify membership
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     let channel: Channel = sqlx::query_as(
         r#"
@@ -2041,16 +2067,8 @@ async fn update_channel_privacy(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Verify membership (should be admin)
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only channel admins or system admins may change channel privacy
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     let channel_type = match input.privacy.as_str() {
         "O" => "public",
@@ -2082,16 +2100,8 @@ async fn restore_channel(
     let channel_id = parse_mm_or_uuid(&channel_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
 
-    // Verify the user was a member (even if channel is deleted)
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only channel admins or system admins may restore a deleted channel
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     let channel: Channel = sqlx::query_as(
         r#"UPDATE channels SET deleted_at = NULL, updated_at = NOW() WHERE id = $1 RETURNING *"#,
@@ -2122,16 +2132,12 @@ async fn move_channel(
     let new_team_id = parse_mm_or_uuid(&input.team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
 
-    // Verify membership in original channel
-    let _membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only system admins may move a channel between teams
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "System admin privileges required to move channels between teams".to_string(),
+        ));
+    }
 
     // Verify membership in new team
     let is_team_member: bool = sqlx::query_scalar(
@@ -2179,16 +2185,8 @@ async fn update_channel_member_scheme_roles(
     let target_user_id = parse_mm_or_uuid(&user_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid user_id".to_string()))?;
 
-    // Verify the caller is an admin of this channel
-    let _caller_membership: crate::models::ChannelMember =
-        sqlx::query_as("SELECT * FROM channel_members WHERE channel_id = $1 AND user_id = $2")
-            .bind(channel_id)
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| {
-                crate::error::AppError::Forbidden("Not a member of this channel".to_string())
-            })?;
+    // Only channel admins or system admins may change member scheme roles
+    ensure_channel_admin_or_system_manage(&state, channel_id, &auth).await?;
 
     // Update the target user's role based on scheme_admin
     let new_role = if input.scheme_admin {

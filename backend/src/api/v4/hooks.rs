@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
 }
 use crate::api::v4::extractors::MmAuthUser;
 use crate::api::AppState;
+use crate::auth::policy::permissions;
 use crate::error::{ApiResult, AppError};
 use crate::mattermost_compat::{
     id::{encode_mm_id, parse_mm_or_uuid},
@@ -43,6 +44,41 @@ use crate::mattermost_compat::{
 use crate::models::{IncomingWebhook, OutgoingWebhook};
 use axum::extract::Path;
 use uuid::Uuid;
+
+/// Check if user can manage a webhook (creator or system admin)
+async fn can_manage_incoming_hook(
+    state: &AppState,
+    hook_id: Uuid,
+    auth: &MmAuthUser,
+) -> ApiResult<bool> {
+    if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Ok(true);
+    }
+    let creator_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT creator_id FROM incoming_webhooks WHERE id = $1"
+    )
+    .bind(hook_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(creator_id == Some(auth.user_id))
+}
+
+async fn can_manage_outgoing_hook(
+    state: &AppState,
+    hook_id: Uuid,
+    auth: &MmAuthUser,
+) -> ApiResult<bool> {
+    if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Ok(true);
+    }
+    let creator_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT creator_id FROM outgoing_webhooks WHERE id = $1"
+    )
+    .bind(hook_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(creator_id == Some(auth.user_id))
+}
 
 #[derive(serde::Deserialize)]
 pub struct CreateIncomingRequest {
@@ -87,11 +123,24 @@ pub async fn create_incoming_hook(
     let channel_id = parse_mm_or_uuid(&input.channel_id)
         .ok_or_else(|| AppError::Validation("Invalid channel_id".to_string()))?;
 
-    // Get team_id for the channel
+    // Get team_id for the channel and verify the caller is a member
     let team_id: Uuid = sqlx::query_scalar("SELECT team_id FROM channels WHERE id = $1")
         .bind(channel_id)
         .fetch_one(&state.db)
         .await?;
+
+    let is_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)",
+    )
+    .bind(channel_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !is_member {
+        return Err(AppError::Forbidden(
+            "Not a member of this channel".to_string(),
+        ));
+    }
 
     let hook: IncomingWebhook = sqlx::query_as(
         r#"
@@ -115,23 +164,50 @@ pub async fn create_incoming_hook(
 
 pub async fn list_incoming_hooks(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Query(query): Query<HooksQuery>,
 ) -> ApiResult<Json<Vec<mm::IncomingWebhook>>> {
-    let mut sql = "SELECT * FROM incoming_webhooks WHERE 1=1".to_string();
-    if let Some(ref tid_str) = query.team_id {
-        if let Some(tid) = parse_mm_or_uuid(tid_str) {
-            sql.push_str(&format!(" AND team_id = '{}'", tid));
+    // List only hooks the user can manage: created by them or all if system admin
+    let hooks: Vec<IncomingWebhook> = if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        if let Some(ref tid_str) = query.team_id {
+            let tid = parse_mm_or_uuid(tid_str);
+            if let Some(tid) = tid {
+                sqlx::query_as("SELECT * FROM incoming_webhooks WHERE team_id = $1 LIMIT $2 OFFSET $3")
+                    .bind(tid)
+                    .bind(query.per_page)
+                    .bind(query.page * query.per_page)
+                    .fetch_all(&state.db).await?
+            } else {
+                vec![]
+            }
+        } else {
+            sqlx::query_as("SELECT * FROM incoming_webhooks LIMIT $1 OFFSET $2")
+                .bind(query.per_page)
+                .bind(query.page * query.per_page)
+                .fetch_all(&state.db).await?
         }
-    }
-
-    sql.push_str(&format!(
-        " LIMIT {} OFFSET {}",
-        query.per_page,
-        query.page * query.per_page
-    ));
-
-    let hooks: Vec<IncomingWebhook> = sqlx::query_as(&sql).fetch_all(&state.db).await?;
+    } else {
+        // Regular users can only see hooks they created
+        if let Some(ref tid_str) = query.team_id {
+            let tid = parse_mm_or_uuid(tid_str);
+            if let Some(tid) = tid {
+                sqlx::query_as("SELECT * FROM incoming_webhooks WHERE creator_id = $1 AND team_id = $2 LIMIT $3 OFFSET $4")
+                    .bind(auth.user_id)
+                    .bind(tid)
+                    .bind(query.per_page)
+                    .bind(query.page * query.per_page)
+                    .fetch_all(&state.db).await?
+            } else {
+                vec![]
+            }
+        } else {
+            sqlx::query_as("SELECT * FROM incoming_webhooks WHERE creator_id = $1 LIMIT $2 OFFSET $3")
+                .bind(auth.user_id)
+                .bind(query.per_page)
+                .bind(query.page * query.per_page)
+                .fetch_all(&state.db).await?
+        }
+    };
 
     Ok(Json(hooks.into_iter().map(map_incoming_hook).collect()))
 }
@@ -141,6 +217,13 @@ pub async fn create_outgoing_hook(
     auth: MmAuthUser,
     Json(input): Json<CreateOutgoingRequest>,
 ) -> ApiResult<Json<mm::OutgoingWebhook>> {
+    // Validate callback URLs to prevent SSRF
+    for url in &input.callback_urls {
+        if !crate::services::webhooks::is_valid_callback_url(url) {
+            return Err(AppError::BadRequest(format!("Invalid callback URL (SSRF risk): {}", url)));
+        }
+    }
+
     let team_id = parse_mm_or_uuid(&input.team_id)
         .ok_or_else(|| AppError::Validation("Invalid team_id".to_string()))?;
 
@@ -172,23 +255,50 @@ pub async fn create_outgoing_hook(
 
 pub async fn list_outgoing_hooks(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Query(query): Query<HooksQuery>,
 ) -> ApiResult<Json<Vec<mm::OutgoingWebhook>>> {
-    let mut sql = "SELECT * FROM outgoing_webhooks WHERE 1=1".to_string();
-    if let Some(ref tid_str) = query.team_id {
-        if let Some(tid) = parse_mm_or_uuid(tid_str) {
-            sql.push_str(&format!(" AND team_id = '{}'", tid));
+    // List only hooks the user can manage: created by them or all if system admin
+    let hooks: Vec<OutgoingWebhook> = if auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        if let Some(ref tid_str) = query.team_id {
+            let tid = parse_mm_or_uuid(tid_str);
+            if let Some(tid) = tid {
+                sqlx::query_as("SELECT * FROM outgoing_webhooks WHERE team_id = $1 LIMIT $2 OFFSET $3")
+                    .bind(tid)
+                    .bind(query.per_page)
+                    .bind(query.page * query.per_page)
+                    .fetch_all(&state.db).await?
+            } else {
+                vec![]
+            }
+        } else {
+            sqlx::query_as("SELECT * FROM outgoing_webhooks LIMIT $1 OFFSET $2")
+                .bind(query.per_page)
+                .bind(query.page * query.per_page)
+                .fetch_all(&state.db).await?
         }
-    }
-
-    sql.push_str(&format!(
-        " LIMIT {} OFFSET {}",
-        query.per_page,
-        query.page * query.per_page
-    ));
-
-    let hooks: Vec<OutgoingWebhook> = sqlx::query_as(&sql).fetch_all(&state.db).await?;
+    } else {
+        // Regular users can only see hooks they created
+        if let Some(ref tid_str) = query.team_id {
+            let tid = parse_mm_or_uuid(tid_str);
+            if let Some(tid) = tid {
+                sqlx::query_as("SELECT * FROM outgoing_webhooks WHERE creator_id = $1 AND team_id = $2 LIMIT $3 OFFSET $4")
+                    .bind(auth.user_id)
+                    .bind(tid)
+                    .bind(query.per_page)
+                    .bind(query.page * query.per_page)
+                    .fetch_all(&state.db).await?
+            } else {
+                vec![]
+            }
+        } else {
+            sqlx::query_as("SELECT * FROM outgoing_webhooks WHERE creator_id = $1 LIMIT $2 OFFSET $3")
+                .bind(auth.user_id)
+                .bind(query.per_page)
+                .bind(query.page * query.per_page)
+                .fetch_all(&state.db).await?
+        }
+    };
 
     Ok(Json(hooks.into_iter().map(map_outgoing_hook).collect()))
 }
@@ -227,11 +337,16 @@ fn map_outgoing_hook(h: OutgoingWebhook) -> mm::OutgoingWebhook {
 
 async fn get_incoming_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
 ) -> ApiResult<Json<mm::IncomingWebhook>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_incoming_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot access this webhook".to_string()));
+    }
 
     let hook: IncomingWebhook = sqlx::query_as("SELECT * FROM incoming_webhooks WHERE id = $1")
         .bind(id)
@@ -252,12 +367,17 @@ pub struct UpdateIncomingRequest {
 
 async fn update_incoming_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
     Json(input): Json<UpdateIncomingRequest>,
 ) -> ApiResult<Json<mm::IncomingWebhook>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_incoming_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot modify this webhook".to_string()));
+    }
 
     let hook: IncomingWebhook = sqlx::query_as(
         r#"UPDATE incoming_webhooks SET
@@ -278,11 +398,16 @@ async fn update_incoming_hook(
 
 async fn delete_incoming_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_incoming_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot delete this webhook".to_string()));
+    }
 
     sqlx::query("DELETE FROM incoming_webhooks WHERE id = $1")
         .bind(id)
@@ -294,11 +419,16 @@ async fn delete_incoming_hook(
 
 async fn get_outgoing_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
 ) -> ApiResult<Json<mm::OutgoingWebhook>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_outgoing_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot access this webhook".to_string()));
+    }
 
     let hook: OutgoingWebhook = sqlx::query_as("SELECT * FROM outgoing_webhooks WHERE id = $1")
         .bind(id)
@@ -319,12 +449,26 @@ pub struct UpdateOutgoingRequest {
 
 async fn update_outgoing_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
     Json(input): Json<UpdateOutgoingRequest>,
 ) -> ApiResult<Json<mm::OutgoingWebhook>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_outgoing_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot modify this webhook".to_string()));
+    }
+
+    // Validate callback URLs if provided
+    if let Some(ref urls) = input.callback_urls {
+        for url in urls {
+            if !crate::services::webhooks::is_valid_callback_url(url) {
+                return Err(AppError::BadRequest(format!("Invalid callback URL (SSRF risk): {}", url)));
+            }
+        }
+    }
 
     let hook: OutgoingWebhook = sqlx::query_as(
         r#"UPDATE outgoing_webhooks SET
@@ -349,11 +493,16 @@ async fn update_outgoing_hook(
 
 async fn delete_outgoing_hook(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_outgoing_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot delete this webhook".to_string()));
+    }
 
     sqlx::query("DELETE FROM outgoing_webhooks WHERE id = $1")
         .bind(id)
@@ -365,11 +514,16 @@ async fn delete_outgoing_hook(
 
 async fn regen_outgoing_hook_token(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
     Path(hook_id): Path<String>,
 ) -> ApiResult<Json<mm::OutgoingWebhook>> {
     let id = parse_mm_or_uuid(&hook_id)
         .ok_or_else(|| AppError::Validation("Invalid hook_id".to_string()))?;
+
+    // Check ownership/permission
+    if !can_manage_outgoing_hook(&state, id, &auth).await? {
+        return Err(AppError::Forbidden("Cannot modify this webhook".to_string()));
+    }
 
     let new_token = Uuid::new_v4().to_string().replace("-", "");
 

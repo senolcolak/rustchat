@@ -1,5 +1,6 @@
 //! Services module
 
+pub mod activity;
 pub mod auth_config;
 pub mod email_provider;
 pub mod email_service;

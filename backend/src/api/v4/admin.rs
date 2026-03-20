@@ -29,8 +29,14 @@ use crate::services::keycloak_sync;
 
 pub async fn get_audits(
     State(state): State<AppState>,
-    _auth: MmAuthUser,
+    auth: MmAuthUser,
 ) -> ApiResult<Json<Vec<mm::Audit>>> {
+    // Audit logs contain sensitive PII (IP addresses) - restrict to system admins only
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to view audit logs".to_string(),
+        ));
+    }
     let audits: Vec<mm::Audit> = sqlx::query_as(
         r#"
         SELECT id::text, 
@@ -63,6 +69,12 @@ pub async fn test_email_config(
     auth: MmAuthUser,
     Json(payload): Json<TestEmailRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(AppError::Forbidden(
+            "Missing permission to test email configuration".to_string(),
+        ));
+    }
+
     // Get default provider from the new provider system
     let provider_settings: Option<MailProviderSettings> = sqlx::query_as(
         r#"

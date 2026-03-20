@@ -2,6 +2,7 @@
 //!
 //! Provides database entities and DTOs.
 
+pub mod activity;
 pub mod admin_models;
 pub mod api_key;
 pub mod call;
@@ -31,6 +32,7 @@ pub use channel_category::*;
 pub use custom_profile_attribute::*;
 pub use scheduled_post::*;
 
+pub use activity::*;
 pub use admin_models::*;
 pub use api_key::*;
 pub use entity::*;

@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     http::HeaderMap,
@@ -135,21 +135,39 @@ async fn handle_socket(
         let _ = sender.send(Message::Text(msg.into())).await;
     }
 
+    // Channel to signal close frame should be sent
+    let (should_close_tx, mut should_close_rx) = tokio::sync::watch::channel(false);
+
     // Spawn task to forward hub messages to client
     let mut send_task = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    if sender.send(Message::Text(msg.into())).await.is_err() {
+            tokio::select! {
+                msg_result = rx.recv() => {
+                    match msg_result {
+                        Ok(msg) => {
+                            if sender.send(Message::Text(msg.into())).await.is_err() {
+                                break;
+                            }
+                            metrics::record_ws_message("sent", "hub_event");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            metrics::record_ws_dropped("hub_receiver_lagged", skipped);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = should_close_rx.changed() => {
+                    if *should_close_rx.borrow() {
+                        // Send close frame for auth expiry
+                        let close_frame = CloseFrame {
+                            code: axum::extract::ws::close_code::POLICY,
+                            reason: "Authentication token expired".into(),
+                        };
+                        let _ = sender.send(Message::Close(Some(close_frame))).await;
                         break;
                     }
-                    metrics::record_ws_message("sent", "hub_event");
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    metrics::record_ws_dropped("hub_receiver_lagged", skipped);
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -216,10 +234,16 @@ async fn handle_socket(
                 token_expires_at = %auth.expires_at,
                 "Closing websocket because authentication token expired"
             );
+            // Signal send_task to send close frame
+            let _ = should_close_tx.send(true);
+            // Give send_task time to send the close frame
+            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(100), &mut send_task).await;
         },
     }
 
-    send_task.abort();
+    if !send_task.is_finished() {
+        send_task.abort();
+    }
     receive_task.abort();
     heartbeat_task.abort();
 

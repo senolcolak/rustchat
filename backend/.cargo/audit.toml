@@ -1,0 +1,34 @@
+# cargo-audit configuration
+# https://github.com/RustSec/rustsec/blob/main/cargo-audit/README.md#configuration
+
+[advisories]
+# Ignore advisories that are not relevant to this project
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack - potential key recovery through timing sidechannels in rsa crate
+    #
+    # Justification:
+    # - The rsa crate is required by jsonwebtoken for OIDC ID token validation (RS256 algorithm)
+    # - OIDC providers (Google, Microsoft, Auth0, etc.) use RS256 for signing ID tokens
+    # - Disabling RSA would break OIDC authentication
+    # - No fixed version available upstream (maintainers working on constant-time implementation)
+    # - Vulnerability is only exploitable during active OIDC token validation (short-lived network operation)
+    # - Project uses HMAC-SHA (HS256) for internal JWTs, not RSA
+    # - Severity: Medium (5.9) - acceptable risk given no alternative available
+    #
+    # Tracking: https://rustsec.org/advisories/RUSTSEC-2023-0071
+    # Action: Remove this ignore when rsa crate releases fixed version
+    "RUSTSEC-2023-0071",
+]
+
+# Threshold for reporting security vulnerabilities
+# - "critical": Only critical vulnerabilities
+# - "high": Critical and high vulnerabilities (default)
+# - "medium": Critical, high, and medium vulnerabilities
+# - "low": All vulnerabilities
+severity_threshold = "medium"
+
+[output]
+# Show dependencies in the output
+deny = []
+quiet = false
+show_tree = true

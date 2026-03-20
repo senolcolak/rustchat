@@ -26,6 +26,7 @@ use crate::middleware::rate_limit::{self, RateLimitConfig};
 use crate::models::{channel::Channel, Team, TeamMember, User};
 use crate::services::oauth_token_exchange::{exchange_code_with_sso_verification, ExchangeError};
 
+mod activity;
 mod preferences;
 mod sidebar_categories;
 
@@ -222,6 +223,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             put(update_category_order),
         )
         .route("/users/{user_id}/groups", get(get_user_groups))
+        .merge(activity::routes())
 }
 
 #[derive(Deserialize)]
@@ -1891,6 +1893,7 @@ enum UsersByIdsRequest {
 
 async fn get_users_by_ids(
     State(state): State<AppState>,
+    _auth: MmAuthUser,
     headers: HeaderMap,
     Query(_query): Query<std::collections::HashMap<String, String>>,
     body: Bytes,
@@ -2284,7 +2287,7 @@ async fn get_known_users(
     Ok(Json(ids))
 }
 
-async fn get_user_stats(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+async fn get_user_stats(State(state): State<AppState>, _auth: MmAuthUser) -> ApiResult<Json<serde_json::Value>> {
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&state.db)
         .await?;
@@ -2294,8 +2297,9 @@ async fn get_user_stats(State(state): State<AppState>) -> ApiResult<Json<serde_j
 
 async fn get_user_stats_filtered(
     State(state): State<AppState>,
+    auth: MmAuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    get_user_stats(State(state)).await
+    get_user_stats(State(state), auth).await
 }
 
 async fn get_user_group_channels(
@@ -2421,6 +2425,7 @@ enum UsersByUsernamesRequest {
 
 async fn get_users_by_usernames(
     State(state): State<AppState>,
+    _auth: MmAuthUser,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<Vec<mm::User>>> {
@@ -2448,6 +2453,7 @@ async fn get_users_by_usernames(
 
 async fn get_user_by_email(
     State(state): State<AppState>,
+    _auth: MmAuthUser,
     Path(email): Path<String>,
 ) -> ApiResult<Json<mm::User>> {
     let user: User = sqlx::query_as("SELECT * FROM users WHERE email = $1")
@@ -2510,7 +2516,8 @@ async fn update_user_roles(
     Path(user_id): Path<String>,
     Json(input): Json<UserRolesRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.has_permission(&permissions::USER_MANAGE) {
+    // Only system admins can grant system_admin role - prevents org_admin self-escalation
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2634,7 +2641,8 @@ async fn promote_user(
     auth: MmAuthUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth.has_permission(&permissions::USER_MANAGE) {
+    // Only system admins can promote to system_admin - prevents org_admin self-escalation
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
         return Err(AppError::Forbidden("Insufficient permissions".to_string()));
     }
     let user_id = parse_mm_or_uuid(&user_id)
@@ -2682,12 +2690,17 @@ async fn update_user_password(
         .await?;
 
     if user_id != auth.user_id {
-        return Err(AppError::Forbidden(
-            "Cannot change another user's password".to_string(),
-        ));
-    }
-
-    if let Some(current) = input.current_password.as_deref() {
+        // Admins resetting another user's password do not need current_password
+        if !auth.has_permission(&crate::auth::policy::permissions::SYSTEM_MANAGE) {
+            return Err(AppError::Forbidden(
+                "Cannot change another user's password".to_string(),
+            ));
+        }
+    } else {
+        // Self-service: current_password is mandatory
+        let current = input.current_password.as_deref().ok_or_else(|| {
+            AppError::BadRequest("current_password is required".to_string())
+        })?;
         let password_hash = user
             .password_hash
             .as_deref()
