@@ -1221,15 +1221,41 @@ async fn invite_users_to_team_by_email(
 }
 
 async fn import_team(
-    _auth: MmAuthUser,
+    State(_state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
+    mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
     let _team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid import body")?;
-    Ok(status_ok())
+
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(crate::error::AppError::Forbidden(
+            "Only system admins can import teams".to_string(),
+        ));
+    }
+
+    // Extract the file field from multipart
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        crate::error::AppError::BadRequest(format!("Failed to read multipart: {}", e))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            let _data = field.bytes().await.map_err(|e| {
+                crate::error::AppError::BadRequest(format!("Failed to read file field: {}", e))
+            })?;
+            // File received; full import not yet implemented
+            break;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "channels": 0,
+        "posts": 0,
+        "users": 0,
+        "errors": [],
+        "status": "Import functionality not yet fully implemented"
+    })))
 }
 
 async fn get_team_by_invite(
@@ -1245,35 +1271,159 @@ async fn get_team_by_invite(
     Ok(Json(team.into()))
 }
 
+#[derive(Deserialize)]
+struct UpdateTeamSchemeRequest {
+    scheme_id: String,
+}
+
 async fn get_team_scheme(
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_member(&state, team_id, auth.user_id).await?;
+
+    let row: (Option<Uuid>,) =
+        sqlx::query_as("SELECT scheme_id FROM teams WHERE id = $1 AND deleted_at IS NULL")
+            .bind(team_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| crate::error::AppError::NotFound("Team not found".to_string()))?;
+
+    let scheme_id = row.0;
+
     Ok(Json(serde_json::json!({
         "team_id": encode_mm_id(team_id),
-        "scheme_id": "",
+        "scheme_id": scheme_id.map(encode_mm_id),
+        "scheme_name": serde_json::Value::Null,
+        "default_team_admin_role": "team_admin",
+        "default_team_user_role": "team_user",
+        "default_team_guest_role": "team_guest",
     })))
 }
 
 async fn update_team_scheme(
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
-    Json(_input): Json<serde_json::Value>,
+    Json(input): Json<UpdateTeamSchemeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
+    let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    if !auth.has_permission(&permissions::SYSTEM_MANAGE) {
+        return Err(crate::error::AppError::Forbidden(
+            "System admin required".to_string(),
+        ));
+    }
+
+    let new_scheme_id: Option<Uuid> = if input.scheme_id.is_empty() {
+        None
+    } else {
+        Some(
+            parse_mm_or_uuid(&input.scheme_id)
+                .ok_or_else(|| crate::error::AppError::BadRequest("Invalid scheme_id".to_string()))?,
+        )
+    };
+
+    let rows_affected =
+        sqlx::query("UPDATE teams SET scheme_id = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL")
+            .bind(new_scheme_id)
+            .bind(team_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected();
+
+    if rows_affected == 0 {
+        return Err(crate::error::AppError::NotFound("Team not found".to_string()));
+    }
+
     Ok(status_ok())
 }
 
+#[derive(Deserialize)]
+struct MembersMinusGroupQuery {
+    group_id: Option<String>,
+    channel_id: Option<String>,
+}
+
 async fn get_team_members_minus_group_members(
-    _auth: MmAuthUser,
+    State(state): State<AppState>,
+    auth: MmAuthUser,
     Path(team_id): Path<String>,
+    Query(query): Query<MembersMinusGroupQuery>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let _team_id = parse_mm_or_uuid(&team_id)
+    let team_id = parse_mm_or_uuid(&team_id)
         .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
-    Ok(Json(vec![]))
+
+    ensure_team_member(&state, team_id, auth.user_id).await?;
+
+    #[derive(sqlx::FromRow)]
+    struct MemberRow {
+        user_id: Uuid,
+        username: String,
+        email: String,
+        team_role: String,
+    }
+
+    let rows: Vec<MemberRow> = if let Some(ref group_id_str) = query.group_id {
+        let group_id = parse_mm_or_uuid(group_id_str)
+            .ok_or_else(|| crate::error::AppError::BadRequest("Invalid group_id".to_string()))?;
+        sqlx::query_as(
+            r#"
+            SELECT u.id AS user_id, u.username, u.email, tm.role AS team_role
+            FROM team_members tm
+            JOIN users u ON tm.user_id = u.id
+            WHERE tm.team_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM group_members gm
+                  WHERE gm.group_id = $2 AND gm.user_id = u.id
+              )
+            "#,
+        )
+        .bind(team_id)
+        .bind(group_id)
+        .fetch_all(&state.db)
+        .await?
+    } else if let Some(ref channel_id_str) = query.channel_id {
+        let channel_id = parse_mm_or_uuid(channel_id_str)
+            .ok_or_else(|| crate::error::AppError::BadRequest("Invalid channel_id".to_string()))?;
+        sqlx::query_as(
+            r#"
+            SELECT u.id AS user_id, u.username, u.email, tm.role AS team_role
+            FROM team_members tm
+            JOIN users u ON tm.user_id = u.id
+            WHERE tm.team_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM channel_members cm
+                  WHERE cm.channel_id = $2 AND cm.user_id = u.id
+              )
+            "#,
+        )
+        .bind(team_id)
+        .bind(channel_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        vec![]
+    };
+
+    let result = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "user_id": encode_mm_id(r.user_id),
+                "username": r.username,
+                "email": r.email,
+                "role": r.team_role,
+            })
+        })
+        .collect();
+
+    Ok(Json(result))
 }
 
 async fn get_team_image(
