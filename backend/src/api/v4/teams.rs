@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -57,7 +57,12 @@ pub fn router() -> Router<AppState> {
             "/teams/{team_id}/members/{user_id}/schemeRoles",
             put(update_team_member_scheme_roles),
         )
-        .route("/teams/{team_id}/image", get(get_team_image))
+        .route(
+            "/teams/{team_id}/image",
+            get(get_team_image)
+                .post(update_team_icon)
+                .delete(delete_team_icon),
+        )
         .route("/teams/{team_id}/members/me", get(get_team_member_me))
         .route("/teams/{team_id}/invite/email", post(invite_users_to_team))
         .route(
@@ -1069,22 +1074,150 @@ async fn invite_users_to_team(
     Ok(Json(responses))
 }
 
+#[derive(Deserialize)]
+struct InviteGuestsRequest {
+    emails: Vec<String>,
+    #[serde(default)]
+    channels: Vec<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
 async fn invite_guests_to_team(
-    _auth: MmAuthUser,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid invite body")?;
-    Ok(status_ok())
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(team_id): Path<String>,
+    Json(input): Json<InviteGuestsRequest>,
+) -> ApiResult<Json<Vec<EmailInviteResponse>>> {
+    let team_id = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_admin_or_system_manage(&state, team_id, &auth).await?;
+
+    // TODO: channel restrictions and email sending
+    let _ = &input.channels;
+    let _ = &input.message;
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+    let mut responses = Vec::new();
+
+    for email in &input.emails {
+        if !email.contains('@') {
+            continue;
+        }
+
+        // Check for existing active invitation for this email
+        let existing: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT token, expires_at FROM team_invitations \
+             WHERE team_id = $1 AND email = $2 AND used = false AND expires_at > NOW()",
+        )
+        .bind(team_id)
+        .bind(email)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (token, inv_expires_at) = if let Some((t, ea)) = existing {
+            (t, ea)
+        } else {
+            let token = generate_invite_token();
+            sqlx::query(
+                "INSERT INTO team_invitations \
+                 (team_id, user_id, invited_by, email, token, invitation_type, expires_at) \
+                 VALUES ($1, NULL, $2, $3, $4, 'guest', $5) \
+                 ON CONFLICT (team_id, email) WHERE used = false \
+                 DO UPDATE SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at, updated_at = NOW()",
+            )
+            .bind(team_id)
+            .bind(auth.user_id)
+            .bind(email)
+            .bind(&token)
+            .bind(expires_at)
+            .execute(&state.db)
+            .await?;
+            (token, expires_at)
+        };
+
+        responses.push(EmailInviteResponse {
+            email: email.clone(),
+            token,
+            expires_at: inv_expires_at.timestamp(),
+        });
+    }
+
+    Ok(Json(responses))
+}
+
+#[derive(Deserialize)]
+struct InviteByEmailRequest {
+    team_id: String,
+    emails: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct EmailInviteResponse {
+    email: String,
+    token: String,
+    expires_at: i64,
 }
 
 async fn invite_users_to_team_by_email(
-    _auth: MmAuthUser,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let _value: serde_json::Value = parse_body(&headers, &body, "Invalid invite body")?;
-    Ok(status_ok())
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Json(input): Json<InviteByEmailRequest>,
+) -> ApiResult<Json<Vec<EmailInviteResponse>>> {
+    let team_id = parse_mm_or_uuid(&input.team_id)
+        .ok_or_else(|| crate::error::AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_member(&state, team_id, auth.user_id).await?;
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+    let mut responses = Vec::new();
+
+    for email in &input.emails {
+        // Validate email contains '@'
+        if !email.contains('@') {
+            continue;
+        }
+
+        // Check for existing active invitation
+        let existing: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT token, expires_at FROM team_invitations \
+             WHERE team_id = $1 AND email = $2 AND used = false AND expires_at > NOW()",
+        )
+        .bind(team_id)
+        .bind(email)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let (token, inv_expires_at) = if let Some((t, ea)) = existing {
+            (t, ea)
+        } else {
+            let token = generate_invite_token();
+            sqlx::query(
+                "INSERT INTO team_invitations \
+                 (team_id, user_id, invited_by, email, token, invitation_type, expires_at) \
+                 VALUES ($1, NULL, $2, $3, $4, 'member', $5) \
+                 ON CONFLICT (team_id, email) WHERE used = false \
+                 DO UPDATE SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at, updated_at = NOW()",
+            )
+            .bind(team_id)
+            .bind(auth.user_id)
+            .bind(email)
+            .bind(&token)
+            .bind(expires_at)
+            .execute(&state.db)
+            .await?;
+            (token, expires_at)
+        };
+
+        responses.push(EmailInviteResponse {
+            email: email.clone(),
+            token,
+            expires_at: inv_expires_at.timestamp(),
+        });
+    }
+
+    Ok(Json(responses))
 }
 
 async fn import_team(
@@ -1157,6 +1290,107 @@ async fn get_team_image(
     ];
 
     Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], PNG_1X1))
+}
+
+/// POST /teams/{team_id}/image - Upload/update the team icon
+async fn update_team_icon(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(team_id): Path<String>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<serde_json::Value>> {
+    let team_uuid = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_admin_or_system_manage(&state, team_uuid, &auth).await?;
+
+    const MAX_SIZE: usize = 1024 * 1024; // 1 MB
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        let filename = field.file_name().map(|s| s.to_string());
+        let content_type = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let is_image_field = name == "image" || name.is_empty();
+        let has_filename = filename.is_some();
+        let is_image_type = content_type.starts_with("image/");
+
+        if !(is_image_field && (is_image_type || has_filename)) {
+            continue;
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Read error: {}", e)))?
+            .to_vec();
+
+        if data.is_empty() {
+            continue;
+        }
+
+        if data.len() > MAX_SIZE {
+            return Err(AppError::BadRequest(
+                "Image exceeds maximum size of 1MB".to_string(),
+            ));
+        }
+
+        // Detect format from magic bytes and validate
+        let ext = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+            "png"
+        } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "jpg"
+        } else if data.starts_with(b"GIF") {
+            "gif"
+        } else {
+            return Err(AppError::BadRequest(
+                "Unsupported image format. Supported formats: PNG, JPEG, GIF".to_string(),
+            ));
+        };
+
+        let timestamp = chrono::Utc::now().timestamp();
+        // TODO: Store file to actual object storage
+        let icon_path = format!("teams/{}/icon.{}.{}", team_uuid, timestamp, ext);
+
+        sqlx::query("UPDATE teams SET icon_path = $1 WHERE id = $2")
+            .bind(&icon_path)
+            .bind(team_uuid)
+            .execute(&state.db)
+            .await?;
+
+        return Ok(Json(serde_json::json!({"status": "OK"})));
+    }
+
+    Err(AppError::BadRequest(
+        "No image field found in upload".to_string(),
+    ))
+}
+
+/// DELETE /teams/{team_id}/image - Remove the team icon
+async fn delete_team_icon(
+    State(state): State<AppState>,
+    auth: MmAuthUser,
+    Path(team_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let team_uuid = parse_mm_or_uuid(&team_id)
+        .ok_or_else(|| AppError::BadRequest("Invalid team_id".to_string()))?;
+
+    ensure_team_admin_or_system_manage(&state, team_uuid, &auth).await?;
+
+    // TODO: Delete file from storage when object storage is wired up
+    sqlx::query("UPDATE teams SET icon_path = NULL WHERE id = $1")
+        .bind(team_uuid)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(serde_json::json!({"status": "OK"})))
 }
 
 /// POST /teams/{team_id}/channels/search - Search channels in a team
