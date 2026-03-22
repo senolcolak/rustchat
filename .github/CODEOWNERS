@@ -1,0 +1,32 @@
+# CODEOWNERS
+# Reference: docs/superpowers/specs/2026-03-22-governance-layer-design.md
+#
+# IMPORTANT: Replace all @<placeholder> values with real GitHub usernames before
+# enabling branch protection enforcement. Resolve from the repository maintainer list.
+
+# Backend (Rust API server + push proxy)
+/backend/src/                    @<backend-owner>
+/backend/src/a2a/                @<backend-owner>
+/backend/migrations/             @<backend-owner>
+/push-proxy/                     @<backend-owner>
+
+# Frontend (Vue 3 SPA)
+/frontend/                       @<frontend-owner>
+
+# Mattermost Compatibility (always requires compat reviewer co-approval)
+/backend/compat/                 @<backend-owner> @<compat-reviewer>
+/backend/src/api/v4/             @<backend-owner> @<compat-reviewer>
+/backend/src/mattermost_compat/  @<backend-owner> @<compat-reviewer>
+/tools/mm-compat/                @<backend-owner> @<compat-reviewer>
+
+# CI / Infrastructure
+/.github/                        @<infra-owner>
+/docker/                         @<infra-owner>
+/scripts/                        @<infra-owner>
+
+# Governance (project owner only)
+/.governance/                    @<project-owner>
+
+# Docs and agent guidelines
+/docs/                           @<project-owner>
+/AGENTS.md                       @<project-owner>
