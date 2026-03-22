@@ -283,18 +283,17 @@ rustchat/
 └── previous-analyses/  Historical compatibility analysis artifacts
 ```
 
-## Key Documentation
+## Documentation
 
-- [Architecture](docs/architecture.md)
-- [WebSocket Architecture](docs/websocket_architecture.md)
-- [Calls Deployment Modes](docs/calls_deployment_modes.md)
-- [Running Environment](docs/running_environment.md)
-- [Operations Runbook](docs/operations-runbook.md)
-- [Security Deployment Guide](docs/security-deployment-guide.md)
-- [Admin Guide](docs/admin_guide.md)
-- [User Guide](docs/user_guide.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security Policy](SECURITY.md)
+| Document | Purpose |
+|---|---|
+| [Architecture Overview](docs/architecture/architecture-overview.md) | System components, data flow, key design decisions |
+| [Agent Operating Model](docs/agent-operating-model.md) | LLM agent roles, skills, workflow, scope boundaries |
+| [Compatibility Scope](docs/compatibility-scope.md) | Mattermost client compatibility commitments and coverage |
+| [Testing Model](docs/testing-model.md) | Test layers, CI gates, requirements by risk tier |
+| [Ownership Map](docs/ownership-map.md) | Code ownership, review routing, agent boundaries |
+| [Repo Current State](docs/repo-current-state.md) | Current version, services, known gaps |
+| [Target Operating Model](docs/target-operating-model.md) | Goals, applied operating model, deferred items |
 
 ## License
 
