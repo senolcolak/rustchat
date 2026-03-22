@@ -9,7 +9,7 @@
 
 rustchat aims to be a **production-ready, self-hosted team collaboration server** that:
 
-1. Is **fully Mattermost-compatible** for mobile and desktop clients (41/41 mobile endpoints)
+1. Is **fully Mattermost-compatible** for mobile and desktop clients (target: 41/41; currently 39/41 — see Section 3)
 2. Is **safe to develop with LLM agents** — every area has clear ownership, risk classification, and scope boundaries
 3. Has **high test confidence** — elevated and architectural changes require mandatory test coverage
 4. Supports **horizontal scaling** — stateless API servers, Redis pub/sub, connection pooling

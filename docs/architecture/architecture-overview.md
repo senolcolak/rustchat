@@ -1,7 +1,7 @@
 # Architecture Overview
 
 **Last updated:** 2026-03-22
-**Source docs consolidated:** `docs/architecture.md`, `docs/websocket_architecture.md`, `docs/calls_deployment_modes.md`
+**Source docs consolidated:** `docs/architecture.md`, `docs/websocket_architecture.md`
 
 ---
 
