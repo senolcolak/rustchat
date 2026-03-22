@@ -28,7 +28,7 @@
 /docker/                         @<infra-owner>
 /scripts/                        @<infra-owner>
 
-# Governance (project owner only)
+# Governance (architectural tier — requires 2 reviewers per risk-tiers.yml)
 /.governance/                    @<project-owner> @<backend-owner>
 
 # Docs and agent guidelines
