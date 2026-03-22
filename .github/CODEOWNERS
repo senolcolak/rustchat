@@ -4,6 +4,9 @@
 # IMPORTANT: Replace all @<placeholder> values with real GitHub usernames before
 # enabling branch protection enforcement. Resolve from the repository maintainer list.
 
+# Default owner for all unmatched paths
+*                                @<project-owner>
+
 # Backend (Rust API server + push proxy)
 /backend/src/                    @<backend-owner>
 /backend/src/a2a/                @<backend-owner>
@@ -21,11 +24,12 @@
 
 # CI / Infrastructure
 /.github/                        @<infra-owner>
+/.github/CODEOWNERS              @<infra-owner> @<project-owner>
 /docker/                         @<infra-owner>
 /scripts/                        @<infra-owner>
 
 # Governance (project owner only)
-/.governance/                    @<project-owner>
+/.governance/                    @<project-owner> @<backend-owner>
 
 # Docs and agent guidelines
 /docs/                           @<project-owner>
