@@ -1,36 +1,33 @@
 # CODEOWNERS
 # Reference: docs/superpowers/specs/2026-03-22-governance-layer-design.md
-#
-# IMPORTANT: Replace all @<placeholder> values with real GitHub usernames before
-# enabling branch protection enforcement. Resolve from the repository maintainer list.
 
 # Default owner for all unmatched paths
-*                                @<project-owner>
+*                                @senolcolak
 
 # Backend (Rust API server + push proxy)
-/backend/src/                    @<backend-owner>
-/backend/src/a2a/                @<backend-owner>
-/backend/migrations/             @<backend-owner>
-/push-proxy/                     @<backend-owner>
+/backend/src/                    @senolcolak
+/backend/src/a2a/                @senolcolak
+/backend/migrations/             @senolcolak
+/push-proxy/                     @senolcolak
 
 # Frontend (Vue 3 SPA)
-/frontend/                       @<frontend-owner>
+/frontend/                       @senolcolak
 
 # Mattermost Compatibility (always requires compat reviewer co-approval)
-/backend/compat/                 @<backend-owner> @<compat-reviewer>
-/backend/src/api/v4/             @<backend-owner> @<compat-reviewer>
-/backend/src/mattermost_compat/  @<backend-owner> @<compat-reviewer>
-/tools/mm-compat/                @<backend-owner> @<compat-reviewer>
+/backend/compat/                 @senolcolak @zoorpha
+/backend/src/api/v4/             @senolcolak @zoorpha
+/backend/src/mattermost_compat/  @senolcolak @zoorpha
+/tools/mm-compat/                @senolcolak @zoorpha
 
 # CI / Infrastructure
-/.github/                        @<infra-owner>
-/.github/CODEOWNERS              @<infra-owner> @<project-owner>
-/docker/                         @<infra-owner>
-/scripts/                        @<infra-owner>
+/.github/                        @senolcolak
+/.github/CODEOWNERS              @senolcolak @zoorpha
+/docker/                         @senolcolak
+/scripts/                        @senolcolak
 
 # Governance (architectural tier — requires 2 reviewers per risk-tiers.yml)
-/.governance/                    @<project-owner> @<backend-owner>
+/.governance/                    @senolcolak @zoorpha
 
 # Docs and agent guidelines
-/docs/                           @<project-owner>
-/AGENTS.md                       @<project-owner>
+/docs/                           @senolcolak
+/AGENTS.md                       @senolcolak
