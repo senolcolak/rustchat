@@ -59,7 +59,7 @@ pub async fn get_max_simultaneous_connections(state: &AppState) -> usize {
 
     match value.and_then(|val| val.parse::<i64>().ok()) {
         Some(max) if max > 0 => max as usize,
-        _ => 5,
+        _ => 20,
     }
 }
 
