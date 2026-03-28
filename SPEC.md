@@ -1,3 +1,259 @@
+# SPEC: CI Required-Check Alignment for Frontend-Only PRs (2026-03-28)
+
+## Problem Statement
+
+PR #64 is mergeable, approved, and green on all visible checks, but GitHub still reports it as blocked.
+
+The root cause is a mismatch between branch protection and workflow triggering:
+
+1. `main` requires a check named `cargo check + test`.
+2. That check is produced by `.github/workflows/backend-ci.yml`.
+3. `backend-ci.yml` is path-filtered to only run when `backend/**` or the workflow file itself changes.
+4. Frontend-only PRs therefore never emit the required `cargo check + test` status, so GitHub blocks merge even when the PR is otherwise healthy.
+
+This is a workflow contract bug. It creates false-negative merge blocks for frontend-only work and makes CI feel arbitrary.
+
+## Goals
+
+1. Ensure required backend checks always produce a final status on pull requests targeting `main`.
+2. Preserve the existing heavy backend validation when backend code actually changes.
+3. Avoid forcing frontend-only PRs to touch backend files just to satisfy branch protection.
+4. Keep the fix understandable for future contributors and maintainers.
+
+## Non-Goals
+
+1. No change to backend application code.
+2. No reduction in backend validation for PRs that do touch backend paths.
+3. No redesign of the entire GitHub Actions setup in this pass.
+4. No branch-protection admin change as the primary fix.
+
+## Scope and Contract Impact
+
+In scope:
+- `.github/workflows/backend-ci.yml`
+- optionally `.github/workflows/ci.yml` only if needed to avoid duplicate/confusing status behavior
+- verification against PR check behavior for frontend-only changes
+
+Contract impact:
+- No product/API contract change.
+- Repository workflow contract change:
+  - PRs to `main` should always emit `cargo check + test`
+  - backend-touching PRs should still run the full backend job
+  - frontend-only PRs should emit a fast pass/skip-equivalent success instead of no status at all
+
+Out of scope:
+- changing required check names on `main`
+- removing branch protection requirements
+- broader CI optimization unrelated to this required-check mismatch
+
+## Current Implementation Findings
+
+1. `.github/workflows/backend-ci.yml` defines the required `cargo check + test` status.
+2. That workflow is currently restricted with:
+   - `pull_request.branches: [main]`
+   - `pull_request.paths: ["backend/**", ".github/workflows/backend-ci.yml"]`
+3. Branch protection on `main` still requires `cargo check + test`, regardless of whether the workflow was skipped by path filtering.
+4. `.github/workflows/ci.yml` always runs and already provides `Test` and `Build`, which is why frontend-only PRs can appear fully green while still being blocked.
+
+## Implementation Outline
+
+### Phase 1: Make Backend CI Always Report on PRs
+
+Target file:
+- `.github/workflows/backend-ci.yml`
+
+Work:
+- remove or replace the current top-level `paths` filter for pull requests
+- add a lightweight change-detection step inside the workflow
+- split behavior so the workflow always starts, but only runs the expensive backend validation when backend-relevant files changed
+
+Expected outcome:
+- GitHub always receives a `cargo check + test` conclusion for PRs to `main`
+- frontend-only PRs stop getting silently blocked by a missing required status
+
+### Phase 2: Keep Backend Validation Strict When Needed
+
+Target file:
+- `.github/workflows/backend-ci.yml`
+
+Work:
+- gate the heavy job steps on whether backend-related files changed
+- for frontend-only PRs, produce a successful no-op path with a clear log message like “No backend changes detected; backend validation skipped”
+
+Expected outcome:
+- backend-touching PRs still run full `cargo check`, `clippy`, and `cargo test`
+- frontend-only PRs satisfy required status without burning unnecessary CI time
+
+### Phase 3: Verify Check Behavior
+
+Work:
+- validate the workflow YAML locally as far as feasible
+- verify the logic by reviewing the rendered diff and expected job conditions
+- after merge/push, confirm that a frontend-only PR shows `cargo check + test` as successful rather than missing
+
+Expected outcome:
+- branch protection and workflow triggering become aligned
+
+## Proposed Implementation Shape
+
+Preferred shape:
+- keep one job named `cargo check + test`
+- add an early “detect changed files” step
+- run full backend commands only when backend-related files changed
+- otherwise run a short success step that exits 0
+
+Why this shape:
+- preserves the exact required check name already configured in branch protection
+- avoids creating a second required-check mismatch
+- keeps the workflow behavior obvious in the Actions UI
+
+## Verification Plan
+
+Automated:
+- YAML review of `.github/workflows/backend-ci.yml`
+- if feasible, run a lightweight syntax sanity check locally
+
+Post-push verification:
+- `gh pr checks <pr-number>`
+- `gh pr view <pr-number> --json mergeStateStatus,statusCheckRollup`
+
+Manual expectation:
+- on a frontend-only PR, `cargo check + test` should appear and pass with a skip/no-op message
+- on a backend PR, `cargo check + test` should run the full backend validation path
+
+## Expected Result
+
+After this fix:
+- frontend-only PRs no longer get blocked by a missing backend required check
+- backend PRs keep the same strict validation standard
+- merge readiness becomes predictable and consistent with what GitHub visibly shows
+
+---
+
+# SPEC: Emoji Picker Overlay and Clickability Fix (2026-03-28)
+
+## Problem Statement
+
+The shared emoji picker is not behaving consistently across RustChat. Users can open it in some places, but in others it appears detached from the trigger, sits in the wrong place, or becomes effectively unclickable because another UI surface closes or visually covers it.
+
+Current investigation points to two concrete causes:
+
+1. `frontend/src/components/atomic/EmojiPicker.vue` only computes floating position when it receives an `anchorEl`, but not every caller passes one.
+2. `frontend/src/components/channel/MessageItem.vue` closes the hover action strip on `mouseleave`, which also closes the teleported emoji picker while the pointer moves toward it.
+
+This makes emoji interactions feel flaky, especially for reactions and status editing.
+
+## Goals
+
+1. Make the emoji picker open in a reliable, clickable position everywhere it is used.
+2. Fix the message-reaction emoji flow so the picker remains usable instead of closing while the pointer moves into it.
+3. Standardize emoji-picker integration so future callers follow one pattern.
+4. Keep the change scoped to UI behavior and shared picker rendering only.
+
+## Non-Goals
+
+1. No backend or API changes.
+2. No new emoji dataset or emoji search-by-name improvements in this pass.
+3. No redesign of all popovers/menus in the app.
+4. No changes to emoji reaction business logic beyond making the picker usable.
+
+## Scope and Contract Impact
+
+In scope:
+- `frontend/src/components/atomic/EmojiPicker.vue`
+- `frontend/src/components/channel/MessageItem.vue`
+- `frontend/src/components/settings/StatusPicker.vue`
+- `frontend/src/components/composer/MattermostComposer.vue`
+- `frontend/src/components/composer/MessageComposer.vue` only if a small consistency update is useful
+
+Contract impact:
+- No server/API contract change.
+- No intended change to stored preferences or message/reaction schemas.
+- User-visible contract change: emoji pickers should anchor consistently and remain clickable instead of appearing underneath or disappearing unexpectedly.
+
+Out of scope for this phase:
+- custom emoji management
+- autocomplete/name-search redesign
+- broad modal/token cleanup outside the picker itself
+
+## Current Implementation Findings
+
+1. `frontend/src/components/atomic/EmojiPicker.vue` teleports to `body` and uses `position: fixed`, which is good for escaping local overflow and stacking contexts.
+2. That same picker returns early from `updatePosition()` when `anchorEl` is missing, so callers without an anchor open an unpositioned floating panel.
+3. `frontend/src/components/composer/MessageComposer.vue` already passes an anchor element correctly.
+4. `frontend/src/components/channel/MessageItem.vue`, `frontend/src/components/settings/StatusPicker.vue`, and `frontend/src/components/composer/MattermostComposer.vue` currently open the picker without passing an anchor.
+5. `frontend/src/components/channel/MessageItem.vue` also closes `showEmojiPicker` on row `mouseleave`, which conflicts with a teleported picker rendered outside that row.
+
+## Implementation Outline
+
+### Phase 1: Shared Picker Positioning Contract
+
+Target file:
+- `frontend/src/components/atomic/EmojiPicker.vue`
+
+Work:
+- keep the picker teleported to `body`
+- make the positioning contract explicit and robust when shown
+- retokenize the picker surface away from hardcoded `gray-*` / `dark:*` classes while touching it
+
+Expected outcome:
+- the shared picker has one reliable floating behavior and one consistent visual system
+
+### Phase 2: Fix Missing Anchor Integrations
+
+Target files:
+- `frontend/src/components/channel/MessageItem.vue`
+- `frontend/src/components/settings/StatusPicker.vue`
+- `frontend/src/components/composer/MattermostComposer.vue`
+
+Work:
+- add trigger refs and pass `anchorEl` to the shared picker everywhere
+- align each caller to the same open/close wiring pattern already used in `MessageComposer.vue`
+
+Expected outcome:
+- emoji pickers open from the correct trigger instead of appearing detached
+
+### Phase 3: Fix Reaction Hover Dismissal
+
+Target file:
+- `frontend/src/components/channel/MessageItem.vue`
+
+Work:
+- stop closing the picker simply because the message row loses hover while the picker is open
+- keep message actions usable without leaving stray open overlays behind
+
+Expected outcome:
+- reaction emoji selection becomes clickable and stable
+
+## Verification Plan
+
+Automated:
+- `cd frontend && npm run build`
+
+Manual:
+- `cd frontend && npm run dev`
+- verify emoji picker behavior in:
+  - channel message hover reactions
+  - main composer
+  - Mattermost composer
+  - status picker
+- check these outcomes:
+  - picker appears adjacent to the clicked trigger
+  - picker stays open long enough to click an emoji
+  - picker does not render underneath nearby overlays or clipped containers
+  - outside click and Escape still close it cleanly
+
+## Expected Result
+
+After this fix, emoji interactions should feel dependable instead of brittle.
+
+The user should feel:
+- “the picker opens where I expect”
+- “I can actually click the emoji”
+- “reactions and status editing no longer fight the UI”
+
+---
+
 # SPEC: Theme Cleanup and Unused File Removal (2026-03-28)
 
 ## Problem Statement
@@ -68,6 +324,345 @@ Expected result after implementation:
 - The repository has one clear theme source of truth.
 - The unused theme feature files are gone.
 - Frontend behavior remains unchanged after build verification.
+
+---
+
+# SPEC: Settings, Profile, and Admin Normalization Pass (2026-03-28)
+
+## Problem Statement
+
+The app shell now has a stronger design language, but the rest of the authenticated product still feels split between two visual systems.
+
+The biggest remaining gaps are:
+
+1. Profile and notification surfaces still use large amounts of hardcoded `gray-*`, `blue-*`, `red-*`, and `dark:*` classes instead of the shared theme tokens.
+2. The settings modal frame is improved, but several tab contents still read like older utility forms rather than part of the same “Focused Warm Utility” product.
+3. The admin dashboard is especially behind the new system. It still looks like a generic template with bright stat-card colors and mismatched surface treatment.
+4. Theme choices can still feel less trustworthy on these surfaces because typography, hierarchy, and contrast are not yet consistently driven by the active token system.
+
+This creates a product-level inconsistency: the shell suggests a calm, branded collaboration tool, while settings and admin still suggest a generic internal dashboard.
+
+## Goals
+
+1. Bring the highest-traffic settings and profile surfaces into the same visual system as the redesigned shell.
+2. Remove hardcoded color drift on theme-sensitive surfaces so theme selection remains readable and coherent.
+3. Give settings a clearer hierarchy and calmer, more intentional structure.
+4. Establish the admin dashboard as the first normalized admin surface so future admin work has a concrete reference.
+5. Keep the rollout incremental and low-risk by focusing on a small set of high-leverage authenticated views.
+
+## Non-Goals
+
+1. No backend or API contract changes.
+2. No new preferences, settings behavior, or theme schema changes.
+3. No repo-wide admin redesign in one pass.
+4. No redesign of every settings tab if the value is low.
+5. No changes to unrelated dirty files or previously completed shell work.
+
+## Scope and Contract Impact
+
+In scope:
+- `frontend/src/components/settings/SettingsModal.vue`
+- `frontend/src/components/settings/notifications/NotificationsTab.vue`
+- `frontend/src/components/settings/profile/ProfileTab.vue`
+- `frontend/src/views/settings/ProfileView.vue`
+- `frontend/src/views/admin/AdminDashboard.vue`
+- small supporting shared setting components only if needed for consistency
+
+Contract impact:
+- No server/API contract change.
+- No intended change to notification behavior, profile-save behavior, or admin data behavior.
+- User-visible contract change: settings, profile, and admin surfaces should feel visually aligned with the shell, with better contrast, clearer hierarchy, and more reliable theme readability.
+
+Out of scope for this phase:
+- broad admin section redesign beyond the dashboard
+- calls/settings behavior changes
+- removing legacy files unless they directly block this normalization pass
+
+## Current Implementation Findings
+
+1. `frontend/src/components/settings/SettingsModal.vue` already has the right frame and token usage, but the content hierarchy still depends heavily on each tab implementation. The wrapper is ahead of several child surfaces.
+2. `frontend/src/components/settings/notifications/NotificationsTab.vue` still uses hardcoded white/gray/blue/red surfaces and input styling. It needs retokenization and stronger section hierarchy, especially for expanded rows and permission callouts.
+3. `frontend/src/components/settings/profile/ProfileTab.vue` still uses many hardcoded gray and dark-mode classes in alert banners, section containers, headings, avatar controls, and read-only fields.
+4. `frontend/src/views/settings/ProfileView.vue` is in better shape, but it should be checked alongside the modal profile tab to ensure typography, field styling, and feedback states remain aligned.
+5. `frontend/src/views/admin/AdminDashboard.vue` remains the most visually outdated authenticated surface. Bright per-card colors and generic white/dark cards break the “Focused Warm Utility” system and make admin feel disconnected from the rest of the product.
+
+## Design Translation Principles
+
+Derived from `DESIGN.md` and the first shell pass:
+
+1. **One product, not two**
+   - settings and admin should feel like extensions of the same product shell
+   - utility views should inherit the same calm, trustworthy tone
+
+2. **Token-first theming**
+   - avoid direct Tailwind gray/dark styling on theme-sensitive surfaces
+   - use shared surface, text, border, and semantic tokens so themes stay readable
+
+3. **Calm hierarchy**
+   - section headers should guide, not shout
+   - bright accent colors should be reserved for meaningful state, not default decoration
+
+4. **Operational credibility**
+   - admin should feel structured and trustworthy
+   - collaboration settings should feel approachable without becoming playful
+
+## Implementation Outline
+
+### Phase 1: Settings Modal Consistency
+
+Target files:
+- `frontend/src/components/settings/SettingsModal.vue`
+- `frontend/src/components/settings/notifications/NotificationsTab.vue`
+- `frontend/src/components/settings/profile/ProfileTab.vue`
+
+Work:
+- normalize hardcoded surfaces, borders, and text styles to shared tokens
+- strengthen section framing and row hierarchy inside notifications/profile
+- make permission, success, and error states feel branded and readable across themes
+- improve settings content density so rows feel easier to scan without becoming cramped
+
+Expected outcome:
+- settings feels like one coherent product surface instead of a modern shell wrapping older inner panels
+
+### Phase 2: Profile Surface Alignment
+
+Target files:
+- `frontend/src/components/settings/profile/ProfileTab.vue`
+- `frontend/src/views/settings/ProfileView.vue`
+
+Work:
+- align profile typography, alert treatment, avatar controls, and field framing
+- ensure both profile entry points share the same visual logic for editable vs read-only content
+- verify that theme and font choices still read well on both profile surfaces
+
+Expected outcome:
+- profile feels deliberate and trustworthy whether accessed from the modal or the dedicated settings route
+
+### Phase 3: Admin Dashboard Normalization
+
+Target file:
+- `frontend/src/views/admin/AdminDashboard.vue`
+
+Work:
+- replace bright generic stat-card colors with a restrained, token-driven hierarchy
+- redesign admin cards to feel more structured, monochrome, and operational
+- improve empty/loading/health-state readability without breaking semantic signal
+
+Expected outcome:
+- admin feels like RustChat admin, not a borrowed dashboard template
+
+## Verification Plan
+
+Automated:
+- `cd frontend && npm run build`
+
+Manual:
+- `cd frontend && npm run dev`
+- verify these surfaces in at least `Light`, `Dark`, `Futuristic`, and `High Contrast`:
+  - Settings -> Notifications
+  - Settings -> Profile
+  - `/settings/profile`
+  - `/admin` or the admin dashboard route
+- check these outcomes:
+  - text remains readable across theme changes
+  - alerts and permission callouts keep clear contrast
+  - settings rows feel visually related to the new shell
+  - admin cards and health indicators feel calmer and more intentional without losing status clarity
+
+## Proposed Rollout Order
+
+1. Settings modal internals
+2. Profile alignment
+3. Admin dashboard normalization
+
+This order gives the fastest product-wide consistency win while keeping the admin work contained to one reference surface.
+
+## Expected Result
+
+After this phase, RustChat should feel much less like a redesigned shell wrapped around legacy interiors.
+
+The user should feel:
+- “settings are easier to read and trust”
+- “theme choices still look intentional here”
+- “admin belongs to the same product”
+
+---
+
+# SPEC: App Shell Redesign Plan from DESIGN.md (2026-03-28)
+
+## Problem Statement
+
+RustChat now has a clear design system in `DESIGN.md`, but the authenticated shell still does not fully express it.
+
+The structure is already correct. The product feels familiar and usable. The problem is that the shell still behaves like a collection of competent components instead of one strong product surface.
+
+The main gaps are:
+
+1. The global header still gives too much visual weight to generic utility chrome, especially search, and not enough to product identity and current working context.
+2. The left-side navigation stack is functional, but the team rail and channel sidebar do not yet feel like a crisp scanning system with deliberate hierarchy.
+3. The center canvas still has weak low-activity and empty-state presence, so the main workspace can feel visually abandoned.
+4. Shell surfaces are more consistent than before, but they still need one end-to-end pass to align with the new “Focused Warm Utility” system in `DESIGN.md`.
+
+## Goals
+
+1. Translate `DESIGN.md` into a concrete implementation plan for the authenticated shell.
+2. Make the first viewport feel more like a product and less like a neutral internal tool.
+3. Improve scan speed and context clarity in the header, left navigation, and message canvas.
+4. Keep the rollout incremental and verifiable, without rewriting the whole UI at once.
+
+## Non-Goals
+
+1. No backend or API changes.
+2. No marketing-site redesign.
+3. No repo-wide reskin of every settings, admin, or modal surface in this phase.
+4. No new information architecture for channels, threads, or right sidebar workflows.
+5. No new persisted preferences or theme schema changes.
+
+## Scope and Contract Impact
+
+In scope:
+- `frontend/src/components/layout/AppShell.vue`
+- `frontend/src/components/layout/GlobalHeader.vue`
+- `frontend/src/components/layout/TeamRail.vue`
+- `frontend/src/components/layout/ChannelSidebar.vue`
+- `frontend/src/components/channel/ChannelHeader.vue`
+- `frontend/src/components/channel/MessageList.vue`
+- small supporting shared pieces only if needed for consistency
+
+Contract impact:
+- No server/API contract change.
+- No intended behavioral change to channel data, calls, settings, or permissions.
+- User-visible contract change: the authenticated shell should have stronger identity, clearer hierarchy, and more intentional empty/loading states.
+
+Out of scope for this phase:
+- broad admin redesign
+- deep modal redesign outside shell-adjacent surfaces
+- removing old files unless directly required for shell correctness
+
+## Current Implementation Findings
+
+1. `frontend/src/components/layout/AppShell.vue` already has the correct structural layout, but it reads visually flat. The frame is functional, not yet distinct.
+2. `frontend/src/components/layout/GlobalHeader.vue` now has a better logo treatment, but search still dominates the center and the header still feels like generic utility chrome first, brand/context second.
+3. `frontend/src/components/layout/ChannelSidebar.vue` has good channel grouping logic, but the visual language is still more “list of rows” than “high-confidence collaboration navigator”.
+4. `frontend/src/components/channel/ChannelHeader.vue` works well functionally, but the current context hierarchy is still light. Channel name, topic, and actions need stronger prioritization.
+5. `frontend/src/components/channel/MessageList.vue` already has date separators and a usable empty state, but the empty/loading states still need more intentional visual anchoring so the center panel does not feel empty by accident.
+
+## Design Translation Principles
+
+Derived directly from `DESIGN.md`:
+
+1. **Slack ease + Mattermost trust**
+   - approachable, low-friction interaction
+   - serious, dependable visual tone
+
+2. **Focused Warm Utility**
+   - warm neutrals
+   - restrained accents
+   - stronger context than decoration
+
+3. **Content-first shell**
+   - users should orient in under a second
+   - brand supports the workspace, it does not fight it
+
+4. **Minimal-functional motion**
+   - transitions help comprehension only
+   - no ornamental flourishes
+
+## Implementation Outline
+
+### Phase 1: Frame and Header
+
+Target files:
+- `frontend/src/components/layout/AppShell.vue`
+- `frontend/src/components/layout/GlobalHeader.vue`
+
+Work:
+- reduce the visual dominance of the search field
+- strengthen brand and workspace presence in the first viewport
+- improve spacing and separation between brand, search, notifications, and user controls
+- make the shell frame feel more deliberate through subtle surface contrast and hierarchy, not heavier decoration
+
+Expected outcome:
+- users immediately understand “where they are” and “what product this is” before utility chrome takes over
+
+### Phase 2: Left Navigation Hierarchy
+
+Target files:
+- `frontend/src/components/layout/TeamRail.vue`
+- `frontend/src/components/layout/ChannelSidebar.vue`
+
+Work:
+- tighten selection, unread, mention, and category hierarchy
+- improve scanning contrast between favorites, standard channels, DMs, and controls
+- make the team rail feel like a compact identity/navigation rail rather than a thin leftover column
+
+Expected outcome:
+- faster navigation scanning
+- stronger sense of structure and activity on the left side of the app
+
+### Phase 3: Current Context Bar
+
+Target file:
+- `frontend/src/components/channel/ChannelHeader.vue`
+
+Work:
+- increase emphasis on channel name and current context
+- de-emphasize secondary actions slightly while keeping them easy to hit
+- make topic handling more intentional, especially when absent or truncated
+
+Expected outcome:
+- clearer context handoff between sidebar selection and center canvas
+
+### Phase 4: Center Canvas Presence
+
+Target file:
+- `frontend/src/components/channel/MessageList.vue`
+
+Work:
+- redesign loading and empty states to feel intentional and branded
+- strengthen the visual anchor of the center column when a channel is quiet
+- preserve message readability and timeline clarity
+
+Expected outcome:
+- the main workspace still feels alive and deliberate even when message volume is low
+
+## Verification Plan
+
+Automated:
+- `cd frontend && npm run build`
+
+Manual:
+- `cd frontend && npm run dev`
+- verify the authenticated shell in these states:
+  - active team with unread channels
+  - active channel with topic
+  - active channel without topic
+  - empty channel / no messages
+  - mobile drawer open
+  - right sidebar open
+- check these outcomes:
+  - header identity and context are clearer than before
+  - left-nav scanning is faster and unread state is easier to parse
+  - center panel no longer feels abandoned in empty or quiet states
+  - no regression in touch targets or mobile shell behavior
+
+## Proposed Rollout Order
+
+1. Header and frame
+2. Left navigation
+3. Channel header
+4. Message canvas states
+
+This order matters because it changes the first impression quickly while keeping the risk low and the verification obvious.
+
+## Expected Result
+
+After this phase, RustChat should still feel familiar to Slack and Mattermost users, but more ownable, warmer, and more intentional.
+
+The user should feel:
+- “this is easy to read”
+- “this feels like a serious collaboration product”
+- “the product has a point of view”
 
 ---
 

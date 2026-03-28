@@ -1,5 +1,127 @@
 # Task Plan
 
+## 2026-03-28 CI Required-Check Alignment for Frontend-Only PRs
+
+### Task
+- Fix the GitHub Actions/branch-protection mismatch that blocks frontend-only PRs even when all visible checks are green.
+- Ensure the required `cargo check + test` status is always reported on PRs to `main`.
+- Preserve full backend validation when backend-related files actually change.
+
+### Implementation Status
+- [x] Removed the top-level PR path filter from [backend-ci.yml](/Users/scolak/Projects/rustchat/.github/workflows/backend-ci.yml) so the workflow always starts for PRs targeting `main`.
+- [x] Added an internal backend-change detection job that compares the current ref against the PR base or push predecessor SHA.
+- [x] Split heavy backend validation into a separate conditional job that only runs when backend-related files change.
+- [x] Added a lightweight always-reporting gate job named `cargo check + test` that passes with a clear skip message for frontend-only changes and fails if backend validation fails when required.
+
+### Verification Status
+1. `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/backend-ci.yml"); puts "YAML ok"'`
+- Result: PASS
+
+### Manual Verification Commands
+1. `gh pr checks 64`
+2. Open the GitHub Actions run for a frontend-only PR and confirm:
+- `cargo check + test` appears as a completed successful check
+- the log shows `No backend-related changes detected; backend validation skipped.`
+3. Open a backend-touching PR and confirm the `Backend validation` job runs full cargo validation before the `cargo check + test` gate concludes successfully.
+
+### Readiness
+- Ready for PR validation on GitHub Actions.
+- Known limitation: local verification here is limited to YAML parsing; the full behavior depends on a live Actions run.
+
+## 2026-03-28 Emoji Picker Overlay and Clickability Fix
+
+### Task
+- Fix shared emoji picker positioning so every trigger opens the overlay from the correct anchor.
+- Stop the message reaction picker from becoming unclickable when moving the pointer from the message row into the teleported picker.
+- Correct the Mattermost composer so the picker inserts emoji glyphs directly instead of treating them like `:shortcode:` autocomplete values.
+
+### Implementation Status
+- [x] Retokenized `frontend/src/components/atomic/EmojiPicker.vue` to the active design token system while keeping the teleported fixed-position overlay behavior.
+- [x] Added anchored picker positioning and hover-safe close handling in `frontend/src/components/channel/MessageItem.vue` so reaction pickers stay clickable.
+- [x] Added anchored picker positioning in `frontend/src/components/settings/StatusPicker.vue`.
+- [x] Fixed `frontend/src/components/composer/MattermostComposer.vue` so picker selections insert glyphs at the cursor position and keep focus/selection behavior intact.
+
+### Verification Status
+1. `cd frontend && npm run build`
+- Result: PASS
+- Note: existing Vite warning about `frontend/src/stores/calls.ts` being both dynamically and statically imported still appears, but the build completes successfully.
+
+### Manual Verification Commands
+1. `cd frontend && npm run dev`
+2. Open a channel, hover a message, click the reaction smile button, and move the pointer into the picker. Verify the picker stays open and every emoji remains clickable.
+3. Open the status picker and confirm the emoji overlay opens aligned to the trigger and remains above the modal/backdrop.
+4. Switch to the Mattermost composer, insert an emoji from the picker, and verify the actual emoji glyph is inserted at the cursor without breaking typing focus.
+
+### Readiness
+- Ready for user acceptance testing.
+- Remaining follow-up: if we want emoji name search instead of glyph-only filtering, that should be a separate UX improvement pass.
+
+## 2026-03-28 Settings, Profile, and Admin Normalization Pass
+
+### Task
+- Normalize the highest-traffic settings, profile, and first admin surfaces to the same design system as the redesigned app shell.
+- Remove remaining hardcoded color drift from theme-sensitive settings views.
+- Improve hierarchy and readability so theme choices remain trustworthy across settings and admin workflows.
+
+### Implementation Status
+- [x] Added stronger personal-context framing in `frontend/src/components/settings/SettingsModal.vue`.
+- [x] Retokenized and restructured `frontend/src/components/settings/notifications/NotificationsTab.vue` with calmer rows, callouts, and action treatment.
+- [x] Normalized `frontend/src/components/settings/profile/ProfileTab.vue` to the shared token system and improved section hierarchy.
+- [x] Aligned the dedicated settings page in `frontend/src/views/settings/ProfileView.vue` with section cards for identity, appearance, and typography.
+- [x] Redesigned `frontend/src/views/admin/AdminDashboard.vue` to use restrained token-driven stat cards and operational health panels.
+
+### Verification Status
+1. `cd frontend && npm run build`
+- Result: PASS
+- Note: existing Vite warning about `frontend/src/stores/calls.ts` being both dynamically and statically imported still appears, but the build completes successfully.
+
+### Manual Verification Commands
+1. `cd frontend && npm run dev`
+2. Open `Settings -> Notifications` and verify expanded rows, badges, callouts, and actions remain readable in `Light`, `Dark`, `Futuristic`, and `High Contrast`.
+3. Open `Settings -> Profile` and confirm the avatar controls, read-only email field, banners, and status section stay visually consistent with the shell.
+4. Open `/settings/profile` and verify the identity, appearance, and typography cards remain readable on both desktop and mobile widths.
+5. Open the admin dashboard and confirm stats, health indicators, and instance panels feel calmer while preserving clear service status cues.
+
+### Readiness
+- Ready for user acceptance testing.
+- Remaining follow-up: broaden the same normalization approach to additional admin/settings surfaces if this direction feels right in live use.
+
+## 2026-03-28 Design System and App Shell Redesign
+
+### Task
+- Analyze RustChat’s current product usability and visual language against the standard set by Slack and Mattermost.
+- Establish a concrete design system and product direction for the web UI.
+- Apply the first implementation pass to the authenticated app shell so the product feels more intentional, more usable, and less like generic SaaS.
+
+### Implementation Status
+- [x] Wrote the product design system and design direction to `DESIGN.md`.
+- [x] Added `CLAUDE.md` guidance so future UI work is expected to follow `DESIGN.md`.
+- [x] Redesigned the app frame and shell layering in `frontend/src/components/layout/AppShell.vue`.
+- [x] Rebalanced brand, search, and user-utility hierarchy in `frontend/src/components/layout/GlobalHeader.vue`.
+- [x] Strengthened team rail and channel sidebar scan hierarchy in `frontend/src/components/layout/TeamRail.vue` and `frontend/src/components/layout/ChannelSidebar.vue`.
+- [x] Improved channel context emphasis in `frontend/src/components/channel/ChannelHeader.vue`.
+- [x] Reworked loading and empty-channel states in `frontend/src/components/channel/MessageList.vue` so quiet channels feel intentional instead of abandoned.
+
+### Verification Status
+1. `cd frontend && npm run build`
+- Result: PASS
+
+### Manual Verification Commands
+1. `cd frontend && npm run dev`
+2. Open the authenticated app shell and verify:
+   - global header brand/context feel stronger than search chrome
+   - team rail and channel sidebar are faster to scan
+   - selected channel state is clear without feeling loud
+   - channel header communicates current context cleanly
+   - empty or quiet channels feel intentional, not broken
+3. Check responsive behavior:
+   - mobile left drawer
+   - desktop shell with RHS open
+   - channel with and without topic text
+
+### Readiness
+- Ready for user acceptance testing.
+- Remaining follow-up: carry the same system into broader settings, modal, and admin surfaces over time.
 ## 2026-03-28 Theme Source-of-Truth Fix + Brand/Typography Second Pass
 
 ### Task
